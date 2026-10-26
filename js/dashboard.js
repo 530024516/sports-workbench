@@ -37,19 +37,45 @@ function getWeekDates() {
   return dates;
 }
 
-// ===== 数据 =====
-const students = DB.getStudents();
-const fitnessRecords = DB.getFitnessRecords();
-const lessonPlans = DB.getLessonPlans();
+// ===== 数据（云端数据就绪后会重新拉取并重绘，见文件末尾）=====
+let students = DB.getStudents();
+let fitnessRecords = DB.getFitnessRecords();
+let lessonPlans = DB.getLessonPlans();
 const weekDates = getWeekDates();
 const todayDow = new Date().getDay();
 const todayDayName = todayDow >= 1 && todayDow <= 5 ? SCHEDULE_DAYS[todayDow - 1] : '';
 
-const pendingLessons = lessonPlans.filter(p => p.status === '待上课');
+let pendingLessons = lessonPlans.filter(p => p.status === '待上课');
 
 let scheduleData = DB.getSchedule();
 let todos = DB.getTodos();
 let currentWeekMode = DB.getWeekMode();
+
+/** 重新从 DB 取数（Store 就绪 / 云端同步完成后调用） */
+function refreshDashboardData() {
+  students = DB.getStudents();
+  fitnessRecords = DB.getFitnessRecords();
+  lessonPlans = DB.getLessonPlans();
+  pendingLessons = lessonPlans.filter(p => p.status === '待上课');
+  scheduleData = DB.getSchedule();
+  todos = DB.getTodos();
+  currentWeekMode = DB.getWeekMode();
+}
+
+/** 只刷新统计数字与欢迎语里的数字，不重建 DOM（避免打断用户操作） */
+function renderDashboardStats() {
+  const setText = (id, value) => {
+    const node = document.getElementById(id);
+    if (node) node.textContent = String(value);
+  };
+  setText('statStudents', students.length);
+  setText('statFitnessRecords', fitnessRecords.length);
+  setText('statLessonPlans', lessonPlans.length);
+  setText('statPendingLessons', pendingLessons.length);
+  setText('statTodayLessons', Object.keys(scheduleData)
+    .filter(k => k.startsWith(currentWeekMode + '::' + todayDayName + '::')).length);
+  setText('statPendingTodos', todos.filter(t => !t.done).length);
+}
 
 // ===== 渲染首页 =====
 content.innerHTML = `
@@ -60,8 +86,8 @@ content.innerHTML = `
       <div>
         <h1 style="font-size:26px;font-weight:800;">欢迎回来，<span id="dashboardGreetingName">${escapeHtml(Layout.getDisplaySettings().teacherName)}</span>！</h1>
         <p style="color:var(--text-secondary);font-size:14px;margin-top:4px;">
-          今天有 <strong style="color:var(--primary);">${Object.keys(scheduleData).filter(k => k.startsWith(currentWeekMode + '::' + todayDayName + '::')).length}</strong> 节课，
-          待办事项 <strong style="color:var(--primary);">${todos.filter(t => !t.done).length}</strong> 项待处理
+          今天有 <strong id="statTodayLessons" style="color:var(--primary);">${Object.keys(scheduleData).filter(k => k.startsWith(currentWeekMode + '::' + todayDayName + '::')).length}</strong> 节课，
+          待办事项 <strong id="statPendingTodos" style="color:var(--primary);">${todos.filter(t => !t.done).length}</strong> 项待处理
         </p>
       </div>
     </div>
@@ -72,28 +98,28 @@ content.innerHTML = `
     <div class="stat-card fade-in fade-in-delay-1" style="cursor:pointer;" onclick="location.href='students.html'">
       <div class="stat-icon" style="background:var(--primary-100);color:var(--primary);">👥</div>
       <div class="stat-content">
-        <h3>${students.length}</h3>
+        <h3 id="statStudents">${students.length}</h3>
         <p>在校学生总数</p>
       </div>
     </div>
     <div class="stat-card fade-in fade-in-delay-2" style="cursor:pointer;" onclick="location.href='fitness.html'">
       <div class="stat-icon" style="background:var(--info-light);color:#0288D1;">💪</div>
       <div class="stat-content">
-        <h3>${fitnessRecords.length}</h3>
+        <h3 id="statFitnessRecords">${fitnessRecords.length}</h3>
         <p>体测记录条数</p>
       </div>
     </div>
     <div class="stat-card fade-in fade-in-delay-3" style="cursor:pointer;" onclick="location.href='lessons.html'">
       <div class="stat-icon" style="background:var(--success-light);color:var(--success);">📋</div>
       <div class="stat-content">
-        <h3>${lessonPlans.length}</h3>
+        <h3 id="statLessonPlans">${lessonPlans.length}</h3>
         <p>教案总数</p>
       </div>
     </div>
     <div class="stat-card fade-in fade-in-delay-4" style="cursor:pointer;" onclick="location.href='lessons.html'">
       <div class="stat-icon" style="background:var(--warning-light);color:#B8860B;">⏰</div>
       <div class="stat-content">
-        <h3>${pendingLessons.length}</h3>
+        <h3 id="statPendingLessons">${pendingLessons.length}</h3>
         <p>待上课教案</p>
       </div>
     </div>
@@ -454,69 +480,90 @@ function handleDeleteTodo(id) {
 }
 
 // ==================== 图表 ====================
-const gradeCounts = { '优秀': 0, '良好': 0, '及格': 0, '不及格': 0, '正常': 0, '偏瘦': 0, '偏胖': 0 };
-fitnessRecords.forEach(r => {
-  const student = students.find(s => s.id === r.studentId);
-  if (!student) return;
-  const g = DB.getGrade(r.value, r.testType, student.gender);
-  if (gradeCounts[g.level] !== undefined) gradeCounts[g.level]++;
-});
-
-const gradeLabels = Object.keys(gradeCounts).filter(k => gradeCounts[k] > 0);
-const gradeValues = gradeLabels.map(k => gradeCounts[k]);
 const gradeColors = {
   '优秀': '#06A77D', '良好': '#48CAE4', '及格': '#FFB703', '不及格': '#D62828',
   '正常': '#06A77D', '偏瘦': '#FFB703', '偏胖': '#D62828',
 };
 
-new Chart(document.getElementById('chartGrade'), {
-  type: 'doughnut',
-  data: {
-    labels: gradeLabels,
-    datasets: [{
-      data: gradeValues,
-      backgroundColor: gradeLabels.map(l => gradeColors[l] || '#999'),
-      borderWidth: 2,
-      borderColor: '#fff',
-    }]
-  },
-  options: {
-    responsive: true,
-    maintainAspectRatio: false,
-    plugins: {
-      legend: { position: 'bottom', labels: { font: { size: 12 } } },
-    }
-  }
-});
+let gradeChart = null;
+let gradeStudentsChart = null;
 
-const gradeOrder = ['一年级', '二年级', '三年级', '四年级', '五年级', '六年级'];
-const gradeStudentCounts = gradeOrder.map(g => students.filter(s => s.grade === g).length);
+/** 按当前数据重绘两张图（首次和 Store 就绪后各调一次） */
+function renderCharts() {
+  const gradeCounts = { '优秀': 0, '良好': 0, '及格': 0, '不及格': 0, '正常': 0, '偏瘦': 0, '偏胖': 0 };
+  fitnessRecords.forEach(r => {
+    const student = students.find(s => s.id === r.studentId);
+    if (!student) return;
+    const g = DB.getGrade(r.value, r.testType, student.gender);
+    if (gradeCounts[g.level] !== undefined) gradeCounts[g.level]++;
+  });
 
-new Chart(document.getElementById('chartGradeStudents'), {
-  type: 'bar',
-  data: {
-    labels: gradeOrder,
-    datasets: [{
-      label: '学生人数',
-      data: gradeStudentCounts,
-      backgroundColor: 'rgba(232,93,4,0.7)',
-      borderColor: '#E85D04',
-      borderWidth: 2,
-      borderRadius: 6,
-    }]
-  },
-  options: {
-    responsive: true,
-    maintainAspectRatio: false,
-    plugins: { legend: { display: false } },
-    scales: {
-      y: { beginAtZero: true, ticks: { stepSize: 1 } },
+  const gradeLabels = Object.keys(gradeCounts).filter(k => gradeCounts[k] > 0);
+  const gradeValues = gradeLabels.map(k => gradeCounts[k]);
+
+  const gradeOrder = ['一年级', '二年级', '三年级', '四年级', '五年级', '六年级'];
+  const gradeStudentCounts = gradeOrder.map(g => students.filter(s => s.grade === g).length);
+
+  const canvasGrade = document.getElementById('chartGrade');
+  const canvasStudents = document.getElementById('chartGradeStudents');
+  if (!canvasGrade || !canvasStudents) return;
+
+  if (gradeChart) gradeChart.destroy();
+  if (gradeStudentsChart) gradeStudentsChart.destroy();
+
+  gradeChart = new Chart(canvasGrade, {
+    type: 'doughnut',
+    data: {
+      labels: gradeLabels,
+      datasets: [{
+        data: gradeValues,
+        backgroundColor: gradeLabels.map(l => gradeColors[l] || '#999'),
+        borderWidth: 2,
+        borderColor: '#fff',
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { position: 'bottom', labels: { font: { size: 12 } } },
+      }
     }
-  }
-});
+  });
+
+  gradeStudentsChart = new Chart(canvasStudents, {
+    type: 'bar',
+    data: {
+      labels: gradeOrder,
+      datasets: [{
+        label: '学生人数',
+        data: gradeStudentCounts,
+        backgroundColor: 'rgba(232,93,4,0.7)',
+        borderColor: '#E85D04',
+        borderWidth: 2,
+        borderRadius: 6,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        y: { beginAtZero: true, ticks: { stepSize: 1 } },
+      }
+    }
+  });
+}
 
 // ==================== 初始渲染 ====================
+// 首屏先用已有数据画一次（可能为空），云端数据回来后整体重绘
+renderDashboardStats();
+renderCharts();
+
 Store.ready.then(() => {
+  refreshDashboardData();
+  renderDashboardStats();
   renderSchedule();
   renderTodos();
+  renderCharts();
 });

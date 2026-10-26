@@ -44,16 +44,35 @@
       <h2>2. 本机待迁移数据</h2>
       <table class="migrate-table">
         <thead>
-          <tr><th>本地存储键</th><th>目标数据表</th><th>条数</th><th>状态</th></tr>
+          <tr><th>本地存储键</th><th>目标数据表</th><th>条数</th><th>状态</th><th>操作</th></tr>
         </thead>
         <tbody id="migrateRows"></tbody>
       </table>
       <div class="migrate-actions">
+        <label style="font-size:13px;display:flex;align-items:center;gap:6px;">
+          <input type="checkbox" id="migrateForce">
+          强制覆盖（本机没有的键也把云端同名数据清空）
+        </label>
+      </div>
+      <div class="migrate-actions">
         <button class="btn btn-primary" id="migrateImportBtn" type="button" onclick="runMigration()">一键导入云端</button>
         <button class="btn btn-secondary" type="button" onclick="downloadBackup()">导出 JSON 备份</button>
-        <span style="font-size:13px;color:var(--text-secondary);">导入会在本地保留 <code class="inline">__local_backup</code> 副本，可随时回滚。</span>
+        <span style="font-size:13px;color:var(--text-secondary);">表格会自动列出本机所有 <code class="inline">pe_*</code> 键（含历史遗留键），无对应表的键只备份不导入。</span>
       </div>
       <pre class="migrate-log" id="migrateLog" hidden></pre>
+    </section>
+
+    <section class="migrate-card">
+      <h2>3. 清理残留数据</h2>
+      <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">
+        示例数据（教学资源、演示学生等）由旧版代码自动生成，现已停止生成。用下面的按钮把云端和本机的残留记录一次性清空；
+        也可以直接在 Supabase 控制台 SQL Editor 执行：
+        <code class="inline">truncate table public.students, public.fitness_records, public.attendance, public.lesson_plans, public.resources, public.courses, public.course_schedule, public.todos, public.fitness_logs, public.unit_designs, public.sports_meet, public.app_settings;</code>
+      </p>
+      <div class="migrate-actions">
+        <button class="btn btn-danger" type="button" onclick="clearCloudData()">清空云端全部数据</button>
+        <button class="btn btn-secondary" type="button" onclick="clearLocalData()">清空本机 localStorage</button>
+      </div>
     </section>
   </main>
 

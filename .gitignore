@@ -2,3 +2,14 @@
 .env.*
 !.env.example
 !.env.*.example
+
+.DS_Store
+.workbuddy-ai/
+
+# 依赖
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Vercel
+.vercel/

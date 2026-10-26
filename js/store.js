@@ -1,55 +1,46 @@
 /**
- * 统一存储层：localStorage → Supabase
+ * 统一存储层：所有业务数据经 /api/data 读写（服务端 Supabase）
  *
- * 业务代码只调用 Store.read(key) / Store.write(key, value)：
- *   - 未配置 Supabase（或连接失败）：自动使用 localStorage，行为与改造前完全一致
- *   - 已配置 Supabase：读 select()、写 upsert()/insert()，由云端作为唯一数据源
+ * 架构：
+ *   浏览器 → /api/data → lib/supabase.js（process.env.SUPABASE_URL / SUPABASE_ANON_KEY）→ Supabase
+ * 浏览器拿不到 process.env，因此密钥只存在于服务端；前端只认「存储键名」，
+ * 键名 → 数据表的映射由服务端 lib/store-schema.js 统一维护。
  *
- * 写入策略：
- *   - 集合型（学生、体测、教案……）：整表替换（delete + insert），保证顺序与删除都正确
- *   - 单例型（课表、大单元、运动会、设置）：按 id=存储键 做 upsert
+ * 未配置 Supabase（或接口不可用）时自动回退 localStorage，本地开发不受影响。
  *
- * 连接信息不写在前端：由 /api/config 从服务端环境变量 SUPABASE_URL / SUPABASE_ANON_KEY 读取。
+ * 用法（与改造前完全一致，业务代码零改动）：
+ *   Store.read(key, fallback) / Store.write(key, value) / Store.ready
  */
 'use strict';
 
-const STORE_KEY_MAP = {
-  pe_students: { table: 'students' },
-  pe_fitness_records: { table: 'fitness_records' },
-  pe_attendance: { table: 'attendance' },
-  pe_lesson_plans: { table: 'lesson_plans' },
-  pe_resources: { table: 'resources' },
-  pe_courses: { table: 'courses' },
-  pe_todos_v1: { table: 'todos' },
-  // 一周训练记录：localStorage 里是「日期 → 记录」的对象，云端按天一行存
-  pe_fitness_weekly_log_v1: { table: 'fitness_logs', objectMap: true },
-  pe_schedule_v1: { table: 'course_schedule', singleton: true },
-  pe_big_unit_design_v1: { table: 'unit_designs', singleton: true },
-  pe_sports_meet_v1: { table: 'sports_meet', singleton: true },
-  pe_week_mode: { table: 'app_settings', singleton: true },
-  pe_workbench_display_settings_v1: { table: 'app_settings', singleton: true },
-  sportsMeetTitle: { table: 'app_settings', singleton: true },
-};
-
-const SUPABASE_CDN = 'https://esm.sh/@supabase/supabase-js@2';
+// 仅需知道键名；表结构与落库方式由服务端决定
+const STORE_KEYS = [
+  'pe_students',
+  'pe_fitness_records',
+  'pe_attendance',
+  'pe_lesson_plans',
+  'pe_resources',
+  'pe_courses',
+  'pe_todos_v1',
+  'pe_fitness_weekly_log_v1',
+  'pe_schedule_v1',
+  'pe_big_unit_design_v1',
+  'pe_sports_meet_v1',
+  'pe_week_mode',
+  'pe_workbench_display_settings_v1',
+  'sportsMeetTitle',
+];
 
 let resolveReady;
 const readyPromise = new Promise(resolve => { resolveReady = resolve; });
 
 const Store = {
   mode: 'local',          // 'local' | 'supabase'
-  client: null,
+  schema: null,           // 服务端下发的键 → 表映射（迁移页展示用）
   cache: new Map(),
-  seeds: new Map(),
   ready: readyPromise,
   lastError: null,
 
-  /** 注册种子数据：对应集合为空时写入（只会在初始化时用一次） */
-  registerSeed(key, factory) {
-    this.seeds.set(key, factory);
-  },
-
-  /** 初始化：连接 Supabase 并拉取数据，失败则回退 localStorage */
   async start() {
     try {
       await this._init();
@@ -66,8 +57,8 @@ const Store = {
   },
 
   async _init() {
-    // 1. 本地数据先入缓存：保证无网络 / 未配置云端时首屏就有数据
-    Object.keys(STORE_KEY_MAP).forEach(key => {
+    // 1. 本地数据先入缓存：接口不可用或无网络时首屏也有数据
+    STORE_KEYS.forEach(key => {
       const raw = localStorage.getItem(key);
       if (raw === null) return;
       try {
@@ -77,84 +68,39 @@ const Store = {
       }
     });
 
-    // 2. 尝试连接 Supabase
-    const config = await this._loadConfig();
-    if (config) {
-      const { createClient } = await import(SUPABASE_CDN);
-      this.client = createClient(config.url, config.key);
+    // 2. 拉取云端数据
+    const response = await fetch('/api/data', { headers: { Accept: 'application/json' } });
+    if (!response.ok) throw new Error(`/api/data 返回 HTTP ${response.status}`);
+    const payload = await response.json();
+    this.schema = payload.keys || null;
+
+    if (payload.mode === 'supabase' && payload.data) {
+      // 云端优先：连上 Supabase 后，云端数据是唯一真相，
+      // 先清空本地缓存（含刚从 localStorage 读入的旧数据），再整体以云端为准
       this.mode = 'supabase';
-      await this._pullAll();
+      // 每个键都以云端为准：云端没有该键就是空（null），绝不回落到本地旧值
+      STORE_KEYS.forEach(key => {
+        const value = payload.data[key];
+        this.cache.set(key, value === undefined ? null : value);
+      });
+      this._backupLocal();
+
+      // 个别表结构异常（缺列等）时明确提示，避免"以为同步了其实没有"
+      if (Array.isArray(payload.errors) && payload.errors.length) {
+        const tables = payload.errors.map(item => item.table).join('、');
+        console.warn('[Store] 部分云端数据读取失败：', payload.errors);
+        if (typeof window !== 'undefined' && typeof window.showToast === 'function') {
+          window.showToast(`云端 ${payload.errors.length} 项数据读取失败（${tables}），请检查这些表的结构是否为 id/data/ord/updated_at。`, 'error');
+        }
+      }
     } else {
       this.mode = 'local';
     }
-
-    // 3. 空集合播种
-    await this._seedEmpty();
-
-    // 4. 云端模式下清掉已迁移的本地副本（保留一份备份键，便于回滚）
-    if (this.mode === 'supabase') this._backupLocal();
   },
 
-  async _loadConfig() {
-    try {
-      const response = await fetch('/api/config', { headers: { Accept: 'application/json' } });
-      if (!response.ok) return null;
-      const data = await response.json();
-      const url = String(data.supabaseUrl || '').trim();
-      const key = String(data.supabaseAnonKey || '').trim();
-      return url && key ? { url, key } : null;
-    } catch {
-      return null;
-    }
-  },
-
-  async _pullAll() {
-    const keys = Object.keys(STORE_KEY_MAP);
-    for (const key of keys) {
-      const config = STORE_KEY_MAP[key];
-      const { data, error } = config.singleton
-        ? await this.client.from(config.table).select('data').eq('id', key).maybeSingle()
-        : await this.client.from(config.table).select('data').order('ord', { ascending: true });
-
-      if (error) {
-        console.error(`[Store] 读取 ${config.table} 失败`, error);
-        continue;
-      }
-      if (config.singleton) {
-        if (data?.data !== undefined) this.cache.set(key, data.data);
-      } else if (config.objectMap) {
-        const mapped = {};
-        (data || []).forEach(row => { mapped[row.data?.date || row.id] = row.data; });
-        this.cache.set(key, mapped);
-      } else {
-        this.cache.set(key, (data || []).map(row => row.data));
-      }
-    }
-  },
-
-  async _seedEmpty() {
-    for (const [key, factory] of this.seeds) {
-      const current = this.cache.get(key);
-      const isEmpty = current === undefined || current === null
-        || (Array.isArray(current) && current.length === 0);
-      if (!isEmpty) continue;
-      const seeded = factory();
-      this.cache.set(key, seeded);
-      if (this.mode === 'supabase' && this.client) {
-        await this._persist(key, seeded).catch(error => this._onPersistError(key, error));
-      } else {
-        try {
-          localStorage.setItem(key, JSON.stringify(seeded));
-        } catch (error) {
-          this._onPersistError(key, error);
-        }
-      }
-    }
-  },
-
-  // 迁移后把本地数据改名备份，避免误读旧数据，同时保留回滚能力
+  // 切换到云端后把本地数据改名备份，避免误读旧数据，同时保留回滚能力
   _backupLocal() {
-    Object.keys(STORE_KEY_MAP).forEach(key => {
+    STORE_KEYS.forEach(key => {
       const raw = localStorage.getItem(key);
       if (raw === null) return;
       try {
@@ -169,11 +115,11 @@ const Store = {
     return value === undefined ? fallback : value;
   },
 
-  /** 同步写入缓存 + 异步持久化到云端/本地 */
+  /** 同步更新缓存 + 异步写入云端（或 localStorage） */
   write(key, value) {
     this.cache.set(key, value);
-    if (this.mode === 'supabase' && this.client) {
-      this._persist(key, value).catch(error => this._onPersistError(key, error));
+    if (this.mode === 'supabase') {
+      this._persistSafely(key, value);
       return value;
     }
     try {
@@ -184,35 +130,27 @@ const Store = {
     return value;
   },
 
-  async _persist(key, value) {
-    const config = STORE_KEY_MAP[key];
-    if (!config || !this.client) return;
-
-    if (config.singleton) {
-      const { error } = await this.client
-        .from(config.table)
-        .upsert({ id: key, data: value, ord: 0, updated_at: new Date().toISOString() }, { onConflict: 'id' });
-      if (error) throw error;
-      return;
+  async _persistSafely(key, value) {
+    try {
+      await this._persist(key, value);
+    } catch (error) {
+      this._onPersistError(key, error);
     }
+  },
 
-    // 集合型：整表替换，保证顺序一致且删除生效
-    const source = config.objectMap
-      ? Object.entries(value || {}).map(([mapKey, item]) => ({
-        id: String(item?.date || mapKey),
-        data: { ...(item || {}), date: item?.date || mapKey },
-      }))
-      : (Array.isArray(value) ? value : []).map(item => ({ id: String(item?.id ?? ''), data: item }));
-    const rows = source
-      .map((row, ord) => ({ ...row, ord, updated_at: new Date().toISOString() }))
-      .filter(row => row.id);
-
-    const table = this.client.from(config.table);
-    const { error: deleteError } = await table.delete().neq('id', '__keep_none__');
-    if (deleteError) throw deleteError;
-    if (!rows.length) return;
-    const { error: insertError } = await table.insert(rows);
-    if (insertError) throw insertError;
+  async _persist(key, value) {
+    const response = await fetch('/api/data', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, value }),
+    });
+    if (response.ok) return;
+    let message = `HTTP ${response.status}`;
+    try {
+      const payload = await response.json();
+      message = payload.error || message;
+    } catch {}
+    throw new Error(message);
   },
 
   _onPersistError(key, error) {
@@ -223,33 +161,40 @@ const Store = {
     }
   },
 
-  /** 迁移用：把 localStorage 里的旧数据一次性写入云端 */
-  async importFromLocalStorage(keys = Object.keys(STORE_KEY_MAP)) {
-    const report = [];
-    if (this.mode !== 'supabase' || !this.client) {
-      return keys.map(key => ({ key, status: 'error', count: 0, message: '未连接 Supabase' }));
-    }
-    for (const key of keys) {
+  /** 迁移工具：把 localStorage 里的旧数据一次性写入云端 */
+  async importFromLocalStorage(keys = STORE_KEYS) {
+    const values = {};
+    const invalid = [];
+    keys.forEach(key => {
       const raw = localStorage.getItem(key);
-      if (raw === null) {
-        report.push({ key, status: 'skipped', count: 0 });
-        continue;
-      }
-      let value;
+      if (raw === null) return;
       try {
-        value = JSON.parse(raw);
+        values[key] = JSON.parse(raw);
       } catch {
-        report.push({ key, status: 'invalid', count: 0 });
-        continue;
+        invalid.push(key);
       }
+    });
+
+    const response = await fetch('/api/data', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ values }),
+    });
+    if (!response.ok) {
+      let message = `HTTP ${response.status}`;
       try {
-        this.cache.set(key, value);
-        await this._persist(key, value);
-        report.push({ key, status: 'ok', count: Array.isArray(value) ? value.length : 1 });
-      } catch (error) {
-        report.push({ key, status: 'error', count: 0, message: error?.message || '' });
-      }
+        const payload = await response.json();
+        message = payload.error || message;
+      } catch {}
+      throw new Error(message);
     }
+
+    const payload = await response.json();
+    const report = payload.report || [];
+    invalid.forEach(key => report.push({ key, status: 'invalid', count: 0 }));
+    keys
+      .filter(key => !(report.some(item => item.key === key)))
+      .forEach(key => report.push({ key, status: 'skipped', count: 0 }));
     return report;
   },
 };
