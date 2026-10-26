@@ -1,0 +1,1158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>体育老师专属智慧工作台</title>
+  <style>
+    /* ==================== 设计令牌 ==================== */
+    :root {
+      /* 主色调：活力浅绿 */
+      --primary: #10B981;
+      --primary-light: #34D399;
+      --primary-dark: #059669;
+      --primary-50: #ECFDF5;
+      --primary-100: #D1FAE5;
+
+      /* 辅助色 */
+      --accent: #0EA5E9;
+      --accent-light: #38BDF8;
+      --warning: #F59E0B;
+      --danger: #EF4444;
+      --info: #6366F1;
+
+      /* 中性色 */
+      --bg: #F8FAFC;
+      --bg-card: #FFFFFF;
+      --bg-hover: #F1F5F9;
+      --bg-soft: #F0FDF4;
+      --border: #E2E8F0;
+      --border-soft: #F1F5F9;
+
+      /* 文字 */
+      --text: #1E293B;
+      --text-secondary: #64748B;
+      --text-tertiary: #94A3B8;
+      --text-inverse: #FFFFFF;
+
+      /* 阴影 */
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.04);
+      --shadow-md: 0 4px 12px rgba(0,0,0,0.06);
+      --shadow-lg: 0 10px 24px rgba(0,0,0,0.08);
+
+      /* 圆角 */
+      --radius-sm: 8px;
+      --radius-md: 12px;
+      --radius-lg: 16px;
+
+      /* 字体 */
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    }
+
+    /* ==================== 重置 ==================== */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+    button { font-family: inherit; cursor: pointer; border: none; outline: none; }
+    input { font-family: inherit; outline: none; }
+    a { color: inherit; text-decoration: none; }
+    ul { list-style: none; }
+
+    /* ==================== 布局 ==================== */
+    .app {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px 48px;
+    }
+
+    /* 顶部头部 */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 32px;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .logo {
+      width: 52px;
+      height: 52px;
+      border-radius: var(--radius-md);
+      background: linear-gradient(135deg, var(--primary), var(--primary-light));
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 26px;
+      box-shadow: 0 4px 14px rgba(16,185,129,0.35);
+    }
+
+    .header h1 {
+      font-size: 24px;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+    }
+
+    .header p {
+      font-size: 13px;
+      color: var(--text-secondary);
+      margin-top: 2px;
+    }
+
+    .header-right {
+      text-align: right;
+    }
+
+    .header-date {
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    .header-week {
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+
+    /* 双栏布局 */
+    .main-grid {
+      display: grid;
+      grid-template-columns: 1.6fr 1fr;
+      gap: 24px;
+    }
+
+    @media (max-width: 860px) {
+      .main-grid { grid-template-columns: 1fr; }
+    }
+
+    /* ==================== 卡片 ==================== */
+    .card {
+      background: var(--bg-card);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-sm);
+      border: 1px solid var(--border);
+      overflow: hidden;
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 20px 24px;
+      border-bottom: 1px solid var(--border-soft);
+    }
+
+    .card-title {
+      font-size: 17px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .card-subtitle {
+      font-size: 13px;
+      color: var(--text-tertiary);
+    }
+
+    .card-body {
+      padding: 20px 24px;
+    }
+
+    /* ==================== 模块一：周课表 ==================== */
+    .schedule-tabs {
+      display: flex;
+      gap: 6px;
+      padding: 4px;
+      background: var(--bg-hover);
+      border-radius: var(--radius-sm);
+    }
+
+    .schedule-tab {
+      padding: 6px 14px;
+      font-size: 13px;
+      font-weight: 600;
+      border-radius: 6px;
+      color: var(--text-secondary);
+      background: transparent;
+      transition: all 0.2s;
+    }
+
+    .schedule-tab.active {
+      background: var(--bg-card);
+      color: var(--primary-dark);
+      box-shadow: var(--shadow-sm);
+    }
+
+    /* 课表网格 */
+    .schedule-grid {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 10px;
+    }
+
+    @media (max-width: 600px) {
+      .schedule-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    /* 单日列 */
+    .day-column {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .day-header {
+      text-align: center;
+      padding: 8px 0;
+      border-radius: var(--radius-sm);
+      font-weight: 700;
+      font-size: 14px;
+      color: var(--text-secondary);
+      background: var(--bg-hover);
+    }
+
+    .day-header.today {
+      background: linear-gradient(135deg, var(--primary), var(--primary-light));
+      color: white;
+    }
+
+    .day-header .day-date {
+      font-size: 11px;
+      font-weight: 500;
+      opacity: 0.7;
+    }
+
+    /* 课程卡片 */
+    .lesson-card {
+      border-radius: var(--radius-sm);
+      padding: 10px 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+      border-left: 3px solid;
+      position: relative;
+    }
+
+    .lesson-card:hover {
+      transform: translateY(-2px);
+      box-shadow: var(--shadow-md);
+    }
+
+    .lesson-card .lesson-period {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text-tertiary);
+      margin-bottom: 2px;
+    }
+
+    .lesson-card .lesson-class {
+      font-size: 13px;
+      font-weight: 700;
+      margin-bottom: 2px;
+    }
+
+    .lesson-card .lesson-content {
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .lesson-card .lesson-location {
+      font-size: 11px;
+      color: var(--text-tertiary);
+      margin-top: 4px;
+      display: flex;
+      align-items: center;
+      gap: 3px;
+    }
+
+    /* 课程颜色 */
+    .lesson-color-basketball { border-color: #F59E0B; background: #FFFBEB; }
+    .lesson-color-track { border-color: #10B981; background: #ECFDF5; }
+    .lesson-color-rope { border-color: #8B5CF6; background: #F5F3FF; }
+    .lesson-color-fitness { border-color: #EF4444; background: #FEF2F2; }
+    .lesson-color-ball { border-color: #0EA5E9; background: #F0F9FF; }
+    .lesson-color-default { border-color: #6366F1; background: #EEF2FF; }
+
+    /* 空节次 */
+    .lesson-empty {
+      border-radius: var(--radius-sm);
+      padding: 10px 12px;
+      border: 1px dashed var(--border);
+      text-align: center;
+      font-size: 12px;
+      color: var(--text-tertiary);
+    }
+
+    /* 课表编辑弹窗 */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(30,41,59,0.5);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 999;
+      opacity: 0;
+      visibility: hidden;
+      transition: all 0.25s;
+    }
+
+    .modal-overlay.show {
+      opacity: 1;
+      visibility: visible;
+    }
+
+    .modal {
+      background: var(--bg-card);
+      border-radius: var(--radius-lg);
+      width: 90%;
+      max-width: 460px;
+      transform: scale(0.96);
+      transition: transform 0.25s;
+    }
+
+    .modal-overlay.show .modal {
+      transform: scale(1);
+    }
+
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 18px 24px;
+      border-bottom: 1px solid var(--border-soft);
+    }
+
+    .modal-title {
+      font-size: 17px;
+      font-weight: 700;
+    }
+
+    .modal-close {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: transparent;
+      font-size: 20px;
+      color: var(--text-tertiary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-close:hover { background: var(--bg-hover); color: var(--text); }
+
+    .modal-body { padding: 20px 24px; }
+
+    .form-group { margin-bottom: 16px; }
+
+    .form-group label {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 6px;
+      color: var(--text);
+    }
+
+    .form-control {
+      width: 100%;
+      padding: 9px 12px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      font-size: 14px;
+      background: var(--bg-card);
+      color: var(--text);
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    .form-control:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(16,185,129,0.15);
+    }
+
+    .form-row {
+      display: flex;
+      gap: 12px;
+    }
+    .form-row .form-group { flex: 1; }
+
+    .modal-footer {
+      padding: 14px 24px;
+      border-top: 1px solid var(--border-soft);
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+    }
+
+    /* ==================== 按钮 ==================== */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 8px 16px;
+      border-radius: var(--radius-sm);
+      font-size: 14px;
+      font-weight: 600;
+      transition: all 0.2s;
+      white-space: nowrap;
+    }
+
+    .btn-primary {
+      background: var(--primary);
+      color: white;
+    }
+    .btn-primary:hover { background: var(--primary-dark); }
+
+    .btn-ghost {
+      background: transparent;
+      color: var(--text-secondary);
+    }
+    .btn-ghost:hover { background: var(--bg-hover); color: var(--text); }
+
+    .btn-danger {
+      background: var(--danger);
+      color: white;
+    }
+
+    .btn-sm { padding: 5px 12px; font-size: 13px; }
+
+    /* ==================== 模块二：待办清单 ==================== */
+    .todo-input-row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+
+    .todo-input-row input {
+      flex: 1;
+      min-width: 0;
+      padding: 10px 14px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      font-size: 14px;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    .todo-input-row select {
+      padding: 0 10px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      font-size: 13px;
+      background: var(--bg-card);
+      color: var(--text);
+    }
+
+    .todo-input-row input:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(16,185,129,0.15);
+    }
+
+    .todo-input-row button {
+      padding: 0 18px;
+      background: var(--primary);
+      color: white;
+      border-radius: var(--radius-sm);
+      font-size: 14px;
+      font-weight: 600;
+      transition: background 0.2s;
+    }
+    .todo-input-row button:hover { background: var(--primary-dark); }
+
+    /* 待办统计 */
+    .todo-stats {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 12px;
+      font-size: 13px;
+    }
+
+    .todo-stat {
+      padding: 3px 10px;
+      border-radius: 20px;
+      font-weight: 600;
+    }
+
+    .todo-stat.total { background: var(--bg-hover); color: var(--text-secondary); }
+    .todo-stat.done { background: var(--primary-100); color: var(--primary-dark); }
+    .todo-stat.pending { background: #FEF3C7; color: #92400E; }
+
+    /* 待办列表 */
+    .todo-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .todo-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 14px;
+      border-radius: var(--radius-sm);
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      transition: all 0.2s;
+      animation: slideIn 0.3s ease;
+    }
+
+    @keyframes slideIn {
+      from { opacity: 0; transform: translateX(-12px); }
+      to { opacity: 1; transform: translateX(0); }
+    }
+
+    .todo-item:hover {
+      border-color: var(--primary);
+      box-shadow: var(--shadow-sm);
+    }
+
+    .todo-item.done {
+      background: var(--bg-soft);
+      border-color: var(--border-soft);
+    }
+
+    .todo-checkbox {
+      width: 22px;
+      height: 22px;
+      border: 2px solid var(--border);
+      border-radius: 6px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: all 0.2s;
+    }
+
+    .todo-checkbox:hover { border-color: var(--primary); }
+
+    .todo-item.done .todo-checkbox {
+      background: var(--primary);
+      border-color: var(--primary);
+    }
+
+    .todo-checkbox svg {
+      width: 14px;
+      height: 14px;
+      color: white;
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+
+    .todo-item.done .todo-checkbox svg { opacity: 1; }
+
+    .todo-text {
+      flex: 1;
+      min-width: 0;
+      font-size: 14px;
+      color: var(--text);
+      transition: all 0.2s;
+      word-break: break-word;
+    }
+
+    .todo-priority {
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .todo-priority.high { background: #FEE2E2; color: #B91C1C; }
+    .todo-priority.medium { background: #FEF3C7; color: #92400E; }
+    .todo-priority.low { background: #D1FAE5; color: #047857; }
+
+    .todo-item.done .todo-text {
+      text-decoration: line-through;
+      color: var(--text-tertiary);
+    }
+
+    .todo-meta {
+      font-size: 11px;
+      color: var(--text-tertiary);
+      white-space: nowrap;
+    }
+
+    .todo-delete {
+      width: 28px;
+      height: 28px;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--text-tertiary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+      opacity: 0;
+      transition: all 0.2s;
+      flex-shrink: 0;
+    }
+
+    .todo-item:hover .todo-delete { opacity: 1; }
+    .todo-delete:hover { background: #FEF2F2; color: var(--danger); }
+
+    /* 空状态 */
+    .todo-empty {
+      text-align: center;
+      padding: 32px 16px;
+      color: var(--text-tertiary);
+    }
+
+    .todo-empty .empty-icon {
+      font-size: 40px;
+      margin-bottom: 8px;
+    }
+
+    .todo-empty p { font-size: 14px; }
+
+    /* ==================== Toast ==================== */
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: var(--text);
+      color: white;
+      padding: 10px 18px;
+      border-radius: var(--radius-sm);
+      font-size: 14px;
+      font-weight: 500;
+      box-shadow: var(--shadow-lg);
+      z-index: 9999;
+      transform: translateY(80px);
+      opacity: 0;
+      transition: all 0.3s;
+    }
+
+    .toast.show {
+      transform: translateY(0);
+      opacity: 1;
+    }
+
+    /* ==================== 快捷区 ==================== */
+    .quick-section {
+      margin-top: 24px;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+    }
+
+    @media (max-width: 600px) {
+      .quick-section { grid-template-columns: repeat(2, 1fr); }
+    }
+
+    .quick-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 16px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .quick-card:hover {
+      box-shadow: var(--shadow-md);
+      transform: translateY(-2px);
+      border-color: var(--primary);
+    }
+
+    .quick-card .q-icon { font-size: 28px; margin-bottom: 6px; }
+    .quick-card .q-label { font-size: 13px; font-weight: 600; }
+    .quick-card .q-value { font-size: 11px; color: var(--text-tertiary); }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <!-- 顶部头部 -->
+    <header class="header">
+      <div class="header-left">
+        <div class="logo">🏃</div>
+        <div>
+          <h1>体育老师智慧工作台</h1>
+          <p>课表管理 · 待办清单 · 高效教学</p>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="header-date" id="todayDate"></div>
+        <div class="header-week" id="todayWeek"></div>
+      </div>
+    </header>
+
+    <!-- 主区域 -->
+    <div class="main-grid">
+      <!-- 模块一：周课表 -->
+      <section class="card" id="scheduleCard">
+        <div class="card-header">
+          <div>
+            <div class="card-title">📅 本周课表</div>
+            <div class="card-subtitle">点击课程卡片可编辑，点击空格可添加</div>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="schedule-grid" id="scheduleGrid">
+            <!-- 由 JS 渲染 -->
+          </div>
+        </div>
+      </section>
+
+      <!-- 模块二：待办清单 -->
+      <section class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">✅ 待办清单</div>
+            <div class="card-subtitle">教学任务、提醒事项一站管理</div>
+          </div>
+        </div>
+        <div class="card-body">
+          <!-- 输入区 -->
+          <div class="todo-input-row">
+            <input type="text" id="todoInput" placeholder="输入待办事项，如：明天收体测表" onkeydown="if(event.key==='Enter')addTodo()">
+            <select id="todoPriority" aria-label="待办优先级">
+              <option value="high">高优先级</option>
+              <option value="medium" selected>中优先级</option>
+              <option value="low">低优先级</option>
+            </select>
+            <button onclick="addTodo()">添加</button>
+          </div>
+
+          <!-- 统计 -->
+          <div class="todo-stats" id="todoStats"></div>
+
+          <!-- 列表 -->
+          <ul class="todo-list" id="todoList"></ul>
+        </div>
+      </section>
+    </div>
+
+    <!-- 快捷统计区 -->
+    <div class="quick-section" id="quickSection">
+      <!-- 由 JS 渲染 -->
+    </div>
+  </div>
+
+  <!-- 课表编辑弹窗 -->
+  <div class="modal-overlay" id="lessonModal" onclick="if(event.target===this)closeLessonModal()">
+    <div class="modal">
+      <div class="modal-header">
+        <div class="modal-title" id="lessonModalTitle">编辑课程</div>
+        <button class="modal-close" onclick="closeLessonModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="lessonKey">
+        <div class="form-row">
+          <div class="form-group">
+            <label>节次</label>
+            <select class="form-control" id="lessonPeriod">
+              <option value="第1节">第1节 08:00</option>
+              <option value="第2节">第2节 09:00</option>
+              <option value="第3节">第3节 10:00</option>
+              <option value="第4节">第4节 11:00</option>
+              <option value="第5节">第5节 14:00</option>
+              <option value="第6节">第6节 15:00</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>星期</label>
+            <select class="form-control" id="lessonDay">
+              <option value="周一">周一</option>
+              <option value="周二">周二</option>
+              <option value="周三">周三</option>
+              <option value="周四">周四</option>
+              <option value="周五">周五</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>班级名称</label>
+          <input class="form-control" id="lessonClass" placeholder="如：四年级1班">
+        </div>
+        <div class="form-group">
+          <label>课程内容</label>
+          <input class="form-control" id="lessonContent" placeholder="如：篮球运球">
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>场地</label>
+            <input class="form-control" id="lessonLocation" placeholder="如：篮球场">
+          </div>
+          <div class="form-group">
+            <label>类型</label>
+            <select class="form-control" id="lessonType">
+              <option value="basketball">篮球</option>
+              <option value="track">田径</option>
+              <option value="rope">跳绳</option>
+              <option value="fitness">体适能</option>
+              <option value="ball">球类</option>
+              <option value="default">其他</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-danger btn-sm" id="lessonDeleteBtn" onclick="deleteLesson()" style="margin-right:auto;display:none;">删除课程</button>
+        <button class="btn btn-ghost" onclick="closeLessonModal()">取消</button>
+        <button class="btn btn-primary" onclick="saveLesson()">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast" id="toast"></div>
+
+  <script>
+    // ==================== 工具函数 ====================
+    function showToast(msg) {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.classList.add('show');
+      setTimeout(() => t.classList.remove('show'), 2000);
+    }
+
+    function timeKey(day, period) {
+      return day + '::' + period;
+    }
+
+    function getWeekDates() {
+      const today = new Date();
+      const day = today.getDay(); // 0=周日 1=周一
+      const monday = new Date(today);
+      monday.setDate(today.getDate() - (day === 0 ? 6 : day - 1));
+      const dates = [];
+      for (let i = 0; i < 5; i++) {
+        const d = new Date(monday);
+        d.setDate(monday.getDate() + i);
+        dates.push(`${d.getMonth() + 1}/${d.getDate()}`);
+      }
+      return dates;
+    }
+
+    // ==================== 顶部日期 ====================
+      const now = new Date();
+      const months = ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'];
+      const weeks = ['日','一','二','三','四','五','六'];
+      document.getElementById('todayDate').textContent = `${months[now.getMonth()]} ${now.getDate()}日`;
+      document.getElementById('todayWeek').textContent = `星期${weeks[now.getDay()]}`;
+    })();
+
+    // ==================== 课表数据 ====================
+    const SCHEDULE_KEY = 'pe_schedule_v1';
+    const DAYS = ['周一', '周二', '周三', '周四', '周五'];
+    const PERIODS = ['第1节', '第2节', '第3节', '第4节', '第5节', '第6节'];
+
+    const TYPE_LABELS = {
+      basketball: '篮球', track: '田径', rope: '跳绳',
+      fitness: '体适能', ball: '球类', default: '其他'
+    };
+
+    const TYPE_COLORS = {
+      basketball: 'basketball', track: 'track', rope: 'rope',
+      fitness: 'fitness', ball: 'ball', default: 'default'
+    };
+
+    function getSchedule() {
+      try {
+        const data = JSON.parse(localStorage.getItem(SCHEDULE_KEY));
+        if (data && typeof data === 'object') return data;
+      } catch(e) {}
+      // 默认示例数据
+      return {
+        '周一::第1节': { class: '四年级1班', content: '短跑训练', location: '田径场', type: 'track' },
+        '周一::第3节': { class: '二年级3班', content: '跳绳', location: '操场', type: 'rope' },
+        '周一::第5节': { class: '六年级2班', content: '核心力量', location: '体育馆', type: 'fitness' },
+        '周二::第1节': { class: '五年级1班', content: '篮球运球', location: '篮球场', type: 'basketball' },
+        '周二::第3节': { class: '三年级2班', content: '跳绳', location: '操场', type: 'rope' },
+        '周二::第5节': { class: '一年级1班', content: '基础体能', location: '操场', type: 'fitness' },
+        '周三::第1节': { class: '四年级2班', content: '体测', location: '田径场', type: 'track' },
+        '周三::第3节': { class: '五年级3班', content: '篮球投篮', location: '篮球场', type: 'basketball' },
+        '周三::第5节': { class: '二年级1班', content: '游戏活动', location: '操场', type: 'ball' },
+        '周四::第1节': { class: '六年级1班', content: '体适能', location: '体育馆', type: 'fitness' },
+        '周四::第3节': { class: '三年级3班', content: '跳绳', location: '操场', type: 'rope' },
+        '周四::第5节': { class: '四年级3班', content: '短跑训练', location: '田径场', type: 'track' },
+        '周五::第1节': { class: '五年级2班', content: '篮球比赛', location: '篮球场', type: 'basketball' },
+        '周五::第3节': { class: '一年级2班', content: '基础体能', location: '操场', type: 'fitness' },
+        '周五::第5节': { class: '六年级3班', content: '核心训练', location: '体育馆', type: 'fitness' },
+      };
+    }
+
+    function saveSchedule(data) {
+      localStorage.setItem(SCHEDULE_KEY, JSON.stringify(data));
+    }
+
+    let scheduleData = getSchedule();
+    const weekDates = getWeekDates();
+    const todayStr = DAYS[new Date().getDay() - 1] || '';
+
+    function renderSchedule() {
+      const grid = document.getElementById('scheduleGrid');
+      let html = '';
+
+      DAYS.forEach((day, di) => {
+        const isToday = day === todayStr;
+        html += `<div class="day-column">`;
+        html += `<div class="day-header ${isToday ? 'today' : ''}">
+          <div>${day}</div>
+          <div class="day-date">${weekDates[di]}</div>
+        </div>`;
+
+        PERIODS.forEach(period => {
+          const key = timeKey(day, period);
+          const lesson = scheduleData[key];
+          if (lesson) {
+            const colorClass = 'lesson-color-' + (TYPE_COLORS[lesson.type] || 'default');
+            const typeLabel = TYPE_LABELS[lesson.type] || '其他';
+            html += `
+              <div class="lesson-card ${colorClass}" onclick="openLessonModal('${key}')">
+                <div class="lesson-period">${period}</div>
+                <div class="lesson-class">${lesson.class}</div>
+                <div class="lesson-content">${lesson.content}</div>
+                <div class="lesson-location">📍 ${lesson.location} · ${typeLabel}</div>
+              </div>
+            `;
+          } else {
+            html += `
+              <div class="lesson-empty" onclick="openLessonModal('${key}')">
+                ${period}<br>— —
+              </div>
+            `;
+          }
+        });
+
+        html += `</div>`;
+      });
+
+      grid.innerHTML = html;
+    }
+
+    // ==================== 课表弹窗 ====================
+    function openLessonModal(key) {
+      const lesson = scheduleData[key];
+      const [day, period] = key.split('::');
+
+      document.getElementById('lessonKey').value = key;
+      document.getElementById('lessonDay').value = day;
+      document.getElementById('lessonPeriod').value = period;
+      document.getElementById('lessonClass').value = lesson?.class || '';
+      document.getElementById('lessonContent').value = lesson?.content || '';
+      document.getElementById('lessonLocation').value = lesson?.location || '';
+      document.getElementById('lessonType').value = lesson?.type || 'default';
+
+      document.getElementById('lessonModalTitle').textContent = lesson ? '编辑课程' : '添加课程';
+      document.getElementById('lessonDeleteBtn').style.display = lesson ? 'inline-flex' : 'none';
+      document.getElementById('lessonModal').classList.add('show');
+    }
+
+    function closeLessonModal() {
+      document.getElementById('lessonModal').classList.remove('show');
+    }
+
+    function saveLesson() {
+      const oldKey = document.getElementById('lessonKey').value;
+      const day = document.getElementById('lessonDay').value;
+      const period = document.getElementById('lessonPeriod').value;
+      const className = document.getElementById('lessonClass').value.trim();
+      const content = document.getElementById('lessonContent').value.trim();
+      const location = document.getElementById('lessonLocation').value.trim();
+      const type = document.getElementById('lessonType').value;
+
+      if (!className || !content) {
+        showToast('请填写班级和课程内容');
+        return;
+      }
+
+      const newKey = timeKey(day, period);
+
+      // 如果移动了位置，删除旧位置
+      if (oldKey !== newKey) delete scheduleData[oldKey];
+
+      scheduleData[newKey] = { class: className, content, location, type };
+      saveSchedule(scheduleData);
+      renderSchedule();
+      renderQuickSection();
+      closeLessonModal();
+      showToast('课表已保存');
+    }
+
+    function deleteLesson() {
+      const key = document.getElementById('lessonKey').value;
+      delete scheduleData[key];
+      saveSchedule(scheduleData);
+      renderSchedule();
+      renderQuickSection();
+      closeLessonModal();
+      showToast('课程已删除');
+    }
+
+    // ==================== 待办清单 ====================
+    const TODO_KEY = 'pe_todo_v1';
+
+    function getTodos() {
+      try {
+        const stored = JSON.parse(localStorage.getItem(TODO_KEY)) || [];
+        let changed = false;
+        stored.forEach(todo => {
+          if (!['high', 'medium', 'low'].includes(todo.priority)) {
+            todo.priority = 'medium';
+            changed = true;
+          }
+        });
+        if (changed) saveTodos(stored);
+        return stored;
+      } catch(e) { return []; }
+    }
+
+    function saveTodos(todos) {
+      localStorage.setItem(TODO_KEY, JSON.stringify(todos));
+    }
+
+    let todos = getTodos();
+
+    // 首次使用注入示例待办
+    if (todos.length === 0 && !localStorage.getItem(TODO_KEY)) {
+      todos = [
+        { id: 1, text: '明天收各班体测表', priority: 'high', done: false, time: getNow() },
+        { id: 2, text: '准备五年级篮球课教案', priority: 'medium', done: false, time: getNow() },
+        { id: 3, text: '整理器材室跳绳', priority: 'low', done: true, time: getNow() },
+      ];
+      saveTodos(todos);
+    }
+
+    function getNow() {
+      const d = new Date();
+      return `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+    }
+
+    function addTodo() {
+      const input = document.getElementById('todoInput');
+      const priorityInput = document.getElementById('todoPriority');
+      const text = input.value.trim();
+      if (!text) {
+        showToast('请输入待办内容');
+        return;
+      }
+      todos.unshift({
+        id: Date.now(),
+        text,
+        priority: priorityInput.value,
+        done: false,
+        time: getNow()
+      });
+      saveTodos(todos);
+      input.value = '';
+      priorityInput.value = 'medium';
+      renderTodos();
+      renderQuickSection();
+      showToast('待办已添加');
+    }
+
+    function toggleTodo(id) {
+      const todo = todos.find(t => t.id === id);
+      if (todo) {
+        todo.done = !todo.done;
+        saveTodos(todos);
+        renderTodos();
+        renderQuickSection();
+      }
+    }
+
+    function deleteTodo(id) {
+      todos = todos.filter(t => t.id !== id);
+      saveTodos(todos);
+      renderTodos();
+      renderQuickSection();
+      showToast('待办已删除');
+    }
+
+    function renderTodos() {
+      const list = document.getElementById('todoList');
+      const stats = document.getElementById('todoStats');
+
+      const total = todos.length;
+      const done = todos.filter(t => t.done).length;
+      const pending = total - done;
+      stats.innerHTML = `
+        <span class="todo-stat total">共 ${total} 项</span>
+        <span class="todo-stat done">已完成 ${done}</span>
+        <span class="todo-stat pending">待处理 ${pending}</span>
+      `;
+
+      if (todos.length === 0) {
+        list.innerHTML = `
+          <div class="todo-empty">
+            <div class="empty-icon">📝</div>
+            <p>暂无待办事项，添加一个吧！</p>
+          </div>
+        `;
+        return;
+      }
+
+      list.innerHTML = todos.map(t => `
+        <li class="todo-item ${t.done ? 'done' : ''}">
+          <div class="todo-checkbox" onclick="toggleTodo(${t.id})">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="20 6 9 17 4 12"></polyline>
+            </svg>
+          </div>
+          <div class="todo-text">${escapeHtml(t.text)}</div>
+          <span class="todo-priority ${['high', 'medium', 'low'].includes(t.priority) ? t.priority : 'medium'}">${{high: '高', medium: '中', low: '低'}[t.priority] || '中'}</span>
+          <span class="todo-meta">${t.time}</span>
+          <button class="todo-delete" onclick="deleteTodo(${t.id})" title="删除">✕</button>
+        </li>
+      `).join('');
+    }
+
+    function escapeHtml(str) {
+      const div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
+    // ==================== 快捷统计区 ====================
+    function renderQuickSection() {
+      const section = document.getElementById('quickSection');
+      const lessonCount = Object.keys(scheduleData).length;
+      const todayLessons = Object.entries(scheduleData)
+        .filter(([k]) => k.startsWith(todayStr + '::')).length;
+      const todoTotal = todos.length;
+      const todoPending = todos.filter(t => !t.done).length;
+
+      section.innerHTML = `
+        <div class="quick-card" onclick="document.getElementById('scheduleGrid').scrollIntoView({behavior:'smooth'})">
+          <div class="q-icon">📚</div>
+          <div class="q-label">周总课时</div>
+          <div class="q-value">${lessonCount} 节</div>
+        </div>
+        <div class="quick-card" style="border-color:${todayLessons > 0 ? 'var(--primary)' : 'var(--border)'};">
+          <div class="q-icon">📌</div>
+          <div class="q-label">今日课程</div>
+          <div class="q-value">${todayLessons} 节</div>
+        </div>
+        <div class="quick-card" onclick="document.querySelector('.todo-list').scrollIntoView({behavior:'smooth'})">
+          <div class="q-icon">⏰</div>
+          <div class="q-label">待办待处理</div>
+          <div class="q-value">${todoPending} 项</div>
+        </div>
+        <div class="quick-card">
+          <div class="q-icon">✅</div>
+          <div class="q-label">待办已完成</div>
+          <div class="q-value">${todoTotal - todoPending} 项</div>
+        </div>
+      `;
+    }
+
+    // ==================== 初始化 ====================
+    renderSchedule();
+    renderTodos();
+    renderQuickSection();
+  </script>
+</body>
+</html>

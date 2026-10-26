@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>数据迁移 · 本地 → Supabase</title>
+  <link rel="stylesheet" href="css/style.css">
+  <style>
+    .migrate-page { max-width: 900px; margin: 0 auto; padding: 32px 24px 64px; }
+    .migrate-page h1 { font-size: 24px; margin: 0 0 8px; }
+    .migrate-page .lead { color: var(--text-secondary); font-size: 14px; margin-bottom: 24px; }
+    .migrate-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 20px; margin-bottom: 16px; }
+    .migrate-card h2 { font-size: 16px; margin: 0 0 12px; }
+    .migrate-status { font-size: 14px; margin-bottom: 12px; }
+    .migrate-status.is-error { color: var(--danger); }
+    .migrate-status.is-ok { color: var(--success, #2e7d32); }
+    .migrate-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .migrate-table th, .migrate-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+    .migrate-table th { color: var(--text-tertiary); font-weight: 600; }
+    .migrate-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 16px; }
+    .migrate-log { margin: 12px 0 0; padding: 12px; background: var(--bg); border-radius: var(--radius-sm); font-size: 12px; line-height: 1.8; max-height: 260px; overflow: auto; white-space: pre-wrap; }
+    code.inline { background: var(--bg); padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <main class="migrate-page">
+    <h1>数据迁移：浏览器 localStorage → Supabase</h1>
+    <p class="lead">
+      在<b>原来那台浏览器</b>里打开本页（用 <code class="inline">node server.js</code> 或 <code class="inline">vercel dev</code> 启动），
+      确认云端已连通后点击「一键导入云端」，即可把本机现有数据一次性写入 Supabase。
+    </p>
+
+    <section class="migrate-card">
+      <h2>1. 连接状态</h2>
+      <p class="migrate-status" id="migrateMode">正在检测…</p>
+      <ul style="font-size:13px;color:var(--text-secondary);line-height:1.9;padding-left:20px;">
+        <li>未配置 Supabase 环境变量时，工作台会继续使用 localStorage，功能不受影响。</li>
+        <li>本地请在项目根目录 <code class="inline">.env.local</code> 增加 <code class="inline">SUPABASE_URL</code> 与 <code class="inline">SUPABASE_ANON_KEY</code>；Vercel 部署请在项目环境变量中配置。</li>
+        <li>表结构请先执行 <code class="inline">supabase/schema.sql</code>。</li>
+      </ul>
+    </section>
+
+    <section class="migrate-card">
+      <h2>2. 本机待迁移数据</h2>
+      <table class="migrate-table">
+        <thead>
+          <tr><th>本地存储键</th><th>目标数据表</th><th>条数</th><th>状态</th></tr>
+        </thead>
+        <tbody id="migrateRows"></tbody>
+      </table>
+      <div class="migrate-actions">
+        <button class="btn btn-primary" id="migrateImportBtn" type="button" onclick="runMigration()">一键导入云端</button>
+        <button class="btn btn-secondary" type="button" onclick="downloadBackup()">导出 JSON 备份</button>
+        <span style="font-size:13px;color:var(--text-secondary);">导入会在本地保留 <code class="inline">__local_backup</code> 副本，可随时回滚。</span>
+      </div>
+      <pre class="migrate-log" id="migrateLog" hidden></pre>
+    </section>
+  </main>
+
+  <script src="js/store.js"></script>
+  <script src="js/migrate.js"></script>
+</body>
+</html>

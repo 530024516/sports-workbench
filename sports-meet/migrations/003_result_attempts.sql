@@ -1,0 +1,7 @@
+PRAGMA foreign_keys = ON;
+
+BEGIN TRANSACTION;
+
+ALTER TABLE result ADD COLUMN attempts_json TEXT NOT NULL DEFAULT '[]';
+
+COMMIT;
