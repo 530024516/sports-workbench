@@ -103,7 +103,7 @@ const DB = {
   init() {
     // 不再自动生成任何示例数据：库里有什么就显示什么，没有就是空
     // 数据就绪后再做结构迁移（迁移结果会写回 Supabase）
-    Store.ready.then(() => {
+    Store.onReady(() => {
       this._migrateSchedule();
       this._migrateTodos();
       this._migrateLessonResources();

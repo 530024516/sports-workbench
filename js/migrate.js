@@ -260,13 +260,21 @@ function downloadBackup() {
   URL.revokeObjectURL(url);
 }
 
-Store.ready.then(() => {
+Store.onReady(() => {
   renderRows();
   if (Store.mode === 'supabase') {
     migrateMode.textContent = '已连接 Supabase：可以开始导入。';
+    migrateMode.classList.remove('is-error');
     migrateMode.classList.add('is-ok');
+    migrateButton.disabled = false;
+  } else if (Store.cloudState === 'unknown') {
+    // 缓存优先：本地缓存先就绪，云端还在后台确认中
+    migrateMode.textContent = '正在连接 Supabase…';
+    migrateMode.classList.remove('is-error', 'is-ok');
+    migrateButton.disabled = true;
   } else {
     migrateMode.textContent = '未连接 Supabase：请在服务端配置 SUPABASE_URL 与 SUPABASE_ANON_KEY（本地写入 .env.local，Vercel 写在项目环境变量），重启服务后刷新本页。';
+    migrateMode.classList.remove('is-ok');
     migrateMode.classList.add('is-error');
     migrateButton.disabled = true;
   }

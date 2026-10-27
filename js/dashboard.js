@@ -560,7 +560,7 @@ function renderCharts() {
 renderDashboardStats();
 renderCharts();
 
-Store.ready.then(() => {
+Store.onReady(() => {
   refreshDashboardData();
   renderDashboardStats();
   renderSchedule();

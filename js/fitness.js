@@ -88,7 +88,7 @@ content.innerHTML = `
   <div id="fitnessContent"></div>
 `;
 
-Store.ready.then(() => {
+Store.onReady(() => {
   renderView();
   updateFitnessSummaryCards();
 });

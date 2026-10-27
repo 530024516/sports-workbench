@@ -832,6 +832,6 @@ function initializePage() {
   renderStorageAlert();
 }
 
-Store.ready.then(() => {
+Store.onReady(() => {
   initializePage();
 });

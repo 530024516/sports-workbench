@@ -733,6 +733,6 @@ function initializeResultsPage() {
   renderResults();
 }
 
-Store.ready.then(() => {
+Store.onReady(() => {
   initializeResultsPage();
 });

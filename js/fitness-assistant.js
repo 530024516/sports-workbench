@@ -560,6 +560,6 @@ function closeFitnessTopModal() {
 
 document.querySelectorAll('#fitnessEquipmentOptions input').forEach(syncFitnessEquipmentChip);
 renderFitnessNotice('填写上方表单并点击「生成今日训练计划」，结果将显示在这里。');
-Store.ready.then(() => {
+Store.onReady(() => {
   renderFitnessWeekBoard();
 });

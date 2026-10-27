@@ -601,7 +601,7 @@ document.querySelectorAll('.unit-section-tab').forEach((tab, index, tabs) => {
   });
 });
 
-Store.ready.then(() => {
+Store.onReady(() => {
   unitData = loadUnitData();
   renderUnitInputs();
 });

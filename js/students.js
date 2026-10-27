@@ -90,7 +90,7 @@ content.innerHTML = `
 `;
 
 populateStudentClassFilter();
-Store.ready.then(() => {
+Store.onReady(() => {
   renderTable();
 });
 

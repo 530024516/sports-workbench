@@ -180,7 +180,7 @@ const requestedTab = window.location.hash.slice(1);
 if (requestedTab === 'unit-design') {
   window.location.replace('unit-design.html');
 } else {
-  Store.ready.then(() => {
+  Store.onReady(() => {
     // 云端标题就绪后再渲染，避免每次都回落到默认标题
     renderSportsMeetTitle(loadSportsMeetTitle());
     selectSportsMeetTab(sportsMeetTabs.some(tab => tab.id === requestedTab) ? requestedTab : 'registration', false);

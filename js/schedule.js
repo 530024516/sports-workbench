@@ -739,6 +739,6 @@ function initializeSchedulePage() {
   renderSchedule();
 }
 
-Store.ready.then(() => {
+Store.onReady(() => {
   initializeSchedulePage();
 });

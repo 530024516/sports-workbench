@@ -44,7 +44,7 @@ content.innerHTML = `
   <div id="resourcesSection"></div>
 `;
 
-Store.ready.then(() => {
+Store.onReady(() => {
   renderLessons();
   renderResources();
 });
