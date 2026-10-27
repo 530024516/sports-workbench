@@ -260,22 +260,43 @@ function downloadBackup() {
   URL.revokeObjectURL(url);
 }
 
-Store.onReady(() => {
+// 配置探测结果：ok=请求是否成功，configured=服务端是否配置了 Supabase
+let configProbe = { ok: null, configured: null, reason: '' };
+
+/** 主动探测连接状态：带 5 秒超时，失败即判定未连接，不会一直"正在连接" */
+async function refreshConnectionStatus() {
+  configProbe = await Store.probeConfig();
+  renderConnectionStatus();
+}
+
+function renderConnectionStatus() {
   renderRows();
+  const setState = (text, state) => {
+    migrateMode.textContent = text;
+    migrateMode.classList.remove('is-ok', 'is-error');
+    if (state) migrateMode.classList.add(state);
+  };
+
   if (Store.mode === 'supabase') {
-    migrateMode.textContent = '已连接 Supabase：可以开始导入。';
-    migrateMode.classList.remove('is-error');
-    migrateMode.classList.add('is-ok');
+    setState('已连接 Supabase：可以开始导入。', 'is-ok');
     migrateButton.disabled = false;
-  } else if (Store.cloudState === 'unknown') {
-    // 缓存优先：本地缓存先就绪，云端还在后台确认中
-    migrateMode.textContent = '正在连接 Supabase…';
-    migrateMode.classList.remove('is-error', 'is-ok');
-    migrateButton.disabled = true;
-  } else {
-    migrateMode.textContent = '未连接 Supabase：请在服务端配置 SUPABASE_URL 与 SUPABASE_ANON_KEY（本地写入 .env.local，Vercel 写在项目环境变量），重启服务后刷新本页。';
-    migrateMode.classList.remove('is-ok');
-    migrateMode.classList.add('is-error');
-    migrateButton.disabled = true;
+    return;
   }
-});
+  if (configProbe.ok === false) {
+    setState(`未连接 Supabase：接口请求失败（${configProbe.reason || '超时或网络异常'}）。当前使用 localStorage，页面可正常操作。`, 'is-error');
+    migrateButton.disabled = true;
+    return;
+  }
+  if (configProbe.configured === false) {
+    setState('未连接 Supabase：服务端未配置 SUPABASE_URL 与 SUPABASE_ANON_KEY（本地写入 .env.local，Vercel 写在项目环境变量），重启服务后点「重新检测」。当前使用 localStorage，页面可正常操作。', 'is-error');
+    migrateButton.disabled = true;
+    return;
+  }
+  // 探测还没回来：最多再等 5 秒，超时后 Store 会自动置为未连接并再次触发本函数
+  setState('正在连接 Supabase…', null);
+  migrateButton.disabled = true;
+}
+
+// Store 状态变化（含同步失败降级）时立刻刷新；同时主动探测一次
+Store.onReady(renderConnectionStatus);
+refreshConnectionStatus();

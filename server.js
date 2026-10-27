@@ -46,9 +46,11 @@ function sendSupabaseConfig(req, res) {
     res.end(JSON.stringify({ error: '仅允许本机访问' }));
     return;
   }
+  const configured = Boolean(supabase.isSupabaseConfigured());
   const payload = JSON.stringify({
-    supabaseConfigured: supabase.isSupabaseConfigured(),
-    keySource: supabase.getConfigSource(),
+    configured,                     // 统一字段名，与 api/config.js 一致
+    supabaseConfigured: configured, // 旧字段，保留兼容
+    keySource: configured ? supabase.getConfigSource() : '',
   });
   res.writeHead(200, {
     'Content-Type': 'application/json; charset=utf-8',

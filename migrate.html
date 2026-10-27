@@ -33,6 +33,10 @@
     <section class="migrate-card">
       <h2>1. 连接状态</h2>
       <p class="migrate-status" id="migrateMode">正在检测…</p>
+      <div class="migrate-actions">
+        <button class="btn btn-secondary" id="migrateRetryBtn" type="button" onclick="refreshConnectionStatus()">重新检测</button>
+        <span style="font-size:13px;color:var(--text-secondary);">检测超过 5 秒无响应会自动判定为「未连接」并回退 localStorage，页面照常可用。</span>
+      </div>
       <ul style="font-size:13px;color:var(--text-secondary);line-height:1.9;padding-left:20px;">
         <li>未配置 Supabase 环境变量时，工作台会继续使用 localStorage，功能不受影响。</li>
         <li>本地请在项目根目录 <code class="inline">.env.local</code> 增加 <code class="inline">SUPABASE_URL</code> 与 <code class="inline">SUPABASE_ANON_KEY</code>；Vercel 部署请在项目环境变量中配置。</li>
