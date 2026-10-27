@@ -40,10 +40,14 @@ const STORE_KEYS = [
   'sportsMeetTitle',
 ];
 
-// 所有接口请求的统一超时上限：超时或异常一律判定为「未连接」并回退 localStorage
-const REQUEST_TIMEOUT = 5000;
+// 所有接口请求的统一超时上限
+// 20 秒：Vercel（尤其免费版）冷启动 + Supabase 首次连接经常超过 5 秒，
+// 5 秒会在 Network 面板表现为 (canceled)、传输 0 kB，数据永远拉不下来
+const REQUEST_TIMEOUT = 20000;
 // 冷启动等待云端的上限：到点就先出界面，绝不让页面无限期卡在加载动画
 const COLD_START_TIMEOUT = REQUEST_TIMEOUT;
+// 冷启动等待超过这个时间就提示"服务端在冷启动"，避免用户以为卡死
+const SLOW_HINT_DELAY = 6000;
 // 迁移导入数据量大，单独放宽到 30 秒
 const IMPORT_TIMEOUT = 30000;
 // 同步失败后的自动重试：首次 + 1 次重试，隔 RETRY_DELAY 再试（应对偶发网络波动/超时）
@@ -69,9 +73,15 @@ const Store = {
   syncing: false,
   lastSyncAt: null,
   lastError: null,
+  // 对外的只读常量（排障/测试用）
+  requestTimeout: REQUEST_TIMEOUT,
+  // 请求串行闸门：保证同一时刻只有一个 /api 请求在飞，
+  // 超时也必须等这一发彻底结束（abort 生效）后才允许发下一次，避免并发堆积
+  _requestChain: Promise.resolve(),
   // 待写队列：key → { value, at }（at 用于判断这条失败写入是否还"新鲜"）
   _pendingWrites: new Map(),
   _loadingNode: null,
+  _slowHintTimer: null,
   _backedUp: false,
   _reconnectTimer: null,
   _reconnectAttempts: 0,
@@ -158,6 +168,8 @@ const Store = {
       } catch (error) {
         lastError = error;
         if (attempt < attempts) {
+          // 注意：上一发请求此时已经彻底结束（_doFetch 内部等过 _settle），
+          // 再等 RETRY_DELAY 才发下一发，串行且不堆积
           console.warn(`[Store] 第 ${attempt}/${attempts} 次同步失败（${error?.message || error}），${RETRY_DELAY}ms 后自动重试…`);
           await this._delay(RETRY_DELAY);
         }
@@ -174,12 +186,26 @@ const Store = {
   },
 
   /**
-   * 带超时的请求：AbortController 中断 + Promise.race 兜底
-   * 任何情况下都不会无限期挂起（没有 AbortController 的旧浏览器也靠 race 退出）
+   * 请求闸门：所有 /api 请求排队串行执行
+   * 上一发必须彻底结束（完成或超时 abort 生效）之后，才会发起下一发，
+   * 所以重试期间绝不会出现多条并发请求把浏览器连接数占满
    */
-  async _fetchJSON(url, options = {}, timeout = REQUEST_TIMEOUT) {
+  _fetchJSON(url, options = {}, timeout = REQUEST_TIMEOUT) {
+    const run = () => this._doFetch(url, options, timeout);
+    const result = this._requestChain.then(run, run);
+    // 链条本身不因某次失败而中断（错误交给调用方处理）
+    this._requestChain = result.then(() => {}, () => {});
+    return result;
+  },
+
+  /**
+   * 真正的一次请求：AbortController 中断 + Promise.race 兜底超时
+   * 超时后先等这一发彻底收尾再抛错，避免重试与旧请求并发
+   */
+  async _doFetch(url, options = {}, timeout = REQUEST_TIMEOUT) {
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
     let timer = null;
+    let request = null;
     const timeoutRace = new Promise((_, reject) => {
       timer = setTimeout(() => {
         if (controller) controller.abort();
@@ -187,19 +213,28 @@ const Store = {
       }, timeout);
     });
     try {
-      const response = await Promise.race([
-        fetch(url, { ...options, signal: controller ? controller.signal : undefined }),
-        timeoutRace,
-      ]);
+      request = fetch(url, { ...options, signal: controller ? controller.signal : undefined });
+      const response = await Promise.race([request, timeoutRace]);
       if (!response.ok) {
         const error = new Error(`${url} 返回 HTTP ${response.status}`);
         error.status = response.status;
         throw error;
       }
       return await response.json();
+    } catch (error) {
+      // 等 abort 真正生效、这一发结束，再让上层重试
+      await this._settle(request);
+      throw error;
     } finally {
       if (timer) clearTimeout(timer);
     }
+  },
+
+  /** 等一个请求彻底收尾（成功/失败都算），最多等 maxWait，防止极端情况卡住队列 */
+  _settle(promise, maxWait = 3000) {
+    if (!promise || typeof promise.then !== 'function') return Promise.resolve();
+    const settled = promise.then(() => {}, () => {});
+    return Promise.race([settled, this._delay(maxWait)]);
   },
 
   /** 单次同步：失败一律 throw，由 _syncWithRetry 负责重试与降级 */
@@ -498,12 +533,25 @@ const Store = {
       + 'color:#444;font-size:14px;font-family:inherit;';
     node.innerHTML = '<div style="width:36px;height:36px;border:3px solid #E85D04;'
       + 'border-top-color:transparent;border-radius:50%;animation:store-spin .8s linear infinite;"></div>'
-      + '<div>正在从云端同步数据…</div><style>@keyframes store-spin{to{transform:rotate(360deg)}}</style>';
+      + '<div id="store-loading-text">正在从云端同步数据…</div>'
+      + '<style>@keyframes store-spin{to{transform:rotate(360deg)}}</style>';
     document.body.appendChild(node);
     this._loadingNode = node;
+
+    // 超过 6 秒还没回来，提示是服务端冷启动，避免用户以为卡死（超时上限 20 秒）
+    this._slowHintTimer = setTimeout(() => {
+      const text = typeof document.getElementById === 'function'
+        ? document.getElementById('store-loading-text')
+        : null;
+      if (text) text.textContent = '云端服务正在启动（首次访问可能稍慢，最多等待 20 秒）…';
+    }, SLOW_HINT_DELAY);
   },
 
   _hideLoading() {
+    if (this._slowHintTimer) {
+      clearTimeout(this._slowHintTimer);
+      this._slowHintTimer = null;
+    }
     if (!this._loadingNode) return;
     this._loadingNode.remove();
     this._loadingNode = null;
@@ -523,7 +571,14 @@ const Store = {
     this.mode = 'local';
     console.log(`[Store] 已清空本地缓存（${clearedKeys} 个键）与待写队列（${droppedPending} 条），开始强制拉取云端…`);
 
-    const result = await this._syncWithRetry({ silent: true });
+    // 占用 syncing 标记：避免同时还有一条后台 sync 在跑（请求本身也已串行）
+    this.syncing = true;
+    let result;
+    try {
+      result = await this._syncWithRetry({ silent: true });
+    } finally {
+      this.syncing = false;
+    }
     if (result.ok && this.mode === 'supabase') {
       this._dispatchSync(result.changed || [], { forced: true, reason: 'forceSyncCloud' });
       console.log(`[Store] ✅ forceSyncCloud 完成：已用云端数据重建本地（${(result.changed || []).length} 个键写入）`);
