@@ -340,9 +340,10 @@
 }
 
 .schedule-roster-details[open] .schedule-participants {
-  max-height: 220px;
   margin-top: 8px;
-  overflow-y: auto;
+  /* 单滚动条：名单高度自然撑开，不再自带滚动条 */
+  max-height: none;
+  overflow: visible;
 }
 
 .schedule-conflict-card {
@@ -1122,17 +1123,34 @@
   font-size: 12px;
 }
 
+/* iframe 高度由 JS 按「内容真实高度」自动撑开（见 js/sports-meet.js）。
+   安全前提：iframe 内部【没有任何 vh 相关高度】——内容高度只取决于宽度，
+   与 iframe 自身高度无关，因此不会形成「越撑越高」的正反馈。
+   这样父页就是一条自然滚动条，不必把模块塞进固定高度的小盒子里。 */
 .sports-meet-frame {
   display: block;
   width: 100%;
+  height: 600px;          /* 首屏兜底值，加载完成后由 JS 改成真实内容高度 */
   min-height: 480px;
   border: 0;
   background: transparent;
 }
 
+/* 嵌入式页面（iframe 内）：高度同样自然撑开，撑满父页给的宽度 */
+.embedded-page {
+  display: block;
+}
+
 .embedded-page > .page-content {
   max-width: none;
   padding: 8px;
+}
+
+/* 运动会首页 / 赛程页：内容撑满整屏宽度，不再缩在中间一小块 */
+.page-content.sports-meet-shell,
+.page-content.schedule-page-shell {
+  max-width: none;
+  padding: 16px;
 }
 
 .embedded-reports-only .page-content > :not(.result-export-card) {
@@ -1534,3 +1552,630 @@
     text-align: left;
   }
 }
+
+/* ---------- 全校报名总览看板 ---------- */
+.meet-overview-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.meet-stat-mini {
+  padding: 12px 14px;
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.meet-stat-mini h4 {
+  margin: 0;
+  font-size: 22px;
+  color: var(--primary-dark);
+}
+
+.meet-stat-mini p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.meet-class-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(258px, 1fr));
+  gap: 12px;
+}
+
+.meet-class-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.meet-class-card.pending {
+  background: var(--bg-hover);
+}
+
+.meet-class-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.meet-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.meet-badge.done {
+  background: var(--success-light);
+  color: var(--success);
+}
+
+.meet-badge.pending {
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+}
+
+.meet-class-meta {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.meet-class-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.meet-class-actions .btn {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.meet-search-result {
+  margin: 12px 0 16px;
+}
+
+.meet-search-result:empty {
+  display: none;
+}
+
+/* 网格模式：行 = 项目，列 = 男子组 / 女子组 */
+.meet-grid-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.meet-grid-table th,
+.meet-grid-table td {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.meet-grid-table th {
+  background: var(--bg-hover);
+  font-weight: 600;
+}
+
+.meet-grid-table td.meet-grid-event {
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.meet-grid-name {
+  display: inline-block;
+  margin: 2px 4px 2px 0;
+  padding: 2px 7px;
+  background: var(--primary-100);
+  color: var(--primary-dark);
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.meet-grid-name.sub {
+  background: var(--info-light);
+  color: #087990;
+}
+
+.meet-grid-empty {
+  color: var(--text-secondary);
+}
+
+/* ---------- 赛程甘特图（四轨道时间轴，多日） ---------- */
+.schedule-day-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.schedule-day-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s, color .15s, border-color .15s;
+}
+
+.schedule-day-tab span {
+  padding: 1px 6px;
+  background: rgba(0, 0, 0, .06);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.schedule-day-tab:hover { border-color: var(--primary-dark); color: var(--primary-dark); }
+
+.schedule-day-tab.active {
+  background: var(--primary-dark);
+  border-color: var(--primary-dark);
+  color: #fff;
+}
+
+.schedule-day-tab.active span { background: rgba(255, 255, 255, .22); color: #fff; }
+
+.schedule-day-block + .schedule-day-block { margin-top: 22px; }
+
+.schedule-day-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px dashed var(--border);
+}
+
+.schedule-day-head h3 { margin: 0; font-size: 15px; }
+.schedule-day-head span { font-size: 12px; color: var(--text-secondary); }
+
+.schedule-day-block {
+  position: relative;      /* 兜底：飘到极远的绝对定位元素被裁在这天里，撑不高外层 */
+  overflow: hidden;        /* 老浏览器兜底 */
+  overflow: clip;          /* clip 只裁剪、不产生滚动容器，内部 sticky 才生效 */
+}
+
+/* 单滚动条：容器高度由内容（时间轴 1530px）自然撑开，不再自己滚动 */
+.schedule-gantt-scroll {
+  position: relative;
+  height: auto;
+  min-height: 0;
+  max-height: none;
+  overflow: visible;          /* 归到页面唯一滚动条；横向过窄时由 .page-content 接管 */
+  padding: 4px 2px 8px;
+}
+
+.schedule-gantt {
+  /* 吸顶表头高度：时间刻度标签就吸在它正下方（改这里两处会同步）
+     66px = 场地表头两行文字（~58px）+ 表头自身下留白 4px + 余量 */
+  --gantt-head-h: 66px;
+  position: relative;      /* 定位上下文 + 越界裁剪 */
+  overflow: hidden;        /* 老浏览器兜底 */
+  overflow: clip;          /* 只裁剪、不建滚动容器 → 表头 sticky 依然生效 */
+  width: 100%;             /* 时间轴撑满可用宽度，不再缩在中间 */
+  min-width: 660px;
+}
+
+.schedule-gantt-head,
+.schedule-gantt-body {
+  display: grid;
+  grid-template-columns: 64px repeat(4, minmax(140px, 1fr));
+}
+
+/* 顶部表头：跟随唯一滚动条吸顶，滚到明细列表时依然看得见场地列 */
+.schedule-gantt-head {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  box-sizing: border-box;
+  height: var(--gantt-head-h);
+  padding-bottom: 4px;
+  background: #fff;
+  box-shadow: 0 6px 10px -8px rgba(15, 23, 42, .45);
+}
+
+/* 高度硬锁定：任何越界的绝对定位都被裁掉，容器高度严格 = 时间窗口（510 分钟 = 1530px）
+   上下各留 10px，保证首 / 末刻度文字不被切 */
+.schedule-gantt-body {
+  padding: 10px 0;
+  overflow: hidden;        /* 老浏览器兜底 */
+  overflow: clip;          /* 越界裁剪，但不影响 sticky */
+}
+
+.schedule-gantt-axis-head,
+.schedule-gantt-venue-head {
+  padding: 7px 8px;
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.schedule-gantt-axis-head { font-size: 12px; color: var(--text-secondary); }
+
+.schedule-gantt-venue-head { display: flex; flex-direction: column; gap: 2px; }
+
+.schedule-gantt-venue-head small {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.schedule-gantt-venue-head.tone-track { border-top: 3px solid #1d4ed8; }
+.schedule-gantt-venue-head.tone-sandpit { border-top: 3px solid #b45309; }
+.schedule-gantt-venue-head.tone-throwing { border-top: 3px solid #047857; }
+.schedule-gantt-venue-head.tone-highjump { border-top: 3px solid #7e22ce; }
+
+.schedule-gantt-axis,
+.schedule-gantt-track {
+  position: relative;
+  height: var(--gantt-height, 1530px);
+  max-height: var(--gantt-height, 1530px);   /* 双保险：再脏的数据也撑不高 */
+  border-left: 1px solid var(--border);
+}
+
+/* 每 30 分钟一条网格线（30 × 3px = 90px） */
+.schedule-gantt-track {
+  background-image: repeating-linear-gradient(
+    to bottom, var(--border) 0, var(--border) 1px, transparent 1px,
+    transparent var(--gantt-tick-px, 90px));
+  background-position: 0 0;
+}
+
+/* 时间刻度：每 30 分钟一个「槽」，槽里的标签 sticky 吸在表头正下方
+   → 往下滚看卡片/明细时，当前时刻（08:30 / 09:00 …）始终固定可见 */
+.schedule-gantt-tick-slot {
+  position: relative;
+  display: block;
+}
+
+.schedule-gantt-tick {
+  position: sticky;
+  top: var(--gantt-head-h);
+  z-index: 9;
+  display: block;
+  padding: 1px 0 0;
+  text-align: right;
+  font-size: 11px;
+  line-height: 13px;
+  color: var(--text-secondary);
+  background: #fff;
+  white-space: nowrap;
+}
+
+.schedule-gantt-tick::after {
+  content: '';
+  position: absolute;
+  right: -8px;
+  top: 6px;
+  width: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.schedule-gantt-offband {
+  position: absolute;
+  left: 0;
+  right: 0;
+  background: repeating-linear-gradient(
+    45deg, var(--bg-hover), var(--bg-hover) 6px, transparent 6px, transparent 12px);
+  opacity: .75;
+  pointer-events: none;
+}
+
+.schedule-gantt-offband span {
+  display: block;
+  padding: 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.schedule-gantt-block {
+  position: absolute;
+  left: 5px;
+  right: 5px;
+  overflow: hidden;            /* 短卡片放不下的文字用省略号，完整信息看 tooltip */
+  box-sizing: border-box;
+  min-height: 0;               /* 高度严格 = 时长 × 3px，绝不为排版拉伸 */
+  padding: 3px 7px;
+  border: 1px solid var(--gantt-line, var(--border));
+  border-left: 4px solid var(--gantt-main, var(--primary-dark));
+  border-radius: 10px;
+  background: var(--gantt-soft, var(--primary-100));
+  box-shadow: 0 1px 2px rgba(15, 23, 42, .08);
+  transition: box-shadow .15s;
+}
+
+.schedule-gantt-block:hover {
+  z-index: 7;                  /* 悬浮时完整显示，并盖住吸附表头 */
+  box-shadow: 0 4px 12px rgba(15, 23, 42, .18);
+}
+
+.schedule-gantt-block.narrow { border-left-width: 3px; }
+
+.schedule-gantt-block.tone-track { --gantt-main:#1d4ed8; --gantt-soft:#e5edff; --gantt-line:#93b4fd; }
+.schedule-gantt-block.tone-sandpit { --gantt-main:#b45309; --gantt-soft:#fdf1dc; --gantt-line:#f0c078; }
+.schedule-gantt-block.tone-throwing { --gantt-main:#047857; --gantt-soft:#dcf5ea; --gantt-line:#84d3b4; }
+.schedule-gantt-block.tone-highjump { --gantt-main:#7e22ce; --gantt-soft:#f2e6fd; --gantt-line:#c99bf2; }
+
+.schedule-gantt-block-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  line-height: 14px;
+  color: var(--gantt-main);
+  font-weight: 700;
+}
+
+.schedule-gantt-block.compact .schedule-gantt-block-head { font-size: 10.5px; line-height: 13px; }
+
+.schedule-gantt-block-scope {
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.schedule-gantt-block-title {
+  margin-top: 1px;
+  font-size: 12.5px;
+  font-weight: 700;
+  line-height: 15px;
+  color: var(--text-primary, #0f172a);
+  /* 放不下就用省略号，完整内容在 title/tooltip 里 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.schedule-gantt-block.compact .schedule-gantt-block-title { font-size: 12px; line-height: 14px; }
+
+.schedule-gantt-block-meta {
+  font-size: 11px;
+  line-height: 13px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.schedule-gantt-flag {
+  flex: none;
+  padding: 0 4px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.schedule-gantt-flag.warn { background: #fee2e2; color: #b91c1c; }
+.schedule-gantt-flag.flex { background: #fef3c7; color: #b45309; }
+
+.schedule-gantt-block.conflict { border-color: #fca5a5; }
+.schedule-gantt-block.flex { border-style: dashed; }
+
+.schedule-time-pair { display: inline-flex; align-items: center; gap: 4px; }
+.schedule-time-dash { color: var(--text-secondary); }
+
+.schedule-detail-panel {
+  margin-top: 14px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.schedule-detail-panel > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--primary-dark);
+}
+
+.schedule-unscheduled {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-left: 3px solid #b45309;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #7c2d12;
+}
+
+.schedule-unscheduled ul { margin: 6px 0; padding-left: 20px; }
+
+.schedule-warning.schedule-flex { color: #b45309; }
+
+
+.schedule-unscheduled {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-left: 3px solid #b45309;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #7c2d12;
+}
+
+.schedule-unscheduled ul {
+  margin: 6px 0;
+  padding-left: 20px;
+}
+
+.schedule-gantt-block-time {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.schedule-gantt-flag { flex: none; }
+
+.schedule-venue-books { margin-top: 10px; }
+
+/* ---------- 赛制设置（一枪制 / 两枪制） ---------- */
+.schedule-format-panel {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-hover);
+}
+
+.schedule-format-panel > summary {
+  padding: 9px 12px;
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--primary-dark);
+}
+
+.schedule-format-body { padding: 0 12px 12px; }
+
+.schedule-format-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.schedule-format-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px;
+}
+
+.schedule-format-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  background: var(--bg-card, #fff);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.schedule-format-name { flex: 1; font-weight: 600; font-size: 13px; }
+
+.schedule-format-meta { font-size: 11px; color: var(--text-secondary); white-space: nowrap; }
+
+.schedule-format-select {
+  flex: none;
+  max-width: 170px;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-card, #fff);
+  font-size: 12px;
+}
+
+/* 打印 / 导出 PDF 时把甘特图完整展开，不做裁剪 */
+@media print {
+  /* 打印时解除「单滚动容器」的高度锁定，整页完整展开 */
+  html,
+  body { height: auto; overflow: visible; }
+
+  .page-content {
+    height: auto;
+    max-height: none;
+    overflow: visible;
+  }
+
+  .schedule-gantt-scroll {
+    height: auto;
+    max-height: none;
+    overflow: visible;
+  }
+  .schedule-gantt-head { position: static; height: auto; box-shadow: none; }
+  .schedule-gantt-tick { position: static; background: transparent; }
+  .schedule-format-panel { display: none; }
+}
+
+/* ---------- 一键清空本次运动会（危险区） ---------- */
+.meet-purge-zone {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 10px 14px;
+  border: 1px solid #fecaca;
+  border-left: 4px solid #dc2626;
+  border-radius: 10px;
+  background: #fef2f2;
+}
+
+.meet-purge-zone .meet-purge-text { display: flex; flex-direction: column; gap: 2px; }
+.meet-purge-zone strong { font-size: 13px; color: #b91c1c; }
+.meet-purge-zone span { font-size: 12px; color: var(--text-secondary); }
+
+.meet-purge-btn,
+.btn.meet-purge-danger {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid #dc2626;
+  background: #dc2626;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  box-shadow: 0 2px 6px rgba(220, 38, 38, .25);
+}
+
+.meet-purge-btn:hover,
+.btn.meet-purge-danger:hover { background: #b91c1c; border-color: #b91c1c; }
+
+.btn.meet-purge-danger:disabled { opacity: .65; cursor: progress; }
+
+.meet-purge-modal .meet-purge-warn {
+  font-weight: 700;
+  color: #b91c1c;
+}
+
+.meet-purge-list {
+  margin: 8px 0 12px;
+  padding-left: 0;
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.meet-purge-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 10px;
+  background: var(--bg-hover);
+  border-radius: 6px;
+}
+
+.meet-purge-input {
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border: 1px solid #fca5a5;
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+.meet-purge-overlay .modal { border-top: 4px solid #dc2626; }

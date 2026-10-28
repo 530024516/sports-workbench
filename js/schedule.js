@@ -3,16 +3,79 @@
 Layout.init('schedule', '运动会赛程编排', '赛程编排');
 
 const MEET_STORAGE_KEY = 'pe_sports_meet_v1';
-const DEFAULT_TRACK_LANES = 8;
+// 可选跑道数与默认跑道数（与报名页「竞赛预分组」保持一致；4 道的小场地也支持）
+const TRACK_LANE_OPTIONS = [4, 5, 6, 7, 8];
+const DEFAULT_TRACK_LANES = 4;
 const DEFAULT_CHECKIN_MINUTES = 15;
+
+/* 场地资源：200 米操场的真实家底 —— 跑道 1 条（4 道）、沙坑 1 个、投掷区 1 个、跳高区 1 个。
+   每个场地各有一条独立时间轴 → 四个场地可以并行开赛；同一场地内串行。 */
+const VENUE_RESOURCES = [
+  { key: 'track', name: '跑道', icon: '🏃', tone: 'track', note: `${DEFAULT_TRACK_LANES} 条跑道` },
+  { key: 'sandpit', name: '沙坑', icon: '🏖️', tone: 'sandpit', note: '全校仅 1 个，串行' },
+  { key: 'throwing', name: '投掷区', icon: '🎯', tone: 'throwing', note: '全校仅 1 个，串行' },
+  { key: 'highjump', name: '跳高区', icon: '🤸', tone: 'highjump', note: '全校仅 1 个，串行' },
+];
+
+// 比赛时段：所有赛程都锁在上午 / 下午里，绝不排到晚上
+const DEFAULT_SESSIONS = [
+  { key: 'morning', label: '上午', start: '08:30', end: '12:00' },
+  { key: 'afternoon', label: '下午', start: '13:30', end: '17:00' },
+];
+// 比赛总天数：1 天 = 上午+下午；1.5 天 = 第一天全天 + 第二天上午；2.5 天同理
+const DAY_TOTAL_OPTIONS = [1, 1.5, 2, 2.5];
+const DEFAULT_DAY_TOTAL = 2;
+const DEFAULT_TRACK_DURATION = 12;   // 径赛每组约 10~15 分钟
+const DEFAULT_FIELD_DURATION = 45;   // 田赛每项约 40~60 分钟
+
+/* 项目赛制：小学运动会大多「一枪定胜负」，默认全部仅一次决赛；需要预决赛的再单独打开 */
+const EVENT_FORMAT_OPTIONS = [
+  { value: 'one-shot', label: '仅一次决赛（一枪制）' },
+  { value: 'two-round', label: '预赛 + 决赛（两枪制）' },
+];
+const DEFAULT_EVENT_FORMAT = 'one-shot';
+
+/**
+ * 甘特图排版：严格「固定比例映射」
+ *   top    = (开始时间 − 时间轴零点) 的分钟数 × GANTT_PX_PER_MINUTE
+ *   height = 时长分钟数 × GANTT_PX_PER_MINUTE
+ * 坐标只由真实时间换算，绝不为「文字好看」下推或拉伸卡片。
+ */
+const GANTT_PX_PER_MINUTE = 3;       // 比例尺：1 分钟 = 3px（08:30→17:00 共 510 分钟 = 1530px）
+const GANTT_TICK_MINUTES = 30;       // 时间刻度间隔
+const GANTT_MIN_BLOCK_HEIGHT = 4;    // 极短区块的可见性兜底（不参与排版，只保证还能看见/点得到）
+const GANTT_FULL_BLOCK_HEIGHT = 62;  // ≥62px 才显示「时间 / 项目名 / 年级·组别·轮次」三行
+/* 高度硬边界：一天最多按 16 小时（960 分钟 = 2880px）画，超出一律钳住，绝不无限撑高 */
+const GANTT_MAX_MINUTES = 960;
+const GANTT_MAX_HEIGHT = GANTT_MAX_MINUTES * GANTT_PX_PER_MINUTE;   // 2880px
+const GANTT_MIN_HEIGHT = GANTT_TICK_MINUTES * GANTT_PX_PER_MINUTE;  // 90px
+const GANTT_MAX_TICKS = Math.floor(GANTT_MAX_MINUTES / GANTT_TICK_MINUTES) + 1;  // 33 条
+
+/** 数值兜底：NaN / Infinity 一律退回 fallback，并夹在 [min, max] 之间 */
+function clampNumber(value, min, max, fallback) {
+  const num = Number(value);
+  if (Number.isNaN(num)) return fallback;      // NaN（算错了）→ 兜底值
+  if (num === Infinity) return max;            // 上溢 → 顶到上限
+  if (num === -Infinity) return min;           // 下溢 → 顶到下限
+  return Math.min(max, Math.max(min, num));
+}
+
+/** 只对合法时间做计算：非法 / NaN 的时间戳一律丢弃 */
+function validTimes(list) {
+  return list.filter(value => Number.isFinite(Number(value)));
+}
 let meetData;
 let currentSchedule = [];
+let unscheduledEvents = [];   // 设定时段内排不下的项目（宁可不排，也不排到晚上）
 let fieldOrderMode = 'class';
 let scheduleStorageError = '';
 let scheduleGradeFilter = 'all';
 let scheduleGenderFilter = 'all';
+let scheduleDayFilter = 'all';   // 'all' 或某一天的日期键（如 2026-05-21）
 
 const pageContent = document.getElementById('page-content');
+// 赛程页撑满整屏宽度，时间轴不再缩在中间一小块
+pageContent.classList.add('schedule-page-shell');
 pageContent.innerHTML = `
   <div class="card schedule-config-card" style="margin-bottom:20px;">
     <div class="card-header">
@@ -28,14 +91,30 @@ pageContent.innerHTML = `
     <div class="card-body">
       <div class="schedule-settings">
         <label>比赛日期 <input id="scheduleDate" type="date"></label>
-        <label>首项比赛时间 <input id="scheduleStart" type="time" value="09:00"></label>
-        <label>径赛时段（分钟） <input id="trackDuration" type="number" min="5" max="240" step="5" value="20"></label>
-        <label>田赛项目时长（分钟） <input id="fieldDuration" type="number" min="5" max="480" step="5" value="60"></label>
+        <label>比赛天数
+          <select id="scheduleDayTotal" aria-label="比赛总天数">
+            ${DAY_TOTAL_OPTIONS.map(days => `<option value="${days}"${days === DEFAULT_DAY_TOTAL ? ' selected' : ''}>${days} 天</option>`).join('')}
+          </select>
+        </label>
+        <label class="schedule-time-range-field">上午时段
+          <span class="schedule-time-pair">
+            <input id="morningStart" type="time" value="08:30" aria-label="上午开始时间">
+            <span class="schedule-time-dash">–</span>
+            <input id="morningEnd" type="time" value="12:00" aria-label="上午结束时间">
+          </span>
+        </label>
+        <label class="schedule-time-range-field">下午时段
+          <span class="schedule-time-pair">
+            <input id="afternoonStart" type="time" value="13:30" aria-label="下午开始时间">
+            <span class="schedule-time-dash">–</span>
+            <input id="afternoonEnd" type="time" value="17:00" aria-label="下午结束时间">
+          </span>
+        </label>
+        <label>径赛每组（分钟） <input id="trackDuration" type="number" min="5" max="120" step="1" value="12"></label>
+        <label>田赛每项（分钟） <input id="fieldDuration" type="number" min="5" max="480" step="5" value="45"></label>
         <label>径赛跑道数
           <select id="scheduleLaneCount">
-            <option value="6">6 道</option>
-            <option value="7">7 道</option>
-            <option value="8" selected>8 道</option>
+            ${TRACK_LANE_OPTIONS.map(count => `<option value="${count}"${count === DEFAULT_TRACK_LANES ? ' selected' : ''}>${count} 道</option>`).join('')}
           </select>
         </label>
         <label>田赛顺序
@@ -46,7 +125,18 @@ pageContent.innerHTML = `
         </label>
         <button class="btn btn-primary" onclick="generateSchedule()">生成 / 重新编排</button>
       </div>
-      <p class="meet-guidance">按年级 + 性别 + 项目独立编排；径赛区与田赛区从同一时间并行开始，各自按赛区串行推进。检录时间默认为开赛前 15 分钟。跨赛区运动员会自动错开至少 15 分钟；生成后可编辑项目时间，冲突检测会即时更新。径赛晋级名单须待预赛成绩录入后确认。</p>
+      <details class="schedule-format-panel">
+        <summary>🏁 赛制设置（一枪制 / 两枪制，按项目自己定）</summary>
+        <div class="schedule-format-body">
+          <div class="schedule-format-actions">
+            <button class="btn btn-secondary" onclick="setAllEventFormats('one-shot')">全部设为一枪制</button>
+            <button class="btn btn-secondary" onclick="setAllEventFormats('two-round')">全部设为两枪制</button>
+          </div>
+          <div class="schedule-format-list" id="scheduleFormatList"></div>
+          <p class="meet-guidance">默认全部「仅一次决赛」：跑（跳、投）一次就按成绩排名，小学运动会最常用。人数超过跑道数时会自动分成几个小组同时比，仍是一枪定胜负。选「预赛 + 决赛」才会先排预赛、再预留决赛时间（决赛名单待成绩录入后确认）。田赛（跳远、跳高、投掷）本来就只有一轮，不受此设置影响。改完点【生成 / 重新编排】生效。</p>
+        </div>
+      </details>
+      <p class="meet-guidance">四块场地并行开赛：跑道、沙坑、投掷区、跳高区各自一条时间轴，同一时间可以各跑各的；同一场地内串行（沙坑只有 1 个，立定跳远排完才排跳远）。所有项目只排在上午 / 下午时段内，不会排到晚上；当天 17:00 排满后，剩下的项目自动顺延到第二天 08:30，不会再出现「排不下」。径赛优先占位，田赛遇到兼项学生会自动避让，避不开的标「需插空进行」。检录时间为开赛前 15 分钟。</p>
       <div id="scheduleError" class="meet-alert" role="alert"></div>
     </div>
   </div>
@@ -76,22 +166,14 @@ pageContent.innerHTML = `
       </div>
     </div>
     <div class="card-body">
-        <div class="schedule-lanes">
-          <section class="schedule-lane">
-            <header class="schedule-lane-header track-lane-header">
-              <h2>🏃 径赛区</h2>
-              <span>跑道 · 同场串行</span>
-            </header>
-            <div class="schedule-lane-body" id="trackScheduleBook"></div>
-          </section>
-          <section class="schedule-lane">
-            <header class="schedule-lane-header field-lane-header">
-              <h2>🏅 田赛区</h2>
-              <span>田赛场地 · 同场串行</span>
-            </header>
-            <div class="schedule-lane-body" id="fieldScheduleBook"></div>
-          </section>
-        </div>
+      <div class="schedule-day-tabs" id="scheduleDayTabs" role="tablist" aria-label="按比赛日查看赛程"></div>
+      <div class="schedule-gantt-scroll">
+        <div class="schedule-gantt" id="scheduleGantt"></div>
+      </div>
+      <details class="schedule-detail-panel" open>
+        <summary>按场地查看明细（可改时间 / 场地，展开看名单）</summary>
+        <div class="schedule-venue-books" id="scheduleVenueBooks"></div>
+      </details>
     </div>
   </div>
 `;
@@ -164,6 +246,99 @@ function normalizeGender(value) {
 
 function eventIdentity(eventName, genderGroup, grade) {
   return `${grade}|${genderGroup}|${eventName.trim().toLowerCase()}`;
+}
+
+/** 赛制：默认一枪制，脏数据也退回一枪制 */
+function normalizeEventFormat(value) {
+  return value === 'two-round' ? 'two-round' : DEFAULT_EVENT_FORMAT;
+}
+
+function eventFormatOf(eventName) {
+  const saved = meetData?.eventFormats;
+  if (!saved || typeof saved !== 'object') return DEFAULT_EVENT_FORMAT;
+  return normalizeEventFormat(saved[String(eventName ?? '').trim()]);
+}
+
+function setEventFormat(eventName, value) {
+  const name = String(eventName ?? '').trim();
+  if (!name) return;
+  meetData = { ...meetData, eventFormats: { ...(meetData.eventFormats || {}), [name]: normalizeEventFormat(value) } };
+  persistMeetData();
+  renderEventFormatList();
+}
+
+function setAllEventFormats(value) {
+  const format = normalizeEventFormat(value);
+  const next = { ...(meetData.eventFormats || {}) };
+  trackEventNames().forEach(name => { next[name] = format; });
+  meetData = { ...meetData, eventFormats: next };
+  persistMeetData();
+  renderEventFormatList();
+}
+
+/** 赛制列表里出现的项目：所有径赛项目（田赛只有一轮，不列） */
+function trackEventNames() {
+  const names = new Set();
+  meetData.registrations.forEach(registration => {
+    if (registration.isTeamEvent === true || registration.isTeam === true) return;
+    if (/(团体|接力|4\s*[x×]\s*100\s*(?:米|m)?)/i.test(registration.eventName)) return;
+    if (classifyVenue(registration.eventName, registration.eventType) !== 'track') return;
+    names.add(String(registration.eventName).trim());
+  });
+  return [...names].sort((a, b) => a.localeCompare(b, 'zh-CN'));
+}
+
+function renderEventFormatList() {
+  const box = document.getElementById('scheduleFormatList');
+  if (!box) return;
+  const names = trackEventNames();
+  if (!names.length) {
+    box.innerHTML = '<div class="meet-empty">还没有径赛报名数据，导入报名后可在这里设置赛制。</div>';
+    return;
+  }
+  const laneLimit = normalizeLaneCount(Number(document.getElementById('scheduleLaneCount')?.value));
+  // 组数按「年级 + 性别」分别算：每个分组各自占几条跑道
+  const statsOf = name => {
+    const combos = new Map();
+    const ids = new Set();
+    meetData.registrations.filter(registration => String(registration.eventName).trim() === name)
+      .forEach(registration => {
+        const athlete = meetData.athletes.find(item => item.id === registration.athleteId);
+        const key = `${athlete?.grade ?? '?'}|${athlete?.gender ?? registration.genderGroup}`;
+        combos.set(key, (combos.get(key) || 0) + 1);
+        ids.add(registration.athleteId);
+      });
+    const groups = [...combos.values()]
+      .reduce((sum, size) => sum + Math.max(1, Math.ceil(size / laneLimit)), 0);
+    return { athletes: ids.size, groups, combos: combos.size };
+  };
+  box.innerHTML = names.map(name => {
+    const current = eventFormatOf(name);
+    const { athletes, groups, combos } = statsOf(name);
+    return `<div class="schedule-format-row">
+        <span class="schedule-format-name">${escapeScheduleHTML(name)}</span>
+        <span class="schedule-format-meta">${athletes} 人报名 · ${combos} 个组别 · 约 ${groups} 组</span>
+        <select class="schedule-format-select" data-name="${escapeScheduleHTML(name)}"
+          aria-label="${escapeScheduleHTML(name)}赛制"
+          onchange="setEventFormat(this.dataset.name, this.value)">
+          ${EVENT_FORMAT_OPTIONS.map(option => `<option value="${option.value}"${option.value === current ? ' selected' : ''}>${option.label}</option>`).join('')}
+        </select>
+      </div>`;
+  }).join('');
+}
+
+function persistMeetData() {
+  if (scheduleStorageError) {
+    showScheduleError(scheduleStorageError);
+    return false;
+  }
+  try {
+    Store.write(MEET_STORAGE_KEY, meetData);
+    return true;
+  } catch (error) {
+    showScheduleError(`保存赛制设置失败：${error.message}`);
+    return false;
+  }
 }
 
 function formatDateTimeLocal(date) {
@@ -249,12 +424,20 @@ function shuffledIds(ids) {
   return result;
 }
 
+/** 跑道数兜底：脏数据/旧数据一律退回默认值，避免出现 0 道或 Infinity 组 */
+function normalizeLaneCount(value) {
+  const lanes = Number(value);
+  return TRACK_LANE_OPTIONS.includes(lanes) ? lanes : DEFAULT_TRACK_LANES;
+}
+
 function splitIntoHeats(athleteIds, laneCount) {
-  const numberOfHeats = Math.ceil(athleteIds.length / laneCount);
+  // 组数 = ⌈人数 / 跑道数⌉，余数自动落在最后一组（如 9 人 4 道 → 3 组，3+3+3）
+  const laneLimit = normalizeLaneCount(laneCount);
+  const numberOfHeats = Math.max(1, Math.ceil((athleteIds || []).length / laneLimit));
   const heats = Array.from({ length: numberOfHeats }, () => []);
   const ordered = distributeByClass(athleteIds);
   ordered.forEach((athleteId, index) => heats[index % numberOfHeats].push(athleteId));
-  return heats;
+  return heats.filter(heat => heat.length);
 }
 
 function existingPreliminaryGroups(event, laneCount) {
@@ -281,143 +464,422 @@ function existingPreliminaryGroups(event, laneCount) {
   return groups;
 }
 
-function makeScheduleEntry(event, round, groupNumber, participantIds, startAt, duration, venue, options = {}) {
+/* ---------------- 场地 / 时段 / 并行编排 ---------------- */
+
+function venueByKey(key) {
+  return VENUE_RESOURCES.find(venue => venue.key === key) || VENUE_RESOURCES[0];
+}
+
+/** 旧赛程没有 venueKey，按场地名或项目类型回推 */
+function venueKeyOf(entry) {
+  if (entry?.venueKey && VENUE_RESOURCES.some(venue => venue.key === entry.venueKey)) return entry.venueKey;
+  const byName = VENUE_RESOURCES.find(venue => venue.name === entry?.venue);
+  if (byName) return byName.key;
+  return classifyVenue(entry?.eventName, entry?.eventType);
+}
+
+/** 项目 → 场地：径赛走跑道，跳远类走沙坑，投掷类走投掷区，跳高走跳高区 */
+function classifyVenue(eventName, eventType) {
+  const name = String(eventName ?? '');
+  if (/跳高|撑杆/.test(name)) return 'highjump';
+  if (/跳远|三级跳|立定跳/.test(name)) return 'sandpit';
+  if (/沙包|垒球|实心球|铅球|铁饼|标枪|投掷|掷/.test(name)) return 'throwing';
+  if (eventType === 'field') return 'throwing';  // 认不出的田赛默认放投掷区（卡片上可手动改）
+  return 'track';
+}
+
+function normalizeDuration(value, fallback, min, max) {
+  const minutes = Number(value);
+  if (!Number.isFinite(minutes)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(minutes)));
+}
+
+/** 天数兜底：脏数据/旧数据退回默认 2 天 */
+function normalizeDayTotal(value) {
+  const days = Number(value);
+  return DAY_TOTAL_OPTIONS.includes(days) ? days : DEFAULT_DAY_TOTAL;
+}
+
+function formatDateKey(date) {
+  const pad = value => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function addDays(date, days) {
+  const next = new Date(date.getTime());
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function defaultSessionTimes(overrides = {}) {
+  // 只接受合法时间，undefined / 空串一律忽略（否则会把默认时段覆盖成 00:00）
+  const clean = {};
+  Object.entries(overrides || {}).forEach(([key, value]) => {
+    const text = String(value ?? '').trim();
+    if (TIME_PATTERN.test(text)) clean[key] = text;
+  });
   return {
-    id: scheduleId(),
-    eventKey: event.key,
-    eventName: event.eventName,
-    genderGroup: event.genderGroup,
-    grade: event.grade,
-    eventType: event.eventType,
-    round,
-    groupNumber,
-    participantIds,
-    participantLabel: options.participantLabel || '',
-    qualifyingCount: options.qualifyingCount || 0,
-    fieldOrderMode: options.fieldOrderMode || '',
-    startAt: formatDateTimeLocal(startAt),
-    durationMinutes: duration,
-    checkinMinutes: DEFAULT_CHECKIN_MINUTES,
-    venue,
+    morningStart: DEFAULT_SESSIONS[0].start,
+    morningEnd: DEFAULT_SESSIONS[0].end,
+    afternoonStart: DEFAULT_SESSIONS[1].start,
+    afternoonEnd: DEFAULT_SESSIONS[1].end,
+    ...clean,
   };
 }
 
-function hasCrossVenueConflict(athleteIds, startAt, duration, scheduledEntries, venueType) {
-  const participantIds = new Set(athleteIds);
-  const proposedStart = startAt.getTime();
-  const proposedEnd = proposedStart + duration * 60000;
-  const buffer = DEFAULT_CHECKIN_MINUTES * 60000;
-
-  return scheduledEntries.some(entry => {
-    if (entry.eventType === venueType || !entry.participantIds?.length) return false;
-    const sharedAthlete = entry.participantIds.some(id => participantIds.has(id));
-    if (!sharedAthlete) return false;
-    const entryStart = new Date(entry.startAt).getTime();
-    const entryEnd = entryStart + entry.durationMinutes * 60000;
-    return proposedStart < entryEnd + buffer && entryStart < proposedEnd + buffer;
-  });
-}
-
-function findNextConflictFreeStart(athleteIds, proposedStart, duration, scheduledEntries, venueType) {
-  let candidate = new Date(proposedStart);
-  let attempts = 0;
-  while (hasCrossVenueConflict(athleteIds, candidate, duration, scheduledEntries, venueType)) {
-    const overlaps = scheduledEntries.filter(entry => {
-      if (entry.eventType === venueType || !entry.participantIds?.some(id => athleteIds.includes(id))) return false;
-      const entryStart = new Date(entry.startAt).getTime();
-      const entryEnd = entryStart + entry.durationMinutes * 60000;
-      const candidateEnd = candidate.getTime() + duration * 60000;
-      const buffer = DEFAULT_CHECKIN_MINUTES * 60000;
-      return candidate.getTime() < entryEnd + buffer && entryStart < candidateEnd + buffer;
+/**
+ * 按「比赛总天数」排出每一天的上午 / 下午时段（先后顺序即排期顺序）。
+ * 1 天 → 2 个时段；1.5 天 → 3 个；2 天 → 4 个；2.5 天 → 5 个。
+ */
+function buildSessionPlan(days, times = {}) {
+  const total = normalizeDayTotal(days);
+  const dayCount = Math.ceil(total);
+  const lastDayIsHalf = Math.abs(total % 1 - 0.5) < 1e-6;
+  const time = defaultSessionTimes(times);
+  const plan = [];
+  for (let dayIndex = 0; dayIndex < dayCount; dayIndex += 1) {
+    const isLastDay = dayIndex === dayCount - 1;
+    plan.push({
+      key: `day${dayIndex + 1}-morning`,
+      dayIndex,
+      label: '上午',
+      start: time.morningStart,
+      end: time.morningEnd,
     });
-    if (!overlaps.length) break;
-    const nextBoundary = Math.max(...overlaps.map(entry =>
-      new Date(entry.startAt).getTime() + entry.durationMinutes * 60000 + DEFAULT_CHECKIN_MINUTES * 60000,
-    ));
-    candidate = new Date(Math.max(candidate.getTime() + 60000, nextBoundary));
-    attempts++;
-    if (attempts > scheduledEntries.length + 1) break;
+    if (!isLastDay || !lastDayIsHalf) {
+      plan.push({
+        key: `day${dayIndex + 1}-afternoon`,
+        dayIndex,
+        label: '下午',
+        start: time.afternoonStart,
+        end: time.afternoonEnd,
+      });
+    }
   }
-  return candidate;
+  return plan;
 }
 
-function buildSchedule(dateValue, startValue, trackDuration, fieldDuration, laneCount, orderMode) {
-  const events = getUniqueEventRosters();
-  const schedule = [];
-  const startAt = toLocalDateTime(dateValue, startValue);
-  let nextTrackStart = new Date(startAt);
-  let nextFieldStart = new Date(startAt);
+/** 把「时段模板」变成某一天（可按 dayIndex 顺延到第二天、第三天）的真实 Date 区间 */
+function buildSessions(dateValue, sessions = DEFAULT_SESSIONS) {
+  const base = new Date(`${String(dateValue).slice(0, 10)}T00:00:00`);
+  if (Number.isNaN(base.getTime())) return [];
+  return (Array.isArray(sessions) ? sessions : DEFAULT_SESSIONS)
+    .map(session => {
+      const dayIndex = Number.isInteger(session?.dayIndex) ? session.dayIndex : 0;
+      const dayDate = addDays(base, dayIndex);
+      const [startHour, startMinute] = String(session?.start ?? '').split(':');
+      const [endHour, endMinute] = String(session?.end ?? '').split(':');
+      const start = new Date(dayDate);
+      start.setHours(Number(startHour), Number(startMinute), 0, 0);
+      const end = new Date(dayDate);
+      end.setHours(Number(endHour), Number(endMinute), 0, 0);
+      if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return null;
+      if (end.getTime() <= start.getTime()) return null;
+      return {
+        key: session.key || '',
+        label: session.label || '',
+        dayIndex,
+        dateKey: formatDateKey(dayDate),
+        start,
+        end,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.start - b.start);
+}
 
-  events.forEach(event => {
-    if (event.eventType === 'track') {
-      if (event.athleteIds.length > laneCount) {
-        const groups = existingPreliminaryGroups(event, laneCount);
-        groups.forEach((athleteIds, index) => {
-          const proposedStart = findNextConflictFreeStart(
-            athleteIds, nextTrackStart, trackDuration, schedule, 'track',
-          );
-          schedule.push(makeScheduleEntry(
-            event, 'preliminary', index + 1, athleteIds, proposedStart, trackDuration, '径赛区',
-          ));
-          nextTrackStart = addMinutes(proposedStart, trackDuration);
-        });
-        const finalStart = findNextConflictFreeStart(
-          [], nextTrackStart, trackDuration, schedule, 'track',
-        );
-        schedule.push(makeScheduleEntry(
-          event, 'final', 1, [], finalStart, trackDuration, '径赛区',
-          { participantLabel: `预赛晋级选手（最多 ${laneCount} 人，待成绩确认）`, qualifyingCount: laneCount },
-        ));
-      } else {
-        const finalStart = findNextConflictFreeStart(
-          event.athleteIds, nextTrackStart, trackDuration, schedule, 'track',
-        );
-        schedule.push(makeScheduleEntry(event, 'final', 1, event.athleteIds, finalStart, trackDuration, '径赛区'));
-      }
-      nextTrackStart = addMinutes(new Date(schedule[schedule.length - 1].startAt), trackDuration);
+function overlapsWithBuffer(entry, startAt, durationMinutes, bufferMinutes) {
+  const entryStart = new Date(entry.startAt).getTime();
+  const entryEnd = entryStart + entry.durationMinutes * 60000;
+  const start = startAt.getTime();
+  const end = start + durationMinutes * 60000;
+  return start < entryEnd + bufferMinutes * 60000 && entryStart < end + bufferMinutes * 60000;
+}
+
+function sharesAthlete(entry, participantIds) {
+  if (!participantIds?.length || !entry.participantIds?.length) return false;
+  const roster = new Set(entry.participantIds);
+  return participantIds.some(id => roster.has(id));
+}
+
+// 兼项避让的预算：最多挪 3 次、最多往后挪 60 分钟。
+// 超过预算就不再硬挪 —— 否则一个人报得多就会把整张赛程拖回串行，田赛现场本来就能「插空」进行。
+const MAX_AVOID_ATTEMPTS = 3;
+const MAX_AVOID_SHIFT_MINUTES = 60;
+
+function sessionFitting(candidate, durationMinutes, sessions) {
+  return sessions.find(item =>
+    candidate.getTime() >= item.start.getTime() &&
+    addMinutes(candidate, durationMinutes).getTime() <= item.end.getTime());
+}
+
+/**
+ * 在某块场地上找最早能排的时段：
+ * 1. 同场地串行 —— 沙坑只有 1 个，所以立定跳远排完才排跳远
+ * 2. 严格锁在上午 / 下午时段内，绝不排到晚上
+ * 3. 跨场地兼项避让（优先保住已排好的径赛），避让超预算就标「需插空进行」
+ */
+function findVenueSlot({ venueKey, durationMinutes, participantIds, cursor, sessions, schedule, bufferMinutes = DEFAULT_CHECKIN_MINUTES }) {
+  // ① 本场地的时间轴：串行 + 时段限制
+  let base = new Date(Math.max(cursor.getTime(), sessions[0].start.getTime()));
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    if (!sessionFitting(base, durationMinutes, sessions)) {
+      const nextSession = sessions.find(item => item.start.getTime() > base.getTime());
+      if (!nextSession) return { startAt: null, overflow: true };  // 当天装不下 → 不排，绝不排到晚上
+      base = new Date(nextSession.start);
+      continue;
+    }
+    const sameVenue = schedule.filter(entry =>
+      venueKeyOf(entry) === venueKey && overlapsWithBuffer(entry, base, durationMinutes, 0));
+    if (!sameVenue.length) break;
+    base = new Date(Math.max(...sameVenue.map(entry =>
+      new Date(entry.startAt).getTime() + entry.durationMinutes * 60000)));
+  }
+  const fallback = new Date(base);
+
+  // ② 兼项避让：预算内挪到不撞车的时间，挪不动就插空进行并打标
+  //   既避让跨场地（跑道 vs 沙坑），也避让同场地连轴转（100 米刚跑完就跑 50 米）
+  let candidate = new Date(base);
+  for (let attempt = 0; attempt < MAX_AVOID_ATTEMPTS; attempt += 1) {
+    if (!sessionFitting(candidate, durationMinutes, sessions)) break;   // 挪出时段了，回原位插空
+    const clashes = schedule.filter(entry =>
+      overlapsWithBuffer(entry, candidate, durationMinutes, bufferMinutes)
+      && sharesAthlete(entry, participantIds));
+    if (!clashes.length) return { startAt: new Date(candidate), needsFlex: false };
+    const nextStart = Math.max(...clashes.map(entry =>
+      new Date(entry.startAt).getTime() + (entry.durationMinutes + bufferMinutes) * 60000));
+    // 为了一个兼项的学生把整项往后挪一个多小时不划算 —— 不如原地开赛，现场插空
+    if (new Date(nextStart).getTime() - base.getTime() > MAX_AVOID_SHIFT_MINUTES * 60000) break;
+    candidate = new Date(nextStart);
+  }
+  return { startAt: fallback, needsFlex: true };
+}
+
+/**
+ * 并行编排：四条场地时间轴同时推进，同一场地内串行。
+ * 径赛先占位，田赛再在时间轴上避让兼项学生。
+ */
+function getUnscheduledEvents() {
+  return unscheduledEvents;
+}
+
+function buildSchedule(dateValue, startValue, trackDuration, fieldDuration, laneCount, orderMode, options = {}) {
+  const events = getUniqueEventRosters();
+  unscheduledEvents = [];
+  const laneLimit = normalizeLaneCount(laneCount); // 统一按有效跑道数编排（选 4 道就每 4 人一组）
+  const trackMinutes = normalizeDuration(trackDuration, DEFAULT_TRACK_DURATION, 5, 120);
+  const fieldMinutes = normalizeDuration(fieldDuration, DEFAULT_FIELD_DURATION, 5, 480);
+  // 多日赛程：先按「比赛天数」排出每一天的上午 / 下午，排满当天就顺延到第二天
+  const sessionPlan = Array.isArray(options.sessions) && options.sessions.length
+    ? options.sessions
+    : buildSessionPlan(options.days, defaultSessionTimes({
+      ...options.times,
+      ...(startValue ? { morningStart: startValue } : {}),
+    }));
+  const sessions = buildSessions(dateValue, sessionPlan);
+  if (!sessions.length) return [];
+
+  const schedule = [];
+  // 径赛优先：跑道先排满，田赛再在剩余时间轴上找位置
+  const ordered = [...events].sort((a, b) => {
+    const venueA = classifyVenue(a.eventName, a.eventType);
+    const venueB = classifyVenue(b.eventName, b.eventType);
+    if ((venueA === 'track') !== (venueB === 'track')) return venueA === 'track' ? -1 : 1;
+    return (Number(a.grade) || 0) - (Number(b.grade) || 0)
+      || String(a.genderGroup).localeCompare(String(b.genderGroup))
+      || String(a.eventName).localeCompare(String(b.eventName), 'zh-CN');
+  });
+
+  const cursors = new Map(VENUE_RESOURCES.map(venue => [venue.key, new Date(sessions[0].start)]));
+  const pushBlock = (event, round, groupNumber, participantIds, venueKey, durationMinutes, extra = {}, pool) => {
+    const daySessions = pool || sessions;
+    const cursor = cursors.get(venueKey) || new Date(daySessions[0].start);
+    const slot = findVenueSlot({
+      venueKey,
+      durationMinutes,
+      participantIds,
+      cursor,
+      sessions: daySessions,
+      schedule,
+      bufferMinutes: DEFAULT_CHECKIN_MINUTES,
+    });
+    if (!slot.startAt) {
+      // 时段内实在排不下：记下来提醒老师，而不是硬排到晚上
+      unscheduledEvents.push({
+        event,
+        eventName: event.eventName,
+        genderGroup: event.genderGroup,
+        grade: event.grade,
+        venue: venueByKey(venueKey).name,
+        round,
+        groupNumber,
+        durationMinutes,
+      });
       return;
     }
+    const session = sessions.find(item =>
+      slot.startAt.getTime() >= item.start.getTime() && slot.startAt.getTime() < item.end.getTime())
+      || sessions[0];
+    schedule.push({
+      id: scheduleId(),
+      eventKey: event.key,
+      eventName: event.eventName,
+      genderGroup: event.genderGroup,
+      grade: event.grade,
+      eventType: event.eventType,
+      venueKey,
+      venue: venueByKey(venueKey).name,
+      dateKey: session.dateKey,
+      dayIndex: session.dayIndex,
+      sessionLabel: session.label,
+      round,
+      groupNumber,
+      participantIds,
+      participantLabel: extra.participantLabel || '',
+      qualifyingCount: extra.qualifyingCount || 0,
+      fieldOrderMode: extra.fieldOrderMode || '',
+      eventFormat: extra.eventFormat || (venueKey === 'track' ? eventFormatOf(event.eventName) : ''),
+      oneShotGroups: extra.oneShotGroups || 0,
+      needsFlex: slot.needsFlex,
+      startAt: formatDateTimeLocal(slot.startAt),
+      durationMinutes,
+      checkinMinutes: DEFAULT_CHECKIN_MINUTES,
+    });
+    cursors.set(venueKey, addMinutes(slot.startAt, durationMinutes));
+  };
 
+  // 多日时按「场地内轮转」把项目分到各天：跑道、沙坑、投掷区、跳高区各自摊到每一天，
+  // 免得第二天只剩零头（按全局顺序轮转会让某个场地整体落到同一天）
+  const dayIndexes = [...new Set(sessions.map(session => session.dayIndex))].sort((a, b) => a - b);
+  const eventsByDay = new Map(dayIndexes.map(dayIndex => [dayIndex, []]));
+  const orderIndex = new Map(ordered.map((event, index) => [event, index]));
+  const venueGroups = new Map();
+  ordered.forEach(event => {
+    const venueKey = classifyVenue(event.eventName, event.eventType);
+    venueGroups.set(venueKey, [...(venueGroups.get(venueKey) || []), event]);
+  });
+  [...venueGroups.values()].forEach(list => list.forEach((event, index) => {
+    eventsByDay.get(dayIndexes[index % dayIndexes.length]).push(event);
+  }));
+  // 每天内部仍按「径赛优先 → 年级 → 项目名」排
+  [...eventsByDay.values()].forEach(list => list.sort((a, b) => orderIndex.get(a) - orderIndex.get(b)));
+
+  const placeEvent = (event, pool) => {
+    const venueKey = classifyVenue(event.eventName, event.eventType);
+    if (venueKey === 'track') {
+      const format = eventFormatOf(event.eventName);
+      // 人数超过跑道数就一定得分组（一枪制 = 分组直接决赛，按成绩总排名；两枪制 = 预赛 + 决赛）
+      const groups = event.athleteIds.length > laneLimit
+        ? existingPreliminaryGroups(event, laneLimit)
+        : [event.athleteIds];
+      if (format === 'two-round' && groups.length > 1) {
+        groups.forEach((athleteIds, index) => {
+          pushBlock(event, 'preliminary', index + 1, athleteIds, venueKey, trackMinutes, { eventFormat: format }, pool);
+        });
+        pushBlock(event, 'final', 1, [], venueKey, trackMinutes, {
+          participantLabel: `预赛晋级选手（最多 ${laneLimit} 人，待成绩确认）`,
+          qualifyingCount: laneLimit,
+          eventFormat: format,
+        }, pool);
+      } else {
+        // 一枪制：一次跑完按成绩排名；人数多就分成几个决赛小组，不再另排决赛
+        groups.forEach((athleteIds, index) => {
+          pushBlock(event, 'final', index + 1, athleteIds, venueKey, trackMinutes, {
+            eventFormat: format,
+            oneShotGroups: groups.length,
+          }, pool);
+        });
+      }
+      return;
+    }
     const order = orderMode === 'random'
       ? shuffledIds(event.athleteIds)
       : distributeByClass(event.athleteIds);
-    const fieldStart = findNextConflictFreeStart(
-      order, nextFieldStart, fieldDuration, schedule, 'field',
-    );
-    schedule.push(makeScheduleEntry(
-      event, 'field', 1, order, fieldStart, fieldDuration, '田赛区',
-      { fieldOrderMode: orderMode },
-    ));
-    nextFieldStart = addMinutes(fieldStart, fieldDuration);
+    pushBlock(event, 'field', 1, order, venueKey, fieldMinutes, { fieldOrderMode: orderMode }, pool);
+  };
+
+  dayIndexes.forEach(dayIndex => {
+    // 场地游标回到这一天的开赛时间；时段池 = 当天 + 之后所有天（排不下就顺延）
+    VENUE_RESOURCES.forEach(venue => cursors.set(venue.key, new Date(sessions[0].start)));
+    const firstOfDay = sessions.find(session => session.dayIndex === dayIndex);
+    if (firstOfDay) VENUE_RESOURCES.forEach(venue => cursors.set(venue.key, new Date(firstOfDay.start)));
+    const pool = sessions.filter(session => session.dayIndex >= dayIndex);
+    (eventsByDay.get(dayIndex) || []).forEach(event => placeEvent(event, pool));
   });
 
-  return schedule.sort((a, b) => new Date(a.startAt) - new Date(b.startAt) ||
-    a.eventType.localeCompare(b.eventType) || a.groupNumber - b.groupNumber);
+  // 兜底回填：还有没排下的，拿全部时段再试一次（把各天的空档补上）
+  if (unscheduledEvents.length) {
+    const leftovers = unscheduledEvents.map(item => item.event).filter(Boolean);
+    unscheduledEvents = [];
+    VENUE_RESOURCES.forEach(venue => cursors.set(venue.key, new Date(sessions[0].start)));
+    leftovers.forEach(event => placeEvent(event, sessions));
+  }
+
+  return schedule.sort((a, b) => new Date(a.startAt) - new Date(b.startAt)
+    || VENUE_RESOURCES.findIndex(venue => venue.key === a.venueKey) - VENUE_RESOURCES.findIndex(venue => venue.key === b.venueKey)
+    || a.groupNumber - b.groupNumber);
+}
+
+const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+function readScheduleForm() {
+  const value = id => String(document.getElementById(id)?.value ?? '').trim();
+  return {
+    date: value('scheduleDate'),
+    days: value('scheduleDayTotal'),
+    morningStart: value('morningStart'),
+    morningEnd: value('morningEnd'),
+    afternoonStart: value('afternoonStart'),
+    afternoonEnd: value('afternoonEnd'),
+    trackDuration: value('trackDuration'),
+    fieldDuration: value('fieldDuration'),
+    lanes: value('scheduleLaneCount'),
+    orderMode: value('fieldOrderMode'),
+  };
 }
 
 function validateSettings() {
-  const date = document.getElementById('scheduleDate').value;
-  const start = document.getElementById('scheduleStart').value;
-  const trackDuration = Number(document.getElementById('trackDuration').value);
-  const fieldDuration = Number(document.getElementById('fieldDuration').value);
-  const lanes = Number(document.getElementById('scheduleLaneCount').value);
-  const orderMode = document.getElementById('fieldOrderMode').value;
-  if (!date || !start) return { error: '请先选择比赛日期和首项比赛时间。' };
-  if (!Number.isInteger(trackDuration) || trackDuration < 5 || trackDuration > 240) {
-    return { error: '径赛时段须为 5 至 240 分钟之间的整数。' };
+  const form = readScheduleForm();
+  const trackDuration = Number(form.trackDuration);
+  const fieldDuration = Number(form.fieldDuration);
+  const lanes = Number(form.lanes);
+  if (!form.date) return { error: '请先选择比赛日期。' };
+  if (![form.morningStart, form.morningEnd, form.afternoonStart, form.afternoonEnd]
+    .every(time => TIME_PATTERN.test(time))) {
+    return { error: '请填写完整的上午 / 下午比赛时段（如 08:30 – 12:00）。' };
+  }
+  const times = {
+    morningStart: form.morningStart,
+    morningEnd: form.morningEnd,
+    afternoonStart: form.afternoonStart,
+    afternoonEnd: form.afternoonEnd,
+  };
+  const sessions = buildSessions(form.date, buildSessionPlan(form.days, times));
+  if (!sessions.length) return { error: '比赛时段无效：结束时间必须晚于开始时间。' };
+  // 禁止排到晚上
+  if (sessions.some(session => session.end.getHours() > 20)) {
+    return { error: '比赛时段不能排到晚上 20:00 之后，请调整结束时间。' };
+  }
+  if (!Number.isInteger(trackDuration) || trackDuration < 5 || trackDuration > 120) {
+    return { error: '径赛每组时长须为 5 至 120 分钟之间的整数。' };
   }
   if (!Number.isInteger(fieldDuration) || fieldDuration < 5 || fieldDuration > 480) {
     return { error: '田赛项目时长须为 5 至 480 分钟之间的整数。' };
   }
-  if (![6, 7, 8].includes(lanes)) return { error: '径赛跑道数须为 6、7 或 8 道。' };
+  if (!TRACK_LANE_OPTIONS.includes(lanes)) return { error: `径赛跑道数须为 ${TRACK_LANE_OPTIONS.join('、')} 道。` };
   return {
     settings: {
-      date,
-      start,
+      date: form.date,
+      days: normalizeDayTotal(form.days),
+      start: form.morningStart,
+      morningStart: times.morningStart,
+      morningEnd: times.morningEnd,
+      afternoonStart: times.afternoonStart,
+      afternoonEnd: times.afternoonEnd,
       trackDurationMinutes: trackDuration,
       fieldDurationMinutes: fieldDuration,
       laneCount: lanes,
-      fieldOrderMode: orderMode,
+      fieldOrderMode: form.orderMode,
     },
   };
 }
@@ -444,12 +906,27 @@ function generateSchedule() {
     settings.fieldDurationMinutes,
     settings.laneCount,
     settings.fieldOrderMode,
+    { days: settings.days, times: settings },
   );
   persistSchedule(schedule, settings);
+  scheduleDayFilter = 'all';
+  const pending = getUnscheduledEvents();
+  if (pending.length) {
+    const preview = pending.slice(0, 3)
+      .map(item => `${item.grade ? `${item.grade}年级 ` : ''}${normalizeGender(item.genderGroup)} ${item.eventName}`)
+      .join('、');
+    showScheduleError(`${settings.days} 天的时段仍排不下 ${pending.length} 个项目（${preview}${pending.length > 3 ? ' 等' : ''}），已保留为“未安排”。请把比赛天数加到 2.5 天、延长时段，或把田赛单项时长调短后重新生成。`);
+  } else {
+    const dayCount = new Set(schedule.map(entry => entry.dateKey)).size;
+    showToast(`编排完成：${schedule.length} 个时段，用了 ${dayCount} 天，最晚 ${formatClock(new Date(Math.max(...schedule.map(entry => new Date(entry.startAt).getTime() + entry.durationMinutes * 60000))))} 结束`);
+  }
 }
 
 function formatClock(date) {
-  return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(date);
+  // 非法时间（手动改坏的数据）直接兜底成 --:--，绝不抛异常中断整页渲染
+  const time = date instanceof Date ? date.getTime() : Number(date);
+  if (!Number.isFinite(time)) return '--:--';
+  return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(time));
 }
 
 function formatTimelineMoment(date) {
@@ -547,46 +1024,436 @@ function renderConflictSummary(conflicts) {
 
 function roundLabel(entry) {
   if (entry.round === 'preliminary') return `预赛第${entry.groupNumber}组`;
-  if (entry.round === 'final') return '决赛';
+  // 一枪制分组决赛：几个组同时比，一次定胜负、按成绩总排名
+  if (entry.round === 'final') return entry.groupNumber > 1 ? `决赛第${entry.groupNumber}组` : '决赛';
   return '田赛';
 }
 
+/** 当前赛程使用的比赛时段（读保存的配置；含多日） */
+function currentSessions() {
+  const settings = meetData.schedule?.settings;
+  const date = settings?.date
+    || String(currentSchedule[0]?.startAt ?? '').slice(0, 10)
+    || formatDateKey(new Date());
+  if (Array.isArray(settings?.sessions) && settings.sessions.length) {
+    const legacy = buildSessions(date, settings.sessions);
+    if (legacy.length) return legacy;
+  }
+  return buildSessions(date, buildSessionPlan(settings?.days, {
+    morningStart: settings?.morningStart,
+    morningEnd: settings?.morningEnd,
+    afternoonStart: settings?.afternoonStart,
+    afternoonEnd: settings?.afternoonEnd,
+  }));
+}
+
+/**
+ * 某一天的时段（老赛程没有分段配置时，按默认上午 / 下午补一个）。
+ * 关键：返回的必须【只含这一天】的时段 —— 否则时间轴会跨到第二天，容器被撑成几千 px。
+ */
+function sessionsForDate(sessions, dateKey) {
+  const matched = (sessions || []).filter(session => session.dateKey === dateKey);
+  if (matched.length) return matched.slice().sort((a, b) => a.start - b.start);
+  return buildSessions(dateKey, buildSessionPlan(DEFAULT_DAY_TOTAL, defaultSessionTimes()))
+    .filter(session => session.dateKey === dateKey)   // 兜底也只留当天
+    .sort((a, b) => a.start - b.start);
+}
+
+/** 条目属于哪一天（老数据没有 dateKey 就从开始时间取） */
+function dayKeyOf(entry) {
+  return entry?.dateKey || String(entry?.startAt ?? '').slice(0, 10);
+}
+
+/** 卡片内容的排版测量：算出来需要多高、要不要精简成两行（宁可往下推，也不截字） */
+/** 卡片文案：按真实高度决定显示几行（高度由时长换算得来，绝不让文字反过来改高度） */
+function blockContent(entry, height) {
+  const scope = `${entry.grade ? `${entry.grade}年级 · ` : ''}${normalizeGender(entry.genderGroup)}`;
+  const stage = entry.round === 'preliminary' ? `预赛${entry.groupNumber}组`
+    : entry.round === 'final' ? (entry.groupNumber > 1 ? `决赛${entry.groupNumber}组` : '决赛')
+      : '田赛';
+  return {
+    scope,
+    stage,
+    // 高度不够三行就精简成「时间 + 项目名(带轮次)」，超出部分用省略号，完整信息看 tooltip
+    compact: height < GANTT_FULL_BLOCK_HEIGHT,
+  };
+}
+
+/** 同一场地内时间真重叠的卡片并排（只动左右位置，top / height 严格不动） */
+function packOverlapLanes(cluster) {
+  const laneBottoms = [];
+  cluster.forEach(item => {
+    let lane = laneBottoms.findIndex(bottom => bottom <= item.top);
+    if (lane === -1) {
+      laneBottoms.push(0);
+      lane = laneBottoms.length - 1;
+    }
+    item.lane = lane;
+    laneBottoms[lane] = item.top + item.height;
+  });
+  return laneBottoms.length;
+}
+
+function assignOverlapLanes(items) {
+  let cluster = [];
+  let clusterEnd = -Infinity;
+  const flush = () => {
+    if (cluster.length) {
+      const laneCount = packOverlapLanes(cluster);
+      cluster.forEach(item => { item.laneCount = laneCount; });
+    }
+    cluster = [];
+    clusterEnd = -Infinity;
+  };
+  items.forEach(item => {
+    if (item.top >= clusterEnd) flush();
+    cluster.push(item);
+    clusterEnd = Math.max(clusterEnd, item.top + item.height);
+  });
+  flush();
+}
+
+/**
+ * 甘特图（单天）：
+ * - 四列 = 跑道 / 沙坑 / 投掷区 / 跳高区，每列一条独立时间轴
+ * - 严格比例映射：top = (开始 − 零点) 分钟 × 3px，height = 时长分钟 × 3px
+ * - 卡片落在哪个像素，就是几点钟；容器按总时长撑满（510 分钟 = 1530px），放不下就滚动
+ * - 总高度有硬边界：只在「当天第一个时段 → 最后一个时段」之间画，最多 16 小时（2880px）
+ */
+function renderGanttDay(entries, sessions, conflictInfo) {
+  const px = GANTT_PX_PER_MINUTE;
+  const tickMs = GANTT_TICK_MINUTES * 60000;
+  // ① 先过滤脏数据：开始时间非法的条目直接不参与渲染（NaN 会撑爆高度 / 让页面崩掉）
+  const safeEntries = entries
+    .filter(entry => Number.isFinite(new Date(entry.startAt).getTime()))
+    .map(entry => ({
+      ...entry,
+      // 时长同样夹进 [1, 960] 分钟：NaN / 负数 / 99999 分钟都不会撑爆容器
+      durationMinutes: normalizeDuration(entry.durationMinutes, 0, 1, GANTT_MAX_MINUTES),
+    }))
+    .filter(entry => entry.durationMinutes > 0);
+  if (!safeEntries.length) return '<div class="meet-empty">这一天当前筛选下没有赛程。</div>';
+
+  // ② 时间窗口只由「当天时段」决定，条目被夹进这个窗口，绝不越界
+  const safeSessions = (sessions || [])
+    .filter(session => Number.isFinite(session?.start?.getTime?.())
+      && Number.isFinite(session?.end?.getTime?.()));
+  // 时间窗口优先由「当天时段」界定（08:30→17:00），条目只被夹进来，绝不反过来撑大窗口
+  const sessionTimes = validTimes([
+    ...safeSessions.map(session => session.start.getTime()),
+    ...safeSessions.map(session => session.end.getTime()),
+  ]);
+  const entryTimes = validTimes([
+    ...safeEntries.map(entry => new Date(entry.startAt).getTime()),
+    ...safeEntries.map(entry => new Date(entry.startAt).getTime() + entry.durationMinutes * 60000),
+  ]);
+  const windowTimes = sessionTimes.length ? sessionTimes : entryTimes;
+  const gridStart = Math.floor(Math.min(...windowTimes) / tickMs) * tickMs;
+  const gridEnd = Math.ceil(Math.max(...windowTimes) / tickMs) * tickMs;
+  // ③ 总高度硬钳制：510 分钟 → 1530px；最多 960 分钟 → 2880px，NaN 一律兜底 1530px
+  const totalMinutes = clampNumber(
+    (gridEnd - gridStart) / 60000, GANTT_TICK_MINUTES, GANTT_MAX_MINUTES, 510,
+  );
+  const totalHeight = Math.round(clampNumber(
+    totalMinutes * px, GANTT_MIN_HEIGHT, GANTT_MAX_HEIGHT, 510 * px,
+  ));
+  const windowEnd = gridStart + totalMinutes * 60000;   // 窗口下沿（超出的一律裁掉）
+
+  // 每列独立排版：top / height 全部由真实时间换算，不做任何下推或拉伸
+  const columns = new Map();
+  VENUE_RESOURCES.forEach(venue => {
+    const items = safeEntries
+      .filter(entry => venueKeyOf(entry) === venue.key)
+      // 落在时间窗口之外的条目（脏数据被改到 20:00 之类）直接不画，绝不产生死区
+      .filter(entry => new Date(entry.startAt).getTime() < windowEnd)
+      .sort((a, b) => new Date(a.startAt) - new Date(b.startAt))
+      .map(entry => {
+        const start = new Date(entry.startAt);
+        const end = new Date(start.getTime() + entry.durationMinutes * 60000);
+        const startMinutes = (start.getTime() - gridStart) / 60000;
+        // ④ 卡片也钳进窗口：超出时段范围的部分直接裁掉，绝不画到 9999px 去
+        const clippedEnd = Math.min(end.getTime(), windowEnd);
+        const rawTop = Math.round(startMinutes * px);
+        const rawHeight = Math.round(((clippedEnd - start.getTime()) / 60000) * px);
+        return {
+          entry,
+          top: Math.round(clampNumber(rawTop, 0, totalHeight - 1, 0)),
+          height: Math.round(clampNumber(
+            Math.max(GANTT_MIN_BLOCK_HEIGHT, rawHeight), GANTT_MIN_BLOCK_HEIGHT, totalHeight,
+            GANTT_MIN_BLOCK_HEIGHT,
+          )),
+        };
+      })
+      .filter(item => item.top < totalHeight);
+    assignOverlapLanes(items);
+    columns.set(venue.key, items);
+  });
+
+  // ⑤ 刻度：每 30 分钟一个「槽」（30 × 3px = 90px），硬上限 33 个。
+  //    槽内的标签是 sticky，随唯一滚动条吸在表头正下方，滚到哪儿都看得见当前时刻。
+  const slotPx = GANTT_TICK_MINUTES * px;
+  const slotCount = Math.min(GANTT_MAX_TICKS, Math.max(1, Math.ceil(totalHeight / slotPx)));
+  const ticks = Array.from({ length: slotCount }, (_, index) => {
+    const minutes = index * GANTT_TICK_MINUTES;
+    const slotHeight = Math.max(0, Math.min(slotPx, totalHeight - index * slotPx));
+    const label = formatClock(new Date(gridStart + minutes * 60000));
+    return `<div class="schedule-gantt-tick-slot" style="height:${slotHeight}px">`
+      + `<span class="schedule-gantt-tick">${escapeScheduleHTML(label)}</span></div>`;
+  }).join('');
+
+  // 午休 / 非比赛时间画成灰带（同样严格夹在窗口内）
+  const orderedSessions = [...safeSessions].sort((a, b) => a.start - b.start);
+  const gaps = [];
+  let previousEnd = gridStart;
+  orderedSessions.forEach(session => {
+    if (session.start.getTime() > previousEnd) gaps.push([previousEnd, session.start.getTime()]);
+    previousEnd = Math.max(previousEnd, session.end.getTime());
+  });
+  if (previousEnd < windowEnd) gaps.push([previousEnd, windowEnd]);
+  const offBands = gaps
+    .map(([from, to]) => {
+      const top = Math.round(clampNumber(((from - gridStart) / 60000) * px, 0, totalHeight, 0));
+      const bottom = Math.round(clampNumber(((to - gridStart) / 60000) * px, 0, totalHeight, 0));
+      return { top, height: bottom - top };
+    })
+    .filter(band => band.height > 0)
+    .map(({ top, height }) => `<div class="schedule-gantt-offband" style="top:${top}px;height:${height}px">${height >= 46 ? '<span>午休 / 非比赛时间</span>' : ''}</div>`)
+    .join('');
+
+  const blocks = VENUE_RESOURCES.map(venue => {
+    const items = columns.get(venue.key) || [];
+    const inner = items.map(({ entry, top, height, lane = 0, laneCount = 1 }) => {
+      const start = new Date(entry.startAt);
+      const end = scheduleEnd(entry);
+      const conflicted = conflictInfo?.eventIds.has(entry.id);
+      const { stage, scope, compact } = blockContent(entry, height);
+      const showTextFlag = height >= 78;
+      const flags = [
+        conflicted ? `<span class="schedule-gantt-flag warn" title="兼项冲突">⚠${showTextFlag ? ' 冲突' : ''}</span>` : '',
+        entry.needsFlex ? `<span class="schedule-gantt-flag flex" title="需插空进行">🕒${showTextFlag ? ' 需插空' : ''}</span>` : '',
+      ].join('');
+      // 精简版把轮次跟在项目名后面；完整信息都在 tooltip 里，绝不因为排版失真
+      const titleLine = compact
+        ? `${entry.eventName} ${stage}`
+        : String(entry.eventName ?? '');
+      // 时间真重叠时并排显示（左右各占一份），纵向位置依旧是真实时间
+      const laneStyle = laneCount > 1
+        ? `left:calc(${(lane * 100 / laneCount).toFixed(3)}% + 2px);right:auto;width:calc(${(100 / laneCount).toFixed(3)}% - 5px);`
+        : '';
+      const tooltip = `${entry.eventName} · ${scope} · ${stage} · ${formatClock(start)}-${formatClock(end)}`;
+      return `<div class="schedule-gantt-block tone-${venue.tone}${compact ? ' compact' : ''}${conflicted ? ' conflict' : ''}${entry.needsFlex ? ' flex' : ''}${laneCount > 1 ? ' narrow' : ''}"
+          data-venue="${venue.key}"
+          style="top:${top}px;height:${height}px;${laneStyle}"
+          title="${escapeScheduleHTML(tooltip)}">
+          <div class="schedule-gantt-block-head">
+            <span class="schedule-gantt-block-time">${escapeScheduleHTML(`${formatClock(start)}–${formatClock(end)}`)}</span>
+            ${flags}
+          </div>
+          <div class="schedule-gantt-block-title" title="${escapeScheduleHTML(titleLine)}">${escapeScheduleHTML(titleLine)}</div>
+          ${compact ? '' : `<div class="schedule-gantt-block-meta">${escapeScheduleHTML(scope)} · ${escapeScheduleHTML(stage)}</div>`}
+        </div>`;
+    }).join('');
+    return `<div class="schedule-gantt-track" data-venue="${venue.key}">${offBands}${inner}</div>`;
+  }).join('');
+
+  return `<div class="schedule-gantt" style="--gantt-height:${totalHeight}px;--gantt-tick-px:${GANTT_TICK_MINUTES * px}px">
+      <div class="schedule-gantt-head">
+        <div class="schedule-gantt-axis-head">时间</div>
+        ${VENUE_RESOURCES.map(venue => `<div class="schedule-gantt-venue-head tone-${venue.tone}">
+            <span>${venue.icon} ${escapeScheduleHTML(venue.name)}</span>
+            <small>${escapeScheduleHTML(venue.note)}</small>
+          </div>`).join('')}
+      </div>
+      <div class="schedule-gantt-body">
+        <div class="schedule-gantt-axis">${ticks}</div>
+        ${blocks}
+      </div>
+    </div>`;
+}
+
+/** 多日 Tab：全部 / 第一天 / 第二天 … */
+function renderDayTabs(dayKeys, entries) {
+  if (dayKeys.length < 2) return '';
+  const countOf = key => entries.filter(entry => dayKeyOf(entry) === key).length;
+  const tab = (value, label, count) => `<button type="button" role="tab"
+      class="schedule-day-tab${scheduleDayFilter === value ? ' active' : ''}"
+      aria-selected="${scheduleDayFilter === value}"
+      onclick="setScheduleDay('${escapeScheduleHTML(value)}')">${escapeScheduleHTML(label)}<span>${count} 项</span></button>`;
+  return `${tab('all', '全部', entries.length)}${dayKeys.map((key, index) =>
+    tab(key, `第 ${index + 1} 天 · ${key.slice(5).replace('-', '/')}`, countOf(key))).join('')}`;
+}
+
+function setScheduleDay(value) {
+  scheduleDayFilter = value;
+  renderSchedule();
+}
+
+/** 排不下的项目单独提示，老师一眼看到要加时间还是砍项目 */
+function renderUnscheduledNotice(pending) {
+  if (!pending?.length) return '';
+  return `<div class="schedule-unscheduled">
+    <strong>⏳ 有 ${pending.length} 个项目在设定的时段内排不下（未排到晚上）：</strong>
+    <ul>${pending.map(item => `<li>${escapeScheduleHTML(`${item.grade ? `${item.grade}年级 · ` : ''}${normalizeGender(item.genderGroup)} · ${item.eventName} · ${item.venue}`)}</li>`).join('')}</ul>
+    <span>延长上午 / 下午时段，或把田赛单项时长调短后重新生成即可。</span>
+  </div>`;
+}
+
+/** 明细：四块场地各一列卡片（可改时间 / 场地、展开看名单） */
+function renderVenueBooks(entries, conflictInfo) {
+  return `<div class="schedule-lanes">${VENUE_RESOURCES.map(venue => {
+    const list = entries.filter(entry => venueKeyOf(entry) === venue.key);
+    return `<section class="schedule-lane">
+      <header class="schedule-lane-header">
+        <h2>${venue.icon} ${escapeScheduleHTML(venue.name)}</h2>
+        <span>${escapeScheduleHTML(venue.note)} · ${list.length} 个时段</span>
+      </header>
+      <div class="schedule-lane-body">${renderScheduleLane(list, conflictInfo, venue)}</div>
+    </section>`;
+  }).join('')}</div>`;
+}
+
 function renderSchedule() {
-  const trackBook = document.getElementById('trackScheduleBook');
-  const fieldBook = document.getElementById('fieldScheduleBook');
+  const ganttBox = document.getElementById('scheduleGantt');
+  const booksBox = document.getElementById('scheduleVenueBooks');
+  const tabsBox = document.getElementById('scheduleDayTabs');
   const conflictInfo = findScheduleConflicts(currentSchedule);
   renderConflictSummary(conflictInfo);
 
   if (!currentSchedule.length) {
-    const emptyMessage = '<div class="meet-empty">暂无项目。确认赛程参数并生成编排。</div>';
-    trackBook.innerHTML = emptyMessage;
-    fieldBook.innerHTML = emptyMessage;
+    ganttBox.innerHTML = '<div class="meet-empty">暂无项目。确认赛程参数并生成编排。</div>';
+    booksBox.innerHTML = '';
+    if (tabsBox) tabsBox.innerHTML = '';
     document.getElementById('scheduleSummary').textContent = meetData.registrations.length
       ? `已读取 ${meetData.registrations.length} 条单项报名`
       : '尚未生成赛程';
     return;
   }
 
-  const sorted = [...currentSchedule]
+  const filtered = [...currentSchedule]
     .filter(entry => (scheduleGradeFilter === 'all' || String(entry.grade || '') === scheduleGradeFilter) &&
       (scheduleGenderFilter === 'all' || entry.genderGroup === scheduleGenderFilter))
     .sort((a, b) => new Date(a.startAt) - new Date(b.startAt));
-  const scheduleDate = meetData.schedule?.settings?.date || sorted[0]?.startAt.slice(0, 10) || '';
-  if (!sorted.length) {
-    const emptyMessage = '<div class="meet-empty">当前年级和性别筛选下没有赛程。</div>';
-    trackBook.innerHTML = emptyMessage;
-    fieldBook.innerHTML = emptyMessage;
+  const scheduleDate = meetData.schedule?.settings?.date || filtered[0]?.startAt.slice(0, 10) || '';
+  const filterLabel = `${scheduleGradeFilter === 'all' ? '全部年级' : `${scheduleGradeFilter}年级`} · ${scheduleGenderFilter === 'all' ? '全部性别' : normalizeGender(scheduleGenderFilter)}`;
+  if (!filtered.length) {
+    ganttBox.innerHTML = '<div class="meet-empty">当前年级和性别筛选下没有赛程。</div>';
+    booksBox.innerHTML = '';
+    if (tabsBox) tabsBox.innerHTML = '';
     document.getElementById('scheduleSummary').textContent =
       `${scheduleDate} · 当前筛选无比赛 · 共 ${currentSchedule.length} 个时段`;
     return;
   }
-  const trackEntries = sorted.filter(entry => entry.eventType === 'track');
-  const fieldEntries = sorted.filter(entry => entry.eventType === 'field');
-  const filterLabel = `${scheduleGradeFilter === 'all' ? '全部年级' : `${scheduleGradeFilter}年级`} · ${scheduleGenderFilter === 'all' ? '全部性别' : normalizeGender(scheduleGenderFilter)}`;
+
+  // 重新渲染前彻底清空旧节点，防止 DOM 叠加把容器越撑越高
+  ganttBox.innerHTML = '';
+  booksBox.innerHTML = '';
+  if (tabsBox) tabsBox.innerHTML = '';
+
+  const dayKeys = [...new Set(filtered.map(dayKeyOf))].sort();
+  if (scheduleDayFilter !== 'all' && !dayKeys.includes(scheduleDayFilter)) scheduleDayFilter = 'all';
+  const shown = scheduleDayFilter === 'all'
+    ? filtered
+    : filtered.filter(entry => dayKeyOf(entry) === scheduleDayFilter);
+
+  if (tabsBox) tabsBox.innerHTML = renderDayTabs(dayKeys, filtered);
+
+  const sessions = currentSessions();
+  const daysToRender = scheduleDayFilter === 'all' ? dayKeys : [scheduleDayFilter];
+  ganttBox.innerHTML = daysToRender.map((key, index) => {
+    const dayEntries = filtered.filter(entry => dayKeyOf(entry) === key);
+    const daySessions = sessionsForDate(sessions, key);
+    const ordinal = dayKeys.indexOf(key) + 1;   // 只看某一天时，序号仍按全局天数算
+    const lastEnd = Math.max(...dayEntries.map(entry =>
+      new Date(entry.startAt).getTime() + entry.durationMinutes * 60000));
+    return `<section class="schedule-day-block">
+        <header class="schedule-day-head">
+          <h3>第 ${ordinal} 天 · ${escapeScheduleHTML(key)}</h3>
+          <span>${dayEntries.length} 个时段 · ${escapeScheduleHTML(formatClock(new Date(Math.min(...dayEntries.map(entry => new Date(entry.startAt))))))} 开赛 · ${escapeScheduleHTML(formatClock(new Date(lastEnd)))} 结束</span>
+        </header>
+        ${renderGanttDay(dayEntries, daySessions, conflictInfo)}
+      </section>`;
+  }).join('') + renderUnscheduledNotice(getUnscheduledEvents());
+  booksBox.innerHTML = renderVenueBooks(shown, conflictInfo);
+
+  const sessionLabel = sessionsForDate(sessions, dayKeys[0])
+    .map(session => `${session.label || ''}${formatClock(session.start)}-${formatClock(session.end)}`).join(' / ');
   document.getElementById('scheduleSummary').textContent =
-    `${scheduleDate} · ${filterLabel} · 径赛 ${trackEntries.length} 个时段 · 田赛 ${fieldEntries.length} 个时段`;
-  trackBook.innerHTML = renderScheduleLane(trackEntries, conflictInfo, 'track');
-  fieldBook.innerHTML = renderScheduleLane(fieldEntries, conflictInfo, 'field');
+    `${scheduleDate} 起 ${dayKeys.length} 天 · ${sessionLabel} · ${filterLabel} · 共 ${filtered.length} 个时段`
+    + (conflictInfo.details.length ? ` · ⚠ ${conflictInfo.details.length} 人兼项冲突` : '');
+  requestGanttStickySync();          // 内容变了，吸顶位置要重新算
+}
+
+/* ---------- 甘特图表头吸顶（iframe 嵌套时用 JS 同步父窗口滚动） ---------- */
+/**
+ * 独立打开（schedule.html）时，CSS 的 position: sticky 天然跟随窗口滚动；
+ * 被 sports-meet.html 用 iframe 嵌套时是「父页整页滚动、iframe 自身不滚动」，
+ * 浏览器不会让 iframe 内的 sticky 跟随父窗口，所以这里用 transform 手动同步：
+ * 表头吸在视口顶部，时间刻度标签只在自己那 30 分钟的槽里跟随。
+ */
+const GANTT_STICKY = { frame: null, pending: 0 };
+
+function findHostFrame() {
+  try {
+    if (window.parent === window) return null;
+    return [...window.parent.document.querySelectorAll('iframe')]
+      .find(frame => frame.contentWindow === window) || null;
+  } catch (error) {
+    return null;      // 跨域等场景直接放弃，交给 CSS 兜底
+  }
+}
+
+function syncGanttSticky() {
+  try {
+    if (typeof document === 'undefined' || typeof window === 'undefined') return;
+    if (window.parent === window) return;   // 独立页：CSS sticky 原生生效
+    const search = String(window.location?.search || '');
+    if (new URLSearchParams(search).get('embed') !== '1') return;
+    syncGanttStickyInner();
+  } catch (error) {
+    /* 跨域 / 拿不到父窗口时静默放弃，交给 CSS 兜底 */
+  }
+}
+
+function syncGanttStickyInner() {
+  const frame = GANTT_STICKY.frame || (GANTT_STICKY.frame = findHostFrame());
+  if (!frame) return;
+  const frameTop = frame.getBoundingClientRect().top;
+  document.querySelectorAll('.schedule-gantt').forEach(gantt => {
+    const head = gantt.querySelector('.schedule-gantt-head');
+    if (!head) return;
+    const ganttRect = gantt.getBoundingClientRect();
+    const top = frameTop + ganttRect.top;              // 甘特图顶部相对父窗口视口
+    const bottom = top + ganttRect.height;
+    const headHeight = head.offsetHeight;
+    const shift = top < 0 && bottom > headHeight + 4
+      ? Math.min(-top, bottom - headHeight) : 0;
+    head.style.transform = shift ? `translateY(${shift}px)` : '';
+
+    gantt.querySelectorAll('.schedule-gantt-tick-slot').forEach(slot => {
+      const label = slot.firstElementChild;
+      if (!label) return;
+      const slotTop = top + (slot.getBoundingClientRect().top - ganttRect.top);
+      const maxShift = Math.max(0, slot.offsetHeight - label.offsetHeight);
+      const labelShift = slotTop < headHeight ? Math.min(headHeight - slotTop, maxShift) : 0;
+      label.style.transform = labelShift ? `translateY(${labelShift}px)` : '';
+    });
+  });
+}
+
+function requestGanttStickySync() {
+  if (typeof requestAnimationFrame !== 'function') return;
+  cancelAnimationFrame(GANTT_STICKY.pending);
+  GANTT_STICKY.pending = requestAnimationFrame(syncGanttSticky);
+}
+
+/** 父页滚动 / 改变尺寸时同步一次（只在 iframe 里生效） */
+function bindGanttStickySync() {
+  try {
+    if (window.parent === window) return;
+    window.parent.addEventListener('scroll', requestGanttStickySync, { passive: true });
+    window.parent.addEventListener('resize', requestGanttStickySync);
+    requestGanttStickySync();
+  } catch (error) { /* 跨域时忽略 */ }
 }
 
 function updateScheduleFilters() {
@@ -595,16 +1462,16 @@ function updateScheduleFilters() {
   renderSchedule();
 }
 
-function renderScheduleLane(entries, conflictInfo, laneType) {
-  if (!entries.length) return '<div class="meet-empty">当前赛区暂无编排项目。</div>';
+function renderScheduleLane(entries, conflictInfo, venue = VENUE_RESOURCES[0]) {
+  if (!entries.length) return '<div class="meet-empty">该场地暂无编排项目。</div>';
   return `
     <div class="schedule-timeline">
       ${entries.map((entry, index) => {
         const startTime = new Date(entry.startAt);
         const checkinTime = addMinutes(startTime, -entry.checkinMinutes);
         const conflicted = conflictInfo.eventIds.has(entry.id);
-        const modeLabel = laneType === 'track'
-          ? (entry.round === 'preliminary' ? `预赛第 ${entry.groupNumber} 组` : '决赛')
+        const modeLabel = venue.key === 'track'
+          ? roundLabel(entry)
           : `出场顺序${entry.fieldOrderMode === 'random' ? '（随机）' : '（按班级轮流）'}`;
         return `<article class="schedule-event-card ${conflicted ? 'schedule-conflict-card' : ''}">
           <div class="schedule-event-time">
@@ -617,6 +1484,7 @@ function renderScheduleLane(entries, conflictInfo, laneType) {
               <span class="meet-muted">${entry.grade ? `${entry.grade}年级 · ` : ''}${escapeScheduleHTML(normalizeGender(entry.genderGroup))} · ${escapeScheduleHTML(modeLabel)}</span>
             </div>
             ${conflicted ? '<span class="schedule-warning">⚠ 需要手动调整</span>' : ''}
+            ${entry.needsFlex ? '<span class="schedule-warning schedule-flex">🕒 需插空进行（兼项避让不开，请现场机动）</span>' : ''}
             <label class="schedule-inline-edit">开始时间
               <input class="schedule-datetime" aria-label="${escapeScheduleHTML(entry.eventName)}比赛时间"
                 type="datetime-local" value="${escapeScheduleHTML(entry.startAt)}"
@@ -663,11 +1531,14 @@ function exportScheduleWord() {
         .map((athlete, rosterIndex) => `${rosterIndex + 1}. ${athlete.bibNumber || '—'} ${athlete.name}（${athlete.className}）`).join('；')
       : entry.participantLabel;
     const stage = entry.eventType === 'track'
-      ? (entry.round === 'preliminary' ? `预赛第 ${entry.groupNumber} 组` : '决赛')
+      ? roundLabel(entry)
       : `田赛出场顺序（${entry.fieldOrderMode === 'random' ? '随机' : '按班级轮流'}）`;
-    const warning = conflictInfo.eventIds.has(entry.id) ? '⚠ 需要手动调整' : '';
-    const lane = entry.eventType === 'track' ? '径赛区' : '田赛区';
-    return `<tr><td>${index + 1}</td><td>${escapeScheduleHTML(lane)}</td><td>${entry.grade || '—'}年级</td><td>${escapeScheduleHTML(formatTimelineMoment(startTime))} - ${escapeScheduleHTML(formatTimelineMoment(scheduleEnd(entry)))}</td><td>${escapeScheduleHTML(formatTimelineMoment(checkinTime))}</td><td>${escapeScheduleHTML(entry.eventName)} · ${escapeScheduleHTML(normalizeGender(entry.genderGroup))} · ${escapeScheduleHTML(stage)}</td><td>${escapeScheduleHTML(entry.venue)}</td><td>${escapeScheduleHTML(roster)}</td><td>${warning}</td></tr>`;
+    const warning = [
+      conflictInfo.eventIds.has(entry.id) ? '⚠ 需要手动调整' : '',
+      entry.needsFlex ? '🕒 需插空进行' : '',
+    ].filter(Boolean).join(' ');
+    const lane = entry.venue || venueByKey(venueKeyOf(entry)).name;
+    return `<tr><td>${index + 1}</td><td>${escapeScheduleHTML(lane)}</td><td>${entry.grade || '—'}年级</td><td>${escapeScheduleHTML(formatTimelineMoment(startTime))} - ${escapeScheduleHTML(formatTimelineMoment(scheduleEnd(entry)))}</td><td>${escapeScheduleHTML(formatTimelineMoment(checkinTime))}</td><td>${escapeScheduleHTML(entry.eventName)} · ${escapeScheduleHTML(normalizeGender(entry.genderGroup))} · ${escapeScheduleHTML(stage)}</td><td>${escapeScheduleHTML(roster)}</td><td>${warning}</td></tr>`;
   }).join('');
   const conflictText = conflictInfo.details.map(conflict =>
     `${conflict.athlete?.name || '未知运动员'}：${conflict.entries.map(entry => `${entry.eventName} ${roundLabel(entry)}`).join('、')}`,
@@ -679,7 +1550,7 @@ function exportScheduleWord() {
   </style></head><body>
     <h1>运动会秩序册</h1><p>比赛日期：${escapeScheduleHTML(meetData.schedule?.settings?.date || '')}</p>
     ${conflictText ? `<p class="warning">需要手动调整：${escapeScheduleHTML(conflictText)}</p>` : ''}
-    <table><thead><tr><th>#</th><th>赛区</th><th>年级</th><th>比赛时间</th><th>检录时间</th><th>项目 / 性别 / 轮次</th><th>场地</th><th>运动员 / 出场顺序</th><th>冲突</th></tr></thead><tbody>${rows}</tbody></table>
+    <table><thead><tr><th>#</th><th>场地</th><th>年级</th><th>比赛时间</th><th>检录时间</th><th>项目 / 性别 / 轮次</th><th>运动员 / 出场顺序</th><th>冲突</th></tr></thead><tbody>${rows}</tbody></table>
   </body></html>`;
   const blob = new Blob(['\ufeff', html], { type: 'application/msword;charset=utf-8' });
   const url = URL.createObjectURL(blob);
@@ -690,6 +1561,31 @@ function exportScheduleWord() {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+/** 把保存的配置写回表单（天数 + 上午 / 下午时段；脏数据退回默认值） */
+function applySettingsToForm(settings) {
+  const source = settings && typeof settings === 'object' ? settings : {};
+  const legacy = Array.isArray(source.sessions) ? source.sessions : [];
+  const legacyTime = (key, field, fallback) => {
+    const hit = legacy.find(session => session?.key === key || session?.label === (key === 'morning' ? '上午' : '下午'));
+    const value = String(hit?.[field] ?? '').trim();
+    return TIME_PATTERN.test(value) ? value : fallback;
+  };
+  const time = (field, fallback) => (TIME_PATTERN.test(String(source[field] ?? '').trim())
+    ? String(source[field]).trim()
+    : fallback);
+  const set = (id, value) => {
+    const node = document.getElementById(id);
+    if (node) node.value = value;
+  };
+  set('morningStart', time('morningStart', legacyTime('morning', 'start', DEFAULT_SESSIONS[0].start)));
+  set('morningEnd', time('morningEnd', legacyTime('morning', 'end', DEFAULT_SESSIONS[0].end)));
+  set('afternoonStart', time('afternoonStart', legacyTime('afternoon', 'start', DEFAULT_SESSIONS[1].start)));
+  set('afternoonEnd', time('afternoonEnd', legacyTime('afternoon', 'end', DEFAULT_SESSIONS[1].end)));
+  // 老配置没有 days：按保存的时段数量反推（2 段 = 1 天，3 段 = 1.5 天…）
+  const inferredDays = legacy.length ? legacy.length / 2 : DEFAULT_DAY_TOTAL;
+  set('scheduleDayTotal', String(normalizeDayTotal(source.days ?? inferredDays)));
+}
+
 function initializeSchedulePage() {
   meetData = readMeetData();
   const today = new Date();
@@ -697,15 +1593,15 @@ function initializeSchedulePage() {
   document.getElementById('scheduleDate').value =
     `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
   document.getElementById('scheduleLaneCount').value = String(
-    [6, 7, 8].includes(meetData.laneCount) ? meetData.laneCount : DEFAULT_TRACK_LANES,
+    TRACK_LANE_OPTIONS.includes(meetData.laneCount) ? meetData.laneCount : DEFAULT_TRACK_LANES,
   );
   document.getElementById('scheduleGradeFilter').value = scheduleGradeFilter;
   document.getElementById('scheduleGenderFilter').value = scheduleGenderFilter;
+  renderEventFormatList();
   const savedSchedule = meetData.schedule;
   if (savedSchedule?.settings && Array.isArray(savedSchedule.entries)) {
     const {
       date,
-      start,
       trackDurationMinutes,
       fieldDurationMinutes,
       durationMinutes,
@@ -713,11 +1609,11 @@ function initializeSchedulePage() {
       fieldOrderMode: savedOrder,
     } = savedSchedule.settings;
     if (date) document.getElementById('scheduleDate').value = date;
-    if (start) document.getElementById('scheduleStart').value = start;
+    applySettingsToForm(savedSchedule.settings);
     if (Number.isInteger(trackDurationMinutes)) document.getElementById('trackDuration').value = trackDurationMinutes;
     else if (Number.isInteger(durationMinutes)) document.getElementById('trackDuration').value = durationMinutes;
     if (Number.isInteger(fieldDurationMinutes)) document.getElementById('fieldDuration').value = fieldDurationMinutes;
-    if ([6, 7, 8].includes(laneCount)) document.getElementById('scheduleLaneCount').value = String(laneCount);
+    if (TRACK_LANE_OPTIONS.includes(laneCount)) document.getElementById('scheduleLaneCount').value = String(laneCount);
     if (['class', 'random'].includes(savedOrder)) {
       fieldOrderMode = savedOrder;
       document.getElementById('fieldOrderMode').value = savedOrder;
@@ -741,4 +1637,5 @@ function initializeSchedulePage() {
 
 Store.onReady(() => {
   initializeSchedulePage();
+  bindGanttStickySync();     // iframe 内：让甘特图表头跟着父页滚动吸顶
 });

@@ -272,9 +272,9 @@ function showToast(message, type = 'success') {
 }
 
 // 模态框工具
-function showModal(title, bodyHTML, footerHTML = '') {
+function showModal(title, bodyHTML, footerHTML = '', overlayClass = '') {
   const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
+  overlay.className = `modal-overlay${overlayClass ? ` ${overlayClass}` : ''}`;
   overlay.innerHTML = `
     <div class="modal">
       <div class="modal-header">

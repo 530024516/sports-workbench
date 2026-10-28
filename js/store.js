@@ -35,8 +35,21 @@ const STORE_KEYS = [
   'pe_schedule_v1',
   'pe_big_unit_design_v1',
   'pe_sports_meet_v1',
+  'pe_sports_meet_events_v1',
+  'pe_meet_template_config_v1',
   'pe_week_mode',
   'pe_workbench_display_settings_v1',
+  'sportsMeetTitle',
+];
+
+/**
+ * 「本次运动会」全部存储键：报名 / 预分组 / 赛程 / 成绩排名 都在 pe_sports_meet_v1 里，
+ * 另外三个是项目库、报名模板配置、运动会标题。一键清空时连根拔起。
+ */
+const MEET_DATA_KEYS = [
+  'pe_sports_meet_v1',
+  'pe_sports_meet_events_v1',
+  'pe_meet_template_config_v1',
   'sportsMeetTitle',
 ];
 
@@ -485,6 +498,78 @@ const Store = {
         console.warn(`[Store] 补推 ${key} 仍未成功`, error);
       }
     }
+  },
+
+  /**
+   * 一键清空本次运动会：报名 / 预分组 / 赛程 / 成绩排名 / 项目库 / 标题 全部连根拔起。
+   * 1) localStorage removeItem 洗地（含 __local_backup 备份键，避免回滚复活旧数据）
+   * 2) 内存缓存 + 待写队列清空（否则断网期间的失败写入会在下次联网时把旧数据补推回云端）
+   * 3) 云端按表 DELETE（/api/data { op:'purge', scope:'meet' }）；失败就退化为逐键写 null
+   * @returns {Promise<{ok:boolean, mode:string, clearedKeys:string[], cloud:Array, error?:string}>}
+   */
+  async purgeMeetData() {
+    const clearedKeys = [];
+    MEET_DATA_KEYS.forEach(key => {
+      try {
+        localStorage.removeItem(key);
+        localStorage.removeItem(`${key}__local_backup`);
+        clearedKeys.push(key);
+      } catch (error) {
+        console.warn(`[Store] 清空本地键失败：${key}`, error);
+      }
+    });
+    // 兜底：历史遗留的同前缀键也一并清掉
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (!key) continue;
+        if (/^pe_sports_meet|^pe_meet_template|^sportsMeet/i.test(key)) {
+          localStorage.removeItem(key);
+          if (!clearedKeys.includes(key)) clearedKeys.push(key);
+        }
+      }
+    } catch (error) {
+      console.warn('[Store] 枚举本地键失败', error);
+    }
+
+    // 内存缓存与待写队列同步清理（只动运动会相关的键，别误伤其他模块）
+    MEET_DATA_KEYS.forEach(key => {
+      this.cache.delete(key);
+      this._pendingWrites.delete(key);
+    });
+
+    let cloud = [];
+    let error = null;
+    if (this.cloudState !== 'off') {
+      try {
+        const result = await this._fetchJSON('/api/data', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ op: 'purge', scope: 'meet', keys: MEET_DATA_KEYS }),
+        });
+        cloud = result?.report || [];
+      } catch (purgeError) {
+        // 老服务端没有 purge 分支：退化为逐键写 null（单例键写 null = 删行）
+        console.warn('[Store] 服务端不支持 purge，退化为逐键清空', purgeError);
+        for (const key of MEET_DATA_KEYS) {
+          try {
+            await this._persist(key, null);
+            cloud.push({ key, status: 'ok', fallback: true });
+          } catch (singleError) {
+            error = singleError?.message || String(singleError);
+            cloud.push({ key, status: 'error', message: error });
+          }
+        }
+      }
+    }
+    this._dispatchSync(clearedKeys, { reason: 'purgeMeetData' });
+    return {
+      ok: !error,
+      mode: this.mode,
+      clearedKeys,
+      cloud,
+      error: error || undefined,
+    };
   },
 
   /** 待写队列现状（排障用） */

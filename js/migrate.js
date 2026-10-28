@@ -20,6 +20,8 @@ const MIGRATE_KEY_LABELS = {
   pe_fitness_weekly_log_v1: '健身训练记录',
   pe_big_unit_design_v1: '大单元设计',
   pe_sports_meet_v1: '运动会数据',
+  pe_sports_meet_events_v1: '运动会项目库',
+  pe_meet_template_config_v1: '报名模板配置',
   pe_week_mode: '单双周设置',
   pe_workbench_display_settings_v1: '工作台显示设置',
   sportsMeetTitle: '运动会标题',

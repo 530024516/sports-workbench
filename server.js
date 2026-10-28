@@ -106,7 +106,12 @@ const server = http.createServer((req, res) => {
     }
     const ext = path.extname(filePath).toLowerCase();
     const mime = MIME[ext] || 'application/octet-stream';
-    res.writeHead(200, { 'Content-Type': mime });
+    res.writeHead(200, {
+      'Content-Type': mime,
+      // 本地开发期禁用缓存：否则改完 html/js 后浏览器仍用旧版本，
+      // 会出现「页面上有按钮、点了却没反应」（旧 HTML 没引新脚本）这类查不出原因的问题
+      'Cache-Control': 'no-store',
+    });
     res.end(data);
   });
 });

@@ -74,6 +74,8 @@
   box-sizing: border-box;
 }
 
+/* 整页自然滚动：滚动权交还浏览器最外层，html/body 不设任何高度或 overflow 限制。
+   内容多高网页就多高，局部容器不再锁高度。 */
 html {
   font-size: 16px;
   scroll-behavior: smooth;
@@ -112,7 +114,7 @@ input, textarea, select {
 /* ========== 布局 ========== */
 .app-layout {
   display: flex;
-  min-height: 100vh;
+  min-height: 100vh;      /* 不再锁死高度：内容多高就多高，整页自然滚动 */
 }
 
 /* 侧边栏 */
@@ -326,13 +328,12 @@ input, textarea, select {
   color: var(--text-on-dark-secondary);
 }
 
-/* 主内容区 */
+/* 主内容区：不锁高度，随内容自然延伸 */
 .main-area {
   margin-left: var(--sidebar-width);
   flex: 1;
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
   min-width: 0;
 }
 
@@ -345,9 +346,8 @@ input, textarea, select {
   align-items: center;
   justify-content: space-between;
   padding: 0 var(--space-lg);
-  position: sticky;
-  top: 0;
-  z-index: 50;
+  /* 顶栏不再吸顶：跟着页面一起滚走，把纵向视野全部留给内容 */
+  position: relative;
 }
 
 .topbar-left {
@@ -403,7 +403,7 @@ input, textarea, select {
   background: var(--bg-hover);
 }
 
-/* 页面内容 */
+/* 页面内容：不锁高度、不接管滚动，整页自然滚动（甘特图 / 明细列表有多高就多高） */
 .page-content {
   flex: 1;
   padding: var(--space-lg);

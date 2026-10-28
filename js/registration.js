@@ -16,17 +16,39 @@ const HEADER_ALIASES = {
   events: ['报名项目', '比赛项目', '参赛项目', '项目', 'events', 'event'],
 };
 
+// 可选跑道数（小学有 4 道的小场地，也有 8 道的标准场）与默认跑道数
+const LANE_COUNT_OPTIONS = [4, 5, 6, 7, 8];
+const DEFAULT_LANE_COUNT = 4;
+
 let storageError = '';
 let pageData = loadMeetData();
 let pendingImport = null;
+let pendingImportRows = null;   // 等老师选班级时暂存的表格行
 let currentPage = 1;
 let searchQuery = '';
-let laneCount = 8;
+let globalSearchQuery = '';   // 看板上的全局搜索（按姓名反查班级与项目）
+let laneCount = DEFAULT_LANE_COUNT;
 const selectedAthleteIds = new Set();
-if ([6, 7, 8].includes(pageData.laneCount)) laneCount = pageData.laneCount;
+if (LANE_COUNT_OPTIONS.includes(pageData.laneCount)) laneCount = pageData.laneCount;
 
 const pageContent = document.getElementById('page-content');
 pageContent.innerHTML = `
+  <div class="card" style="margin-bottom:20px;">
+    <div class="card-header meet-toolbar">
+      <div>
+        <div class="card-title"><span>📊</span> 全校报名总览</div>
+        <div class="card-subtitle">各班级提交状态、报名人数，以及按姓名反查项目</div>
+      </div>
+      <input class="meet-search" id="globalStudentSearch" type="search"
+             placeholder="全局搜索学生姓名，反查班级与项目" aria-label="全局搜索学生姓名">
+    </div>
+    <div class="card-body">
+      <div class="meet-overview-stats" id="overviewStats"></div>
+      <div class="meet-search-result" id="globalSearchResult"></div>
+      <div class="meet-class-grid" id="classBoard"></div>
+    </div>
+  </div>
+
   <div class="card" style="margin-bottom:20px;">
     <div class="card-header">
       <div>
@@ -34,13 +56,15 @@ pageContent.innerHTML = `
         <div class="card-subtitle">批量导入报名表，校验资格并生成径赛预赛分组</div>
       </div>
       <div class="meet-toolbar-actions">
+        <button class="btn btn-primary" onclick="exportRegistrationTemplateExcel()">导出报名模板（Excel）</button>
+        <button class="btn btn-secondary" onclick="openMeetEventManager()">项目管理</button>
         <button class="btn btn-secondary" onclick="downloadRegistrationTemplate()">下载 CSV 模板</button>
       </div>
     </div>
     <div class="card-body">
       <div class="meet-upload">
         <input id="registrationFile" type="file" accept=".csv,.xlsx,.xls" aria-label="选择 Excel 或 CSV 报名文件">
-        <span class="meet-upload-hint">需要列：姓名、班级、年级、性别、报名项目；多个项目可用顿号或逗号分隔。保存时会合并已有名单并按年级、班级重新编号。</span>
+        <span class="meet-upload-hint">推荐用「导出报名模板（Excel）」生成的扁平模板：每行 = 班级 + 项目 + 组别 + 选手，项目已按男/女预填，填好直接导入即可；也兼容旧格式（姓名、班级、年级、性别、报名项目）。</span>
       </div>
       <div class="meet-alert" id="storageAlert" role="alert"></div>
       <div class="meet-alert" id="validationAlert" role="alert"></div>
@@ -90,9 +114,7 @@ pageContent.innerHTML = `
       <div class="meet-toolbar-actions">
         <label class="meet-lane-control">跑道数
           <select id="laneCount">
-            <option value="6">6 道</option>
-            <option value="7">7 道</option>
-            <option value="8" selected>8 道</option>
+            ${LANE_COUNT_OPTIONS.map(count => `<option value="${count}"${count === laneCount ? ' selected' : ''}>${count} 道</option>`).join('')}
           </select>
         </label>
         <button class="btn btn-secondary" onclick="regenerateHeats()">重新随机分组</button>
@@ -106,7 +128,7 @@ pageContent.innerHTML = `
 `;
 
 function emptyMeetData() {
-  return { athletes: [], registrations: [], heats: [], laneCount: 8 };
+  return { athletes: [], registrations: [], heats: [], laneCount: DEFAULT_LANE_COUNT };
 }
 
 function loadMeetData() {
@@ -208,15 +230,42 @@ async function readFileRows(file) {
   return XLSX.utils.sheet_to_json(firstSheet, { header: 1, defval: '' });
 }
 
-function getHeaderIndexes(headerRow) {
+/** 0-based 列号 → Excel 列字母（A/B/C…），错误报告里直接告诉老师第几列 */
+function importColumnLetter(index) {
+  if (!Number.isInteger(index) || index < 0) return '';
+  let name = '';
+  let value = index + 1;
+  while (value > 0) {
+    const remainder = (value - 1) % 26;
+    name = String.fromCharCode(65 + remainder) + name;
+    value = Math.floor((value - 1) / 26);
+  }
+  return name;
+}
+
+/** 结构化问题（模板模块加载时用它；未加载时退化成纯文本，绝不因此报错） */
+function importIssue(detail) {
+  return typeof makeImportIssue === 'function'
+    ? makeImportIssue(detail)
+    : { line: detail.line || 0, rows: [], column: detail.column || '', field: detail.field || '', message: detail.message || '', value: '', text: detail.message || '' };
+}
+
+/** 把「字符串问题 / 结构化问题」混合的数组统一成结构化数组 */
+function toImportIssues(list) {
+  return (list || []).map(item => (typeof item === 'string' ? importIssue({ message: item }) : item));
+}
+
+function getHeaderIndexes(headerRow, optionalFields = []) {
   const normalized = headerRow.map(normalizeHeader);
   const indexes = {};
   for (const [field, aliases] of Object.entries(HEADER_ALIASES)) {
     indexes[field] = normalized.findIndex(header => aliases.some(alias => normalizeHeader(alias) === header));
   }
-  const missing = Object.entries(indexes).filter(([, index]) => index < 0).map(([field]) => ({
-    name: '姓名', className: '班级', grade: '年级', gender: '性别', events: '报名项目',
-  })[field]);
+  const missing = Object.entries(indexes)
+    .filter(([field, index]) => index < 0 && !optionalFields.includes(field))
+    .map(([field]) => ({
+      name: '姓名', className: '班级', grade: '年级', gender: '性别', events: '报名项目',
+    })[field]);
   if (missing.length) throw new Error(`缺少必需列：${missing.join('、')}`);
   return indexes;
 }
@@ -251,10 +300,19 @@ function eventIsTeam(name) {
   return /(团体|接力|4\s*[x×]\s*100\s*(?:米|m)?)/i.test(name);
 }
 
+/**
+ * 是否团队/接力项目：名字里带“接力/团体”的，或在「项目管理」里显式标记为接力的自定义项目
+ * （例如“拔河”名字里没有接力二字，但管理里勾了接力，就按接力规则处理）
+ */
+function isTeamEventName(name) {
+  if (eventIsTeam(name)) return true;
+  return typeof isManagedRelayEvent === 'function' && isManagedRelayEvent(name);
+}
+
 function registrationIsTeamEvent(registration) {
   return registration.isTeamEvent === true ||
     registration.isTeam === true ||
-    eventIsTeam(registration.eventName);
+    isTeamEventName(registration.eventName);
 }
 
 function eventIsTrack(name) {
@@ -265,31 +323,53 @@ function eventKey(name, gender) {
   return `${name.trim().toLowerCase()}|${gender}`;
 }
 
-function parseRegistrationRows(rows) {
+function parseRegistrationRows(rows, options = {}) {
   if (rows.length < 2) throw new Error('文件中没有报名数据行');
-  const indexes = getHeaderIndexes(rows[0]);
+  // 整张表都没填班级时，用上传老师选择的班级补全
+  const defaultClassName = String(options?.defaultClassName ?? '').trim();
+  const indexes = getHeaderIndexes(rows[0], defaultClassName ? ['className'] : []);
   const imported = new Map();
   const genderByStudent = new Map();
-  const errors = [];
+  const issues = [];
+  // 交给班级级严格校验做全局扫描（接力不计入单项限制）
+  const scanRecords = [];
+  const letterOf = index => importColumnLetter(index);
 
   rows.slice(1).forEach((row, rowIndex) => {
     const lineNumber = rowIndex + 2;
     const athlete = {
       name: String(row[indexes.name] ?? '').trim(),
-      className: String(row[indexes.className] ?? '').trim(),
+      className: String(indexes.className >= 0 ? row[indexes.className] ?? '' : '').trim() || defaultClassName,
       grade: parseGrade(row[indexes.grade]),
       gender: parseGender(row[indexes.gender]),
     };
     const events = splitEventNames(row[indexes.events]);
     if (!athlete.name || !athlete.className || !athlete.grade || !athlete.gender || events.length === 0) {
-      errors.push(`第 ${lineNumber} 行：姓名、班级、1-6年级、有效性别和报名项目均为必填项`);
+      // 精确定位到第几行第几列，方便老师直接改
+      const missing = !athlete.name ? { field: '姓名', index: indexes.name }
+        : !athlete.className ? { field: '班级', index: indexes.className }
+          : !athlete.grade ? { field: '年级', index: indexes.grade }
+            : !athlete.gender ? { field: '性别', index: indexes.gender }
+              : { field: '报名项目', index: indexes.events };
+      issues.push(importIssue({
+        line: lineNumber,
+        column: letterOf(missing.index),
+        field: missing.field,
+        message: `${missing.field}缺失或无效（姓名、班级、1-6年级、有效性别、报名项目均为必填）`,
+        value: String(row[missing.index] ?? ''),
+      }));
       return;
     }
 
     const baseKey = athleteKey(athlete);
     const oldGender = genderByStudent.get(baseKey);
     if (oldGender && oldGender !== athlete.gender) {
-      errors.push(`第 ${lineNumber} 行：${athlete.name} 的性别与同名同班记录不一致`);
+      issues.push(importIssue({
+        line: lineNumber,
+        column: letterOf(indexes.gender),
+        field: '性别',
+        message: `${athlete.name} 的性别与同名同班记录不一致`,
+      }));
       return;
     }
     genderByStudent.set(baseKey, athlete.gender);
@@ -301,9 +381,25 @@ function parseRegistrationRows(rows) {
       imported.set(key, entry);
     }
     events.forEach(event => entry.events.add(event));
+    // 接力不计入“单项超额 / 单人超项”
+    events.filter(eventName => !isTeamEventName(eventName)).forEach(eventName => {
+      scanRecords.push({
+        className: athlete.className,
+        name: athlete.name,
+        gender: athlete.gender,
+        eventName,
+        relay: false,
+        line: lineNumber,
+      });
+    });
   });
 
-  return { athletes: [...imported.values()], errors };
+  // 严格规则：按班级全局扫描（单项每班最多 3 人 / 每人单项最多 2 项）
+  if (typeof scanClassLevelViolations === 'function') {
+    scanClassLevelViolations(scanRecords).forEach(issue => issues.push(issue));
+  }
+
+  return { athletes: [...imported.values()], errors: issues.map(issue => issue.text), issues };
 }
 
 function validateAthleteEligibility(athletes, registrations) {
@@ -322,10 +418,11 @@ function validateAthleteEligibility(athletes, registrations) {
     .filter(([, counts]) => counts.individual.size > 2 || counts.team.size > 1)
     .map(([athleteId, counts]) => {
       const athlete = athleteById.get(athleteId);
-      const exceeded = [];
-      if (counts.individual.size > 2) exceeded.push(`当前单项${counts.individual.size}项`);
-      if (counts.team.size > 1) exceeded.push(`当前团队项目${counts.team.size}项`);
-      return `${athlete.name} 报名失败：单项最多2项，团队项目最多1项，${exceeded.join('，')}。`;
+      const prefix = athlete?.className ? `${athlete.className} ` : '';
+      if (counts.individual.size > 2) {
+        return `${prefix}${athlete.name} 单项超过2项（当前${counts.individual.size}项）`;
+      }
+      return `${prefix}${athlete.name} 团队项目超过1项（当前${counts.team.size}项）`;
     });
 }
 
@@ -364,7 +461,7 @@ function prepareImport(importedAthletes) {
         eventName,
         eventType: eventIsTrack(eventName) ? 'track' : 'field',
         genderGroup,
-        isTeamEvent: eventIsTeam(eventName),
+        isTeamEvent: isTeamEventName(eventName),
       };
       registrations.push(registration);
       eventRegistrations.set(key, registration);
@@ -402,7 +499,8 @@ function shuffle(items) {
 }
 
 function arrangeLanes(athletes, laneTotal) {
-  const availableLanes = shuffle(Array.from({ length: laneTotal }, (_, index) => index + 1));
+  // 可用道次 = 1…跑道数，绝不会出现超过跑道数的道次（选 4 道就只会有 1、2、3、4 道）
+  const laneLimit = LANE_COUNT_OPTIONS.includes(laneTotal) ? laneTotal : DEFAULT_LANE_COUNT;
   let best = null;
   let bestScore = Infinity;
   const attempts = Math.min(100, Math.max(30, athletes.length * 8));
@@ -421,7 +519,12 @@ function arrangeLanes(athletes, laneTotal) {
     }
   }
 
-  const laneNumbers = shuffle(availableLanes).slice(0, athletes.length).sort((a, b) => a - b);
+  // 从第 1 道开始依次占用：人数不足跑道数时不空道、不漏人
+  // 例：9 人 / 4 道 → 分 3 组（3+3+3），最后一组 1 人时跑 1 道
+  const laneNumbers = Array.from(
+    { length: athletes.length },
+    (_, index) => (index % laneLimit) + 1,
+  );
   return best.map((athlete, index) => ({
     athleteId: athlete.id,
     lane: laneNumbers[index],
@@ -494,8 +597,35 @@ function renderStorageAlert() {
   alertBox.textContent = storageError;
 }
 
-function renderImportPreview(parsed, errors, previewData) {
+/** 错误报告：定位到第几行第几列，不白屏、不让老师猜 */
+function renderImportIssueReport(issues) {
+  if (!issues || !issues.length) return '';
+  const rowsHTML = issues.map(issue => `
+    <tr>
+      <td>${escapeHTML((issue.rows && issue.rows.length ? issue.rows : [issue.line]).filter(Boolean).join('、') || '-')}</td>
+      <td>${escapeHTML(issue.column || '-')}</td>
+      <td>${escapeHTML(issue.field || '-')}</td>
+      <td>${escapeHTML(issue.message || issue.text || '')}</td>
+      <td>${escapeHTML(issue.value || '')}</td>
+    </tr>`).join('');
+  return `
+    <div class="meet-alert visible">
+      <strong>错误报告：发现 ${issues.length} 处问题，本次导入已拒绝（行号 = Excel 里的行号，列 = Excel 列标）</strong>
+      <div class="meet-table-wrap" style="margin-top:10px;">
+        <table class="meet-table">
+          <thead><tr>
+            <th style="width:90px;">行号</th><th style="width:60px;">列</th>
+            <th style="width:90px;">字段</th><th>问题</th><th style="width:130px;">当前值</th>
+          </tr></thead>
+          <tbody>${rowsHTML}</tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+function renderImportPreview(parsed, errors, previewData, issues = null) {
   const container = document.getElementById('importPreview');
+  const issueList = toImportIssues(issues || errors);
   const importButton = `<button class="btn btn-primary" onclick="commitImport()" ${errors.length ? 'disabled' : ''}>校验并保存报名</button>`;
   const rows = parsed.slice(0, 8).map(athlete => `
     <tr>
@@ -507,8 +637,8 @@ function renderImportPreview(parsed, errors, previewData) {
     </tr>
   `).join('');
   container.innerHTML = `
-    ${errors.length ? `<div class="meet-alert visible"><strong>本次导入未通过校验，不能保存：</strong><ul>${errors.map(error => `<li>${escapeHTML(error)}</li>`).join('')}</ul></div>` : ''}
-    <div class="meet-preview-summary"><span>文件识别到 ${parsed.length} 名学生</span><span>${errors.length ? '请修正文件后重新导入' : '报名资格校验通过，可合并保存'}</span></div>
+    ${errors.length ? renderImportIssueReport(issueList) : ''}
+    <div class="meet-preview-summary"><span>文件识别到 ${parsed.length} 名学生</span><span>${errors.length ? '请按错误报告修正后重新导入' : '报名资格校验通过，可合并保存'}</span></div>
     ${parsed.length ? `<div class="meet-table-wrap"><table class="meet-table"><thead><tr><th>姓名</th><th>班级</th><th>年级</th><th>性别</th><th>报名项目</th></tr></thead><tbody>${rows}</tbody></table></div>` : ''}
     ${parsed.length > 8 ? `<p class="meet-guidance">当前仅预览前 8 名；保存后可在下方搜索完整报名清单。</p>` : ''}
     <div style="margin-top:14px;">${importButton}</div>
@@ -522,6 +652,112 @@ function renderImportPreview(parsed, errors, previewData) {
   }
 }
 
+/** 班级列在哪一列（兼容新版扁平模板与旧版名单格式） */
+function findImportClassColumn(rows) {
+  if (typeof isFlatRegistrationTemplate === 'function' && isFlatRegistrationTemplate(rows)) {
+    const headerIndex = findFlatHeaderIndex(rows);
+    return { headerIndex, column: mapFlatColumns(rows[headerIndex]).className };
+  }
+  try {
+    return { headerIndex: 0, column: getHeaderIndexes(rows[0], ['className']).className };
+  } catch (error) {
+    return { headerIndex: 0, column: -1 }; // 表头本身不合格，交给后面的解析去报具体缺哪列
+  }
+}
+
+/** 整张表是否填写了班级：没有就要先让上传的老师选班级 */
+function sheetHasClassValues(rows) {
+  const { headerIndex, column } = findImportClassColumn(rows);
+  if (column < 0) return false;
+  return rows.slice(headerIndex + 1).some(row => String(row?.[column] ?? '').trim() !== '');
+}
+
+/** 可选班级：学生库 + 已有报名名单 */
+function listImportClassOptions() {
+  const names = new Set(typeof getSchoolClassNames === 'function' ? getSchoolClassNames() : []);
+  (pageData.athletes || []).forEach(athlete => {
+    if (athlete?.className) names.add(String(athlete.className).trim());
+  });
+  return [...names].sort((a, b) => a.localeCompare(b, 'zh-CN', { numeric: true }));
+}
+
+/** 表格里没有填班级时，弹窗让上传的老师选择自己所在的班级 */
+function openImportClassPicker(rows) {
+  pendingImportRows = rows || null;
+  const options = listImportClassOptions();
+  const optionHTML = options.length
+    ? `<option value="">（请选择班级）</option>${options.map(name => `<option value="${escapeHTML(name)}">${escapeHTML(name)}</option>`).join('')}`
+    : '<option value="">（学生库里还没有班级）</option>';
+  showModal(
+    '这份表格没有填班级',
+    `<p class="meet-upload-hint">没有识别到班级列，请选择你所在的班级，整张表会按这个班级导入。</p>
+     <div class="form-group" style="margin-top:12px;">
+       <label for="importClassSelect">班级</label>
+       <select id="importClassSelect" class="meet-search" aria-label="选择班级">${optionHTML}</select>
+     </div>
+     <div class="form-group" style="margin-top:12px;">
+       <label for="importClassCustom">或手动填写班级</label>
+       <input id="importClassCustom" type="text" class="meet-search" autocomplete="off"
+              placeholder="例如：五年级3班" aria-label="手动填写班级">
+     </div>
+     <p class="meet-upload-hint" style="margin-top:8px;">请写“五年级3班”这样的全称，系统据此识别年级。</p>`,
+    `<button class="btn btn-secondary" onclick="closeModal(this)">取消</button>
+     <button id="importClassConfirm" class="btn btn-primary" onclick="confirmImportClass()">按这个班级导入</button>`,
+  );
+}
+
+async function confirmImportClass() {
+  const custom = String(document.getElementById('importClassCustom')?.value ?? '').trim();
+  const selected = String(document.getElementById('importClassSelect')?.value ?? '').trim();
+  const className = custom || selected;
+  if (!className) {
+    showToast('请选择或填写班级', 'error');
+    return;
+  }
+  const rows = pendingImportRows;
+  pendingImportRows = null;
+  const button = document.getElementById('importClassConfirm');
+  if (button && typeof closeModal === 'function') closeModal(button);
+  await runImportPipeline(rows, className);
+}
+
+/** 导入主流程：多班级识别 → 解析 → 严格规则拦截 → 错误报告 / 预览 */
+async function runImportPipeline(rows, defaultClassName = '') {
+  try {
+    if (!Array.isArray(rows) || rows.length < 2) {
+      throw new Error('文件里没有报名数据行（至少需要一行表头 + 一行数据）');
+    }
+    // ① 多班级识别：整张表都没填班级时先问老师
+    if (!defaultClassName && !sheetHasClassValues(rows)) {
+      openImportClassPicker(rows);
+      return;
+    }
+    // 自动识别模板：新版扁平模板（班级/项目/组别/选手1…）优先，其次旧版名单格式
+    const parsedResult = isFlatRegistrationTemplate(rows)
+      ? parseFlatRegistrationRows(rows, {
+        customEvents: typeof getCustomMeetEvents === 'function' ? getCustomMeetEvents() : [],
+        defaultClassName,
+      })
+      : parseRegistrationRows(rows, { defaultClassName });
+    let issues = toImportIssues(parsedResult.issues || parsedResult.errors);
+    let previewData = null;
+    if (!parsedResult.errors.length) {
+      const prepared = prepareImport(parsedResult.athletes);
+      previewData = prepared.data;
+      if (prepared.errors.length) {
+        issues = issues.concat(prepared.errors.map(message => importIssue({ field: '报名资格', message })));
+      }
+    }
+    renderImportPreview(parsedResult.athletes, issues.map(issue => issue.text), previewData, issues);
+  } catch (error) {
+    console.error('[报名] 导入解析失败', error);
+    pendingImport = null;
+    const issues = [importIssue({ field: '文件', message: error?.message || '解析失败' })];
+    renderImportPreview([], issues.map(issue => issue.text), null, issues);
+    showValidationErrors([error?.message || '解析失败']);
+  }
+}
+
 async function handleRegistrationFile(event) {
   clearValidationErrors();
   pendingImport = null;
@@ -531,19 +767,14 @@ async function handleRegistrationFile(event) {
   try {
     if (storageError) throw new Error(storageError);
     const rows = await readFileRows(file);
-    const parsedResult = parseRegistrationRows(rows);
-    let errors = parsedResult.errors;
-    let previewData = null;
-    if (!errors.length) {
-      const prepared = prepareImport(parsedResult.athletes);
-      errors = prepared.errors;
-      previewData = prepared.data;
-    }
-    renderImportPreview(parsedResult.athletes, errors, previewData);
+    await runImportPipeline(rows);
   } catch (error) {
+    console.error('[报名] 读取文件失败', error);
     pendingImport = null;
-    document.getElementById('importPreview').innerHTML = '';
-    showValidationErrors([error.message]);
+    // 容错：出错也渲染错误报告，绝不留白屏
+    const issues = [importIssue({ field: '文件', message: error?.message || '文件读取失败' })];
+    renderImportPreview([], issues.map(issue => issue.text), null, issues);
+    showValidationErrors([error?.message || '文件读取失败']);
   } finally {
     event.target.value = '';
   }
@@ -569,6 +800,202 @@ function commitImport() {
   showToast('报名数据已保存，参赛号码及径赛分组已更新');
 }
 
+/** 导出扁平化 Excel 报名模板：带上本次运动会已有的项目，避免老师自建项目丢失 */
+function exportRegistrationTemplateExcel() {
+  // 脚本没加载时（浏览器缓存了旧页面最常见）明确告知，而不是点了没反应
+  if (typeof downloadRegistrationTemplateExcel !== 'function') {
+    const message = '报名模板生成脚本（js/registration-template.js）未加载，请强制刷新页面后再试（Mac：Cmd+Shift+R，Windows：Ctrl+Shift+R）';
+    console.error('[报名]', message);
+    window.alert(message);
+    return { ok: false, reason: message };
+  }
+  const extraEvents = [...new Set((pageData.registrations || [])
+    .map(registration => registration.eventName)
+    .filter(Boolean))];
+  console.log(`[报名] 点击导出，追加自定义项目 ${extraEvents.length} 个`);
+  return downloadRegistrationTemplateExcel(extraEvents);
+}
+
+/* ---------------- 项目管理：自定义比赛项目 ---------------- */
+
+/** 打开【项目管理】弹窗：新增/删除自定义项目，自动并入导出模板 */
+function openMeetEventManager() {
+  if (typeof getCustomMeetEvents !== 'function') {
+    const message = '模板模块（js/registration-template.js）未加载，请强制刷新页面后再试（Mac：Cmd+Shift+R，Windows：Ctrl+Shift+R）';
+    console.error('[报名]', message);
+    window.alert(message);
+    return;
+  }
+  showModal(
+    '项目管理 · 自定义比赛项目',
+    `<div class="form-row">
+       <div class="form-group">
+         <label for="meetEventName">项目名称</label>
+         <input id="meetEventName" type="text" class="meet-search" autocomplete="off"
+                placeholder="例如：跳绳、踢毽子" aria-label="比赛项目名称">
+       </div>
+       <div class="form-group">
+         <label for="meetEventGender">组别</label>
+         <select id="meetEventGender" class="meet-search" aria-label="项目组别">
+           <option value="both">男子组 + 女子组</option>
+           <option value="male">仅男子组</option>
+           <option value="female">仅女子组</option>
+         </select>
+       </div>
+     </div>
+     <label for="meetEventRelay" style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:14px;">
+       <input id="meetEventRelay" type="checkbox"> 团队接力项目（每队 ${RELAY_TEAM_SIZE} 人，每班每组别限 1 队）
+     </label>
+     <p class="meet-upload-hint" style="margin-top:10px;">
+       新增的项目会自动写进「导出报名模板（Excel）」的下拉选项与校验规则，导入时也能正常识别；系统内置的 14 个项目始终保留。
+     </p>
+     <div id="meetEventList" style="margin-top:16px;"></div>
+     <div style="margin-top:18px;border-top:1px solid var(--border);padding-top:14px;">
+       <label for="meetGradeRestrictSwitch" style="display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600;">
+         <input id="meetGradeRestrictSwitch" type="checkbox" onchange="toggleMeetGradeRestriction(this.checked)">
+         按年级限制项目（默认不勾选 = 所有年级都能报所有项目）
+       </label>
+       <p class="meet-upload-hint" style="margin-top:6px;">
+         不勾选时，导出的模板对任何年级都输出全部项目（14 个内置 + 自定义）；勾选后才按下面的年级范围预填。
+       </p>
+       <div id="meetGradeMatrix"></div>
+       <div class="meet-toolbar-actions" style="margin-top:10px;">
+         <button class="btn btn-secondary" onclick="saveMeetGradeRestriction()">保存年级限制</button>
+       </div>
+     </div>`,
+    `<button class="btn btn-secondary" onclick="closeModal(this)">关闭</button>
+     <button class="btn btn-primary" onclick="submitMeetEvent()">添加项目</button>`,
+  );
+  renderMeetEventManagerList();
+  renderMeetGradeRestriction();
+  document.getElementById('meetEventName')?.focus();
+}
+
+/* ---------------- 年级限制（可选配置，默认关闭） ---------------- */
+
+const MEET_GRADE_OPTIONS = [1, 2, 3, 4, 5, 6];
+
+/** 渲染「项目 × 年级」勾选表；只有开启限制后才显示 */
+function renderMeetGradeRestriction() {
+  const container = document.getElementById('meetGradeMatrix');
+  const switchInput = document.getElementById('meetGradeRestrictSwitch');
+  if (!container || typeof getMeetTemplateConfig !== 'function') return;
+  const config = getMeetTemplateConfig();
+  if (switchInput) switchInput.checked = config.restrictByGrade === true;
+  if (config.restrictByGrade !== true) {
+    container.innerHTML = '';
+    return;
+  }
+  const events = typeof getTemplateEventOptions === 'function' ? getTemplateEventOptions() : [];
+  const savedGrades = event => config.eventGrades?.[event.name]
+    || (Array.isArray(event.grades) && event.grades.length ? event.grades : MEET_GRADE_OPTIONS);
+  container.innerHTML = `
+    <div class="meet-class-meta" style="margin:10px 0 6px;">勾选每个项目允许的年级，未勾选的年级不会出现在导出模板里。</div>
+    <div class="meet-table-wrap">
+      <table class="meet-table">
+        <thead><tr><th>项目</th>${MEET_GRADE_OPTIONS.map(grade => `<th style="width:56px;text-align:center;">${grade}年级</th>`).join('')}</tr></thead>
+        <tbody>${events.map((event, index) => {
+          const allowed = savedGrades(event);
+          return `<tr>
+            <td>${escapeHTML(event.name)}</td>
+            ${MEET_GRADE_OPTIONS.map(grade => `<td style="text-align:center;">
+              <input class="meet-checkbox" type="checkbox" id="meetGradeCell_${index}_${grade}"
+                aria-label="${escapeHTML(event.name)} ${grade}年级"
+                ${allowed.includes(grade) ? 'checked' : ''}>
+            </td>`).join('')}
+          </tr>`;
+        }).join('')}</tbody>
+      </table>
+    </div>`;
+}
+
+/** 勾选/取消「按年级限制项目」总开关 */
+function toggleMeetGradeRestriction(checked) {
+  if (typeof saveMeetTemplateConfig !== 'function') return;
+  saveMeetTemplateConfig({ restrictByGrade: checked === true });
+  renderMeetGradeRestriction();
+  showToast(checked
+    ? '已开启年级限制：导出模板只会输出各项目勾选的年级'
+    : '已关闭年级限制：所有年级都能报全部项目');
+}
+
+/** 保存「项目 × 年级」勾选结果 */
+function saveMeetGradeRestriction() {
+  if (typeof saveMeetTemplateConfig !== 'function' || typeof getTemplateEventOptions !== 'function') return;
+  const eventGrades = {};
+  getTemplateEventOptions().forEach((event, index) => {
+    eventGrades[event.name] = MEET_GRADE_OPTIONS
+      .filter(grade => document.getElementById(`meetGradeCell_${index}_${grade}`)?.checked === true);
+  });
+  saveMeetTemplateConfig({ eventGrades });
+  showToast('年级限制已保存，下次导出报名模板时生效');
+}
+
+/** 渲染弹窗里的自定义项目列表 */
+function renderMeetEventManagerList() {
+  const container = document.getElementById('meetEventList');
+  if (!container) return;
+  const events = getCustomMeetEvents();
+  if (!events.length) {
+    container.innerHTML = '<div class="meet-empty">还没有自定义项目，系统内置的 14 个项目始终可用。</div>';
+    return;
+  }
+  const genderText = event => (event.gender === 'male' ? '仅男子组'
+    : event.gender === 'female' ? '仅女子组' : '男子组 + 女子组');
+  container.innerHTML = `
+    <div style="font-size:13px;font-weight:600;margin-bottom:8px;">已添加 ${events.length} 个自定义项目</div>
+    <div class="meet-table-wrap">
+      <table class="meet-table">
+        <thead><tr><th>项目名称</th><th>组别</th><th>类型</th><th style="width:72px;">操作</th></tr></thead>
+        <tbody>${events.map(event => `
+          <tr>
+            <td>${escapeHTML(event.name)}</td>
+            <td>${genderText(event)}</td>
+            <td>${event.relay ? '团队接力' : '单项'}</td>
+            <td><button class="btn btn-danger" style="padding:4px 10px;font-size:12px;"
+                    onclick="removeManagedMeetEvent('${String(event.id).replace(/[^A-Za-z0-9_-]/g, '')}')">删除</button></td>
+          </tr>`).join('')}</tbody>
+      </table>
+    </div>`;
+}
+
+/** 弹窗里点【添加项目】 */
+function submitMeetEvent() {
+  const nameInput = document.getElementById('meetEventName');
+  if (!nameInput) return;
+  const result = addCustomMeetEvent({
+    name: nameInput.value,
+    gender: document.getElementById('meetEventGender')?.value || 'both',
+    relay: document.getElementById('meetEventRelay')?.checked === true,
+  });
+  if (!result.ok) {
+    showToast(result.reason || '添加失败', 'error');
+    nameInput.focus();
+    return;
+  }
+  nameInput.value = '';
+  const relayInput = document.getElementById('meetEventRelay');
+  if (relayInput) relayInput.checked = false;
+  renderMeetEventManagerList();
+  const cloudHint = Store.cloudState === 'on'
+    ? '已保存到云端'
+    : '已保存（云端未连接，先存本地，恢复后自动同步）';
+  showToast(`已添加项目「${result.event.name}」，${cloudHint}`);
+  nameInput.focus();
+}
+
+/** 删除一条自定义项目 */
+function removeManagedMeetEvent(id) {
+  const events = removeCustomMeetEvent(id);
+  renderMeetEventManagerList();
+  showToast(`已删除项目，当前自定义项目 ${events.length} 个`);
+}
+
+// 脚本加载即自检：模板模块缺失时在控制台提前报警，避免按钮点了没反应还查不出原因
+if (typeof downloadRegistrationTemplateExcel !== 'function') {
+  console.error('[报名] js/registration-template.js 未加载：导出报名模板按钮将不可用，请强制刷新页面（Cmd+Shift+R）');
+}
+
 function downloadRegistrationTemplate() {
   const rows = [
     ['姓名', '班级', '年级', '性别', '报名项目'],
@@ -580,6 +1007,292 @@ function downloadRegistrationTemplate() {
   link.download = '运动会报名模板.csv';
   link.click();
   URL.revokeObjectURL(link.href);
+}
+
+/* ---------------- 全校报名总览看板 ---------------- */
+
+/** 学生库里的全校班级名（如“五年级1班”） */
+function getSchoolClassNames() {
+  const names = new Set();
+  const students = Store.read('pe_students', []) || [];
+  if (Array.isArray(students)) {
+    students.forEach(student => {
+      if (!student) return;
+      const full = `${String(student.grade ?? '').trim()}${String(student.class ?? '').trim()}`;
+      if (full.trim()) names.add(full);
+    });
+  }
+  return [...names].sort((a, b) => a.localeCompare(b, 'zh-CN', { numeric: true }));
+}
+
+/** 按班级汇总：人数、单项人次、接力队数 */
+function buildClassSummaries() {
+  const athleteById = new Map(pageData.athletes.map(athlete => [athlete.id, athlete]));
+  const byClass = new Map();
+  pageData.registrations.forEach(registration => {
+    const athlete = athleteById.get(registration.athleteId);
+    if (!athlete) return;
+    const className = String(athlete.className ?? '').trim();
+    if (!className) return;
+    let item = byClass.get(className);
+    if (!item) {
+      item = { className, grade: athlete.grade, athleteIds: new Set(), individualCount: 0, relayTeams: new Set() };
+      byClass.set(className, item);
+    }
+    item.athleteIds.add(athlete.id);
+    if (registrationIsTeamEvent(registration)) {
+      item.relayTeams.add(`${registration.eventName}|${registration.genderGroup}`);
+    } else {
+      item.individualCount += 1;
+    }
+  });
+  return [...byClass.values()]
+    .map(item => ({
+      className: item.className,
+      grade: item.grade,
+      athleteCount: item.athleteIds.size,
+      individualCount: item.individualCount,
+      relayCount: item.relayTeams.size,
+    }))
+    .sort((a, b) => String(a.className).localeCompare(String(b.className), 'zh-CN', { numeric: true }));
+}
+
+function countRelayTeams() {
+  const athleteById = new Map(pageData.athletes.map(athlete => [athlete.id, athlete]));
+  const teams = new Set();
+  pageData.registrations.filter(registration => registrationIsTeamEvent(registration)).forEach(registration => {
+    const athlete = athleteById.get(registration.athleteId);
+    teams.add(`${athlete?.className ?? ''}|${registration.eventName}|${registration.genderGroup}`);
+  });
+  return teams.size;
+}
+
+function renderOverview() {
+  const summaries = buildClassSummaries();
+  const submitted = new Set(summaries.map(item => item.className));
+  const schoolClasses = getSchoolClassNames();
+  const pending = schoolClasses.filter(name => !submitted.has(name));
+  const totalClasses = Math.max(schoolClasses.length, submitted.size);
+
+  const stats = document.getElementById('overviewStats');
+  if (stats) {
+    stats.innerHTML = `
+      <div class="meet-stat-mini"><h4>${totalClasses}</h4><p>全校班级数${schoolClasses.length ? '' : '（按已提交班级计）'}</p></div>
+      <div class="meet-stat-mini"><h4>${submitted.size}</h4><p>已提交班级</p></div>
+      <div class="meet-stat-mini"><h4>${pending.length}</h4><p>待提交班级</p></div>
+      <div class="meet-stat-mini"><h4>${pageData.athletes.length}</h4><p>报名总人数</p></div>
+      <div class="meet-stat-mini"><h4>${pageData.registrations.filter(registration => !registrationIsTeamEvent(registration)).length}</h4><p>单项人次</p></div>
+      <div class="meet-stat-mini"><h4>${countRelayTeams()}</h4><p>接力队数</p></div>
+    `;
+  }
+  renderClassBoard(summaries, pending);
+  renderGlobalSearch();
+}
+
+function renderClassBoard(summaries, pending = []) {
+  const board = document.getElementById('classBoard');
+  if (!board) return;
+  if (!summaries.length && !pending.length) {
+    board.innerHTML = '<div class="meet-empty">还没有班级提交报名；导入报名表后这里会按班级展示进度。</div>';
+    return;
+  }
+  board.innerHTML = [
+    ...summaries.map(item => `
+      <div class="meet-class-card">
+        <div class="meet-class-title">
+          <span>${escapeHTML(item.className)}</span>
+          <span class="meet-badge done">已提交</span>
+        </div>
+        <div class="meet-class-meta">${item.athleteCount} 名学生 · 单项 ${item.individualCount} 人次 · 接力 ${item.relayCount} 队</div>
+        <div class="meet-class-actions">
+          <button class="btn btn-primary" onclick="openClassDetail('${escapeHTML(item.className)}')">查看详情</button>
+          <button class="btn btn-danger" onclick="revokeClassRegistrations('${escapeHTML(item.className)}')">撤销该班报名</button>
+        </div>
+      </div>`),
+    ...pending.map(name => `
+      <div class="meet-class-card pending">
+        <div class="meet-class-title">
+          <span>${escapeHTML(name)}</span>
+          <span class="meet-badge pending">未提交</span>
+        </div>
+        <div class="meet-class-meta">学生库里有该班，但还没有报名数据</div>
+      </div>`),
+  ].join('');
+}
+
+/** 项目在模板里的先后顺序（内置 + 自定义），网格行按它排序 */
+function templateEventOrder() {
+  const names = typeof getTemplateEventOptions === 'function'
+    ? getTemplateEventOptions().map(event => String(event?.name ?? '').trim().toLowerCase())
+    : [];
+  return new Map(names.map((name, index) => [name, index]));
+}
+
+/** 某班的「项目 × 男子/女子」网格数据 */
+function buildClassEventGrid(className) {
+  const target = String(className ?? '').trim();
+  const athletes = pageData.athletes.filter(athlete => String(athlete.className ?? '').trim() === target);
+  if (!athletes.length) return null;
+  const athleteById = new Map(athletes.map(athlete => [athlete.id, athlete]));
+  const rows = new Map();
+
+  pageData.registrations.forEach(registration => {
+    const athlete = athleteById.get(registration.athleteId);
+    if (!athlete) return;
+    const gender = registration.genderGroup || athlete.gender;
+    let row = rows.get(registration.eventName);
+    if (!row) {
+      row = {
+        eventName: registration.eventName,
+        relay: registrationIsTeamEvent(registration),
+        male: [],
+        female: [],
+      };
+      rows.set(registration.eventName, row);
+    }
+    row[gender === 'male' ? 'male' : 'female'].push(athlete);
+  });
+
+  const order = templateEventOrder();
+  const sorted = [...rows.values()].sort((a, b) => {
+    if (a.relay !== b.relay) return a.relay ? 1 : -1;
+    const indexA = order.get(a.eventName.toLowerCase()) ?? Number.MAX_SAFE_INTEGER;
+    const indexB = order.get(b.eventName.toLowerCase()) ?? Number.MAX_SAFE_INTEGER;
+    if (indexA !== indexB) return indexA - indexB;
+    return String(a.eventName).localeCompare(String(b.eventName), 'zh-CN');
+  });
+  return { className: target, athletes, rows: sorted };
+}
+
+function renderGridCell(list, relay) {
+  if (!list || !list.length) return '<span class="meet-grid-empty">—</span>';
+  // 接力超过正式队员人数（4 人）的部分视为替补，用浅蓝色区分
+  const relaySize = typeof RELAY_TEAM_SIZE === 'number' ? RELAY_TEAM_SIZE : 4;
+  // 接力必须保持表格里的填报顺序（前 4 名正式、后面是替补），单项无所谓顺序，按姓名排好看
+  const ordered = relay ? list.slice() : list.slice().sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh-CN'));
+  return ordered
+    .map((athlete, index) => {
+      const isSub = relay && index >= relaySize;
+      return `<span class="meet-grid-name${isSub ? ' sub' : ''}">${escapeHTML(athlete.name)}${athlete.bibNumber ? ` · ${escapeHTML(athlete.bibNumber)}` : ''}</span>`;
+    }).join('');
+}
+
+/** 【查看详情】：用网格模式展示该班男女各项目的报名情况 */
+function openClassDetail(className) {
+  const grid = buildClassEventGrid(className);
+  if (!grid) {
+    showToast('该班级暂无报名数据', 'info');
+    return;
+  }
+  const summary = buildClassSummaries().find(item => item.className === grid.className) || {};
+  const rowsHTML = grid.rows.map(row => `
+    <tr>
+      <td class="meet-grid-event">${escapeHTML(row.eventName)}${row.relay ? ' <span class="meet-badge pending">接力</span>' : ''}</td>
+      <td>${renderGridCell(row.male, row.relay)}</td>
+      <td>${renderGridCell(row.female, row.relay)}</td>
+    </tr>`).join('');
+  showModal(
+    `${grid.className} · 报名详情`,
+    `<div class="meet-class-meta" style="margin-bottom:10px;">共 ${grid.athletes.length} 名学生 · 单项 ${summary.individualCount || 0} 人次 · 接力 ${summary.relayCount || 0} 队</div>
+     <div class="meet-table-wrap">
+       <table class="meet-grid-table">
+         <thead><tr><th style="width:150px;">项目</th><th>男子组</th><th>女子组</th></tr></thead>
+         <tbody>${rowsHTML}</tbody>
+       </table>
+     </div>
+     <p class="meet-upload-hint" style="margin-top:10px;">行 = 项目，列 = 组别；接力超过 ${typeof RELAY_TEAM_SIZE === 'number' ? RELAY_TEAM_SIZE : 4} 人的部分（浅蓝）为替补。</p>`,
+    `<button class="btn btn-secondary" onclick="closeModal(this)">关闭</button>
+     <button class="btn btn-danger" onclick="revokeClassRegistrations('${escapeHTML(grid.className)}')">撤销该班报名</button>`,
+  );
+}
+
+/** 【撤销该班级报名】：删除该班全部运动员与报名，便于重新上传 */
+function revokeClassRegistrations(className) {
+  const target = String(className ?? '').trim();
+  const affected = pageData.athletes.filter(athlete => String(athlete.className ?? '').trim() === target);
+  if (!affected.length) {
+    showToast('该班级没有报名数据', 'error');
+    return;
+  }
+  const confirmed = window.confirm(
+    `确定撤销「${target}」的全部报名吗？将删除该班 ${affected.length} 名运动员及其所有项目，之后可重新上传。`,
+  );
+  if (!confirmed) return;
+
+  const ids = new Set(affected.map(athlete => athlete.id));
+  const athletes = pageData.athletes.filter(athlete => !ids.has(athlete.id));
+  const registrations = pageData.registrations.filter(registration => !ids.has(registration.athleteId));
+  assignBibNumbers(athletes); // 号码重新连号，避免撤销后留下空号
+  const updatedData = {
+    ...pageData,
+    athletes,
+    registrations,
+    heats: generatePreliminaryHeats(athletes, registrations, laneCount),
+    schedule: null,
+    results: [],
+  };
+  if (!saveMeetData(updatedData)) return;
+  const closeButton = document.querySelector?.('.modal-close');
+  if (closeButton && typeof closeModal === 'function') closeModal(closeButton);
+  selectedAthleteIds.clear();
+  currentPage = 1;
+  showToast(`已撤销「${target}」的报名（${affected.length} 人），可重新上传`);
+}
+
+/** 全局搜索：输入姓名反查班级与项目 */
+function handleGlobalSearchChange(event) {
+  globalSearchQuery = String(event?.target?.value ?? '');
+  renderGlobalSearch();
+}
+
+function renderGlobalSearch() {
+  const container = document.getElementById('globalSearchResult');
+  if (!container) return;
+  const keyword = globalSearchQuery.trim();
+  if (!keyword) {
+    container.innerHTML = '';
+    return;
+  }
+  const query = keyword.toLowerCase();
+  const registrationsByAthlete = new Map();
+  pageData.registrations.forEach(registration => {
+    const list = registrationsByAthlete.get(registration.athleteId) || [];
+    list.push(registration);
+    registrationsByAthlete.set(registration.athleteId, list);
+  });
+
+  const matches = pageData.athletes.filter(athlete => {
+    const events = (registrationsByAthlete.get(athlete.id) || []).map(registration => registration.eventName);
+    return [athlete.name, athlete.className, athlete.bibNumber, ...events]
+      .some(value => String(value ?? '').toLowerCase().includes(query));
+  }).sort((a, b) => String(a.className).localeCompare(String(b.className), 'zh-CN', { numeric: true })
+    || String(a.name).localeCompare(String(b.name), 'zh-CN'));
+
+  if (!matches.length) {
+    container.innerHTML = `<div class="meet-empty">没有找到与“${escapeHTML(keyword)}”相关的学生。</div>`;
+    return;
+  }
+
+  const shown = matches.slice(0, 30);
+  container.innerHTML = `
+    <div class="meet-class-meta" style="margin-bottom:8px;">找到 ${matches.length} 名学生${matches.length > shown.length ? `，显示前 ${shown.length} 条` : ''}</div>
+    <div class="meet-table-wrap">
+      <table class="meet-table">
+        <thead><tr><th>姓名</th><th>班级</th><th>性别</th><th>参赛号码</th><th>报名项目</th></tr></thead>
+        <tbody>${shown.map(athlete => {
+          const entries = registrationsByAthlete.get(athlete.id) || [];
+          return `<tr>
+            <td>${escapeHTML(athlete.name)}</td>
+            <td>${escapeHTML(athlete.className)}</td>
+            <td>${athlete.gender === 'male' ? '男' : '女'}</td>
+            <td class="meet-bib">${escapeHTML(athlete.bibNumber || '—')}</td>
+            <td class="meet-events">${entries.length
+              ? entries.map(registration => `<span class="meet-event-tag ${registrationIsTeamEvent(registration) ? 'team' : ''}">${escapeHTML(registration.eventName)}</span>`).join('')
+              : '—'}</td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>
+    </div>`;
 }
 
 function renderAthletes() {
@@ -761,10 +1474,11 @@ function renderHeats() {
   const athleteById = new Map(pageData.athletes.map(athlete => [athlete.id, athlete]));
   const list = document.getElementById('heatList');
   const guidance = document.getElementById('heatGuidance');
-  const undersized = pageData.heats.filter(heat => heat.entries.length < 6);
+  // 组数 = ⌈人数 / 跑道数⌉，跑道数变化时自动重新切分（选 4 道就每 4 人一组）
+  const undersized = pageData.heats.filter(heat => heat.entries.length < laneCount);
   guidance.textContent = undersized.length
-    ? `提示：${undersized.length} 个预赛组不足 6 人；受报名人数和跑道数限制，已尽量均衡分组且未超过 ${laneCount} 道。`
-    : '每组人数不超过跑道数；同班运动员尽量分散在不同小组和非相邻道次。';
+    ? `提示：${undersized.length} 个预赛组不足 ${laneCount} 人；受报名人数和跑道数限制，已尽量均衡分组且未超过 ${laneCount} 道。`
+    : `每组人数不超过跑道数（当前 ${laneCount} 道）；同班运动员尽量分散在不同小组和非相邻道次。`;
 
   if (!pageData.heats.length) {
     list.innerHTML = '<div class="meet-empty">径赛报名人数超过跑道数后，将自动生成预赛分组。</div>';
@@ -795,14 +1509,15 @@ function renderPage() {
   document.getElementById('athleteCount').textContent = pageData.athletes.length;
   document.getElementById('registrationCount').textContent = pageData.registrations.filter(registration => !registrationIsTeamEvent(registration)).length;
   document.getElementById('heatCount').textContent = pageData.heats.length;
+  renderOverview();
   renderAthletes();
   renderHeats();
 }
 
 function regenerateHeats() {
   const nextLaneCount = Number(document.getElementById('laneCount').value);
-  if (![6, 7, 8].includes(nextLaneCount)) {
-    showToast('跑道数必须为 6、7 或 8 道', 'error');
+  if (!LANE_COUNT_OPTIONS.includes(nextLaneCount)) {
+    showToast(`跑道数必须为 ${LANE_COUNT_OPTIONS.join('、')} 道`, 'error');
     return;
   }
   laneCount = nextLaneCount;
@@ -824,6 +1539,7 @@ function handleSearchChange(event) {
 function initializePage() {
   document.getElementById('registrationFile').addEventListener('change', handleRegistrationFile);
   document.getElementById('athleteSearch').addEventListener('input', handleSearchChange);
+  document.getElementById('globalStudentSearch').addEventListener('input', handleGlobalSearchChange);
   document.getElementById('laneCount').addEventListener('change', event => {
     laneCount = Number(event.target.value);
   });

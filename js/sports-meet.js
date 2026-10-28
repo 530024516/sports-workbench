@@ -57,6 +57,9 @@ document.getElementById('page-content').innerHTML = `
   </section>
 `;
 
+// 标记为「首页外壳」：让 hero + 卡片撑满可视高度、iframe 填满剩余空间，父页不再出现第二条滚动条
+document.getElementById('page-content').classList.add('sports-meet-shell');
+
 function escapeSportsMeetTitle(value) {
   return String(value).replace(/[&<>"']/g, char => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -121,12 +124,33 @@ function handleSportsMeetTitleKeydown(event) {
   }
 }
 
+/* iframe 自动撑高的安全护栏：
+   ① 只在高度变化超过 2px 时才回写（避免抖动式自我触发）
+   ② 上限 40000px（任何异常都不可能把页面撑到无限长）
+   ③ 前提：iframe 内部不允许出现 vh 相关高度——内容高度只与宽度有关，
+      与 iframe 自身高度无关，因此「iframe 变高 → 内容更高」的正反馈已经不存在。
+      之前的无限变长正是因为内部甘特图用了 calc(100vh - 150px)，现已全部改为自然高度。 */
+const SPORTS_MEET_FRAME_MIN_HEIGHT = 480;
+const SPORTS_MEET_FRAME_MAX_HEIGHT = 40000;
+
 function setSportsMeetFrameHeight(frame) {
+  // 不在文档流里（切到别的 Tab 而隐藏）时量不到真实高度，等 Tab 切回来再量
+  if (!frame || !frame.isConnected || !frame.offsetParent) return;
   try {
-    const documentElement = frame.contentDocument?.documentElement;
-    if (!documentElement) return;
-    const contentHeight = documentElement.scrollHeight;
-    frame.style.height = `${Math.max(contentHeight, 480)}px`;
+    const frameBody = frame.contentDocument?.body;
+    if (!frameBody) return;
+    const measured = Math.max(
+      frameBody.scrollHeight || 0,
+      frameBody.firstElementChild?.scrollHeight || 0,
+      frame.contentDocument.documentElement?.scrollHeight || 0,
+    );
+    const next = Math.round(Math.min(
+      Math.max(measured, SPORTS_MEET_FRAME_MIN_HEIGHT), SPORTS_MEET_FRAME_MAX_HEIGHT,
+    ));
+    const current = Number(frame.dataset.frameHeight || 0);
+    if (Math.abs(next - current) <= 2) return;      // ① 没有实质变化就不回写
+    frame.dataset.frameHeight = String(next);
+    frame.style.height = `${next}px`;
   } catch (error) {
     console.error('无法读取运动会模块页面高度', error);
   }
@@ -138,13 +162,27 @@ function observeSportsMeetFrame(frame) {
     try {
       const frameBody = frame.contentDocument?.body;
       if (!frameBody) return;
-      const observer = new ResizeObserver(() => setSportsMeetFrameHeight(frame));
+      let pending = 0;
+      const observer = new ResizeObserver(() => {
+        cancelAnimationFrame(pending);
+        pending = requestAnimationFrame(() => setSportsMeetFrameHeight(frame));
+      });
       observer.observe(frameBody);
     } catch (error) {
       console.error('无法监测运动会模块页面高度变化', error);
     }
   });
 }
+
+/** 窗口变宽/变窄后文字换行会变，内容高度跟着变 → 重新量一次 */
+function refreshSportsMeetFrameHeight() {
+  document.querySelectorAll('.sports-meet-frame').forEach(setSportsMeetFrameHeight);
+}
+
+window.addEventListener('resize', () => {
+  clearTimeout(window.__sportsMeetResizeTimer);
+  window.__sportsMeetResizeTimer = setTimeout(refreshSportsMeetFrameHeight, 120);
+});
 
 function selectSportsMeetTab(tabId, updateHash = true) {
   const activeTab = sportsMeetTabs.find(tab => tab.id === tabId) || sportsMeetTabs[0];
@@ -155,7 +193,11 @@ function selectSportsMeetTab(tabId, updateHash = true) {
     tabButton.setAttribute('aria-selected', String(isActive));
     tabButton.tabIndex = isActive ? 0 : -1;
     panel.hidden = !isActive;
-    if (isActive) setSportsMeetFrameHeight(panel.querySelector('iframe'));
+    if (isActive) {
+      const frame = panel.querySelector('iframe');
+      setSportsMeetFrameHeight(frame);
+      requestAnimationFrame(() => setSportsMeetFrameHeight(frame));   // 等一帧布局稳定再量一次
+    }
   });
 
   if (updateHash && window.location.hash !== `#${activeTab.id}`) {
