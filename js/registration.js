@@ -152,19 +152,59 @@ function loadMeetData() {
   }
 }
 
-function saveMeetData(data) {
+/**
+ * 保存报名数据（重要表单，强一致）：
+ * ① 本地立即生效（页面马上能看到新数据）
+ * ② await 云端写入确认 —— 只有云端返回成功才算"保存成功"，
+ *    否则数据虽然完整留在本地，也必须弹窗报错，绝不能提示"已保存"让用户以为落库了。
+ *    否则用户一刷新，云端旧数据回来就把刚导入的数据冲掉了。
+ * ③ 成功后派发 store:sync，赛程编排等模块立刻重取，不用等轮询
+ *
+ * @returns {Promise<boolean>} 云端是否确认成功
+ */
+/**
+ * @param {object} data
+ * @param {{allowEmpty?: boolean}} options
+ *        allowEmpty=true：用户明确要清空 / 删到一条不剩，才允许把报名数据写空
+ *        （Store 默认会拒绝"用空数据覆盖已有数据"，防止误清空）
+ */
+async function saveMeetData(data, options = {}) {
+  pageData = data;
+  storageError = '';
   try {
-    Store.write(STORAGE_KEY, data);
-    pageData = data;
-    storageError = '';
+    // 版本兜底：浏览器缓存了旧版 store.js 时没有 writeCritical，退回同步写，
+    // 数据照样落本地（旧行为），并提示老师强制刷新，绝不让保存按钮失灵
+    if (typeof Store.writeCritical !== 'function') {
+      Store.write(STORAGE_KEY, data);
+      renderPage();
+      renderStorageAlert();
+      showToast('已保存到本机（存储组件需更新，请强制刷新页面以确保同步到云端）', 'error');
+      return true;
+    }
+    const result = await Store.writeCritical(STORAGE_KEY, data, {
+      label: '运动会报名数据',
+      allowEmpty: options.allowEmpty === true,
+    });
     renderPage();
     renderStorageAlert();
+    if (!result.ok) {
+      const message = `报名数据已保存在本机，但同步到云端失败：${result.error || '未知错误'}。\n\n`
+        + '数据不会丢失，系统会在后台继续重试上传；请不要清理浏览器数据。';
+      showValidationErrors([message]);
+      window.alert(message);
+      return false;
+    }
     return true;
   } catch (error) {
-    showValidationErrors([`保存失败：${error.message}`]);
+    const message = `保存失败：${error?.message || error}`;
+    showValidationErrors([message]);
+    renderPage();
+    renderStorageAlert();
     return false;
   }
 }
+
+
 
 function escapeHTML(value) {
   return String(value ?? '').replace(/[&<>"']/g, char => ({
@@ -780,7 +820,7 @@ async function handleRegistrationFile(event) {
   }
 }
 
-function commitImport() {
+async function commitImport() {
   if (storageError) {
     const message = '本地报名数据读取失败，未覆盖保存';
     showValidationErrors([message]);
@@ -793,11 +833,15 @@ function commitImport() {
     window.alert(errors[0]);
     return;
   }
-  if (!saveMeetData(pendingImport)) return;
+  const saving = pendingImport;
   pendingImport = null;
+  // 重要表单：等到云端确认落库再提示成功，否则用户一刷新就被云端旧数据冲掉
+  showToast('正在保存并同步到云端…', 'info');
+  const ok = await saveMeetData(saving);
+  if (!ok) { pendingImport = saving; return; }   // 数据还在本地，允许用户稍后重试
   document.getElementById('importPreview').innerHTML = '';
   clearValidationErrors();
-  showToast('报名数据已保存，参赛号码及径赛分组已更新');
+  showToast('报名数据已保存并同步到云端，参赛号码及径赛分组已更新');
 }
 
 /** 导出扁平化 Excel 报名模板：带上本次运动会已有的项目，避免老师自建项目丢失 */
@@ -1207,7 +1251,7 @@ function openClassDetail(className) {
 }
 
 /** 【撤销该班级报名】：删除该班全部运动员与报名，便于重新上传 */
-function revokeClassRegistrations(className) {
+async function revokeClassRegistrations(className) {
   const target = String(className ?? '').trim();
   const affected = pageData.athletes.filter(athlete => String(athlete.className ?? '').trim() === target);
   if (!affected.length) {
@@ -1231,7 +1275,7 @@ function revokeClassRegistrations(className) {
     schedule: null,
     results: [],
   };
-  if (!saveMeetData(updatedData)) return;
+  if (!(await saveMeetData(updatedData, { allowEmpty: true }))) return;   // 撤销班级：可能删空
   const closeButton = document.querySelector?.('.modal-close');
   if (closeButton && typeof closeModal === 'function') closeModal(closeButton);
   selectedAthleteIds.clear();
@@ -1395,7 +1439,7 @@ function toggleCurrentPageSelection(checked) {
   renderAthletes();
 }
 
-function deleteSelectedAthletes() {
+async function deleteSelectedAthletes() {
   const selectedIds = new Set([...selectedAthleteIds].filter(id =>
     pageData.athletes.some(athlete => athlete.id === id),
   ));
@@ -1424,7 +1468,7 @@ function deleteSelectedAthletes() {
       .filter(heat => heat.entries.length > 0),
   };
 
-  if (!saveMeetData(updatedData)) return;
+  if (!(await saveMeetData(updatedData, { allowEmpty: true }))) return;   // 删除选中：可能删空
   selectedAthleteIds.clear();
   renderAthletes();
   showToast(`已删除 ${count} 条报名数据`);
@@ -1447,7 +1491,7 @@ function clearAllRegistrations() {
   document.getElementById('clearConfirmation').focus();
 }
 
-function confirmClearAllRegistrations() {
+async function confirmClearAllRegistrations() {
   const confirmation = document.getElementById('clearConfirmation')?.value;
   if (confirmation !== 'DELETE') {
     showToast('请输入 DELETE 确认清空', 'error');
@@ -1457,7 +1501,7 @@ function confirmClearAllRegistrations() {
 
   const count = pageData.athletes.length;
   const updatedData = { ...emptyMeetData(), laneCount, schedule: null };
-  if (!saveMeetData(updatedData)) return;
+  if (!(await saveMeetData(updatedData, { allowEmpty: true }))) return;   // 清空全部：就是要写空
   closeModal(document.querySelector('.modal-close'));
   selectedAthleteIds.clear();
   currentPage = 1;
@@ -1514,7 +1558,7 @@ function renderPage() {
   renderHeats();
 }
 
-function regenerateHeats() {
+async function regenerateHeats() {
   const nextLaneCount = Number(document.getElementById('laneCount').value);
   if (!LANE_COUNT_OPTIONS.includes(nextLaneCount)) {
     showToast(`跑道数必须为 ${LANE_COUNT_OPTIONS.join('、')} 道`, 'error');
@@ -1527,7 +1571,7 @@ function regenerateHeats() {
     schedule: null,
     heats: generatePreliminaryHeats(pageData.athletes, pageData.registrations, laneCount),
   };
-  if (saveMeetData(data)) showToast('径赛预赛分组已重新随机生成');
+  if (await saveMeetData(data)) showToast('径赛预赛分组已重新随机生成');
 }
 
 function handleSearchChange(event) {
@@ -1550,4 +1594,40 @@ function initializePage() {
 
 Store.onReady(() => {
   initializePage();
+  bindCrossModuleMeetSync();
 });
+
+/**
+ * 跨模块同步：赛程页 / 其它页面改了同一个 Key（比如生成了赛程），本页内存里的
+ * pageData 就过期了 —— 下次保存会拿旧快照整体写回，把别人的改动（赛程）冲掉。
+ * 收到通知就重取；用户正在输入或正在确认导入时不打断，避免把人家打到一半的内容刷掉。
+ */
+function bindCrossModuleMeetSync() {
+  if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
+  const isBusy = () => {
+    if (pendingImport) return true;
+    const active = document.activeElement;
+    return Boolean(active && ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName));
+  };
+  const refresh = () => {
+    if (isBusy()) return;
+    const latest = Store.read(STORAGE_KEY, null);
+    if (!latest || !Array.isArray(latest.athletes)) return;
+    pageData = {
+      ...emptyMeetData(),
+      ...latest,
+      registrations: latest.registrations.map(registration => ({
+        ...registration,
+        isTeamEvent: registrationIsTeamEvent(registration),
+      })),
+    };
+    renderPage();
+    renderStorageAlert();
+  };
+  window.addEventListener('store:sync', event => {
+    if (event?.detail?.changed?.includes?.(STORAGE_KEY)) refresh();
+  });
+  window.addEventListener('storage', event => {
+    if (event?.key === STORAGE_KEY) refresh();
+  });
+}

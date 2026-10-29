@@ -8,11 +8,20 @@ const TRACK_LANE_OPTIONS = [4, 5, 6, 7, 8];
 const DEFAULT_TRACK_LANES = 4;
 const DEFAULT_CHECKIN_MINUTES = 15;
 
-/* 场地资源：200 米操场的真实家底 —— 跑道 1 条（4 道）、沙坑 1 个、投掷区 1 个、跳高区 1 个。
-   每个场地各有一条独立时间轴 → 四个场地可以并行开赛；同一场地内串行。 */
+/* 长距离径赛的体能恢复保护：跑完 400 米及以上（400 / 800 / 1500…），
+   这名学生至少休息这么久才允许排下一场（径赛或田赛都算）。老师可在编排设置里改。 */
+const DEFAULT_LONG_RUN_RECOVERY_MINUTES = 60;
+const LONG_RUN_MIN_METERS = 400;        // ≥400 米算长距离
+const RECOVERY_MINUTES_MIN = 0;         // 0 = 关闭这项保护
+const RECOVERY_MINUTES_MAX = 180;
+
+/* 场地资源：200 米操场的真实家底 —— 跑道 1 条（4 道）、沙坑 1 个、立定跳远区（平地/垫子）1 块、
+   投掷区 1 个、跳高区 1 个。每个场地各有一条独立时间轴 → 五块场地可以并行开赛；同一场地内串行。
+   ⚠️ 沙坑 ≠ 立定跳远区：急行跳远要助跑+起跳板+沙坑，立定跳远只要一块平地/垫子，两者可以同时开。 */
 const VENUE_RESOURCES = [
   { key: 'track', name: '跑道', icon: '🏃', tone: 'track', note: `${DEFAULT_TRACK_LANES} 条跑道` },
-  { key: 'sandpit', name: '沙坑', icon: '🏖️', tone: 'sandpit', note: '全校仅 1 个，串行' },
+  { key: 'sandpit', name: '沙坑', icon: '🏖️', tone: 'sandpit', note: '急行跳远专用，串行' },
+  { key: 'standingjump', name: '立定跳远区/平地', icon: '📏', tone: 'standingjump', note: '平地/垫子，与沙坑并行' },
   { key: 'throwing', name: '投掷区', icon: '🎯', tone: 'throwing', note: '全校仅 1 个，串行' },
   { key: 'highjump', name: '跳高区', icon: '🤸', tone: 'highjump', note: '全校仅 1 个，串行' },
 ];
@@ -22,8 +31,10 @@ const DEFAULT_SESSIONS = [
   { key: 'morning', label: '上午', start: '08:30', end: '12:00' },
   { key: 'afternoon', label: '下午', start: '13:30', end: '17:00' },
 ];
-// 比赛总天数：1 天 = 上午+下午；1.5 天 = 第一天全天 + 第二天上午；2.5 天同理
-const DAY_TOTAL_OPTIONS = [1, 1.5, 2, 2.5];
+/* 比赛总天数：整数 = 整天（上午+下午）；.5 = 最后一天只比半天（上午）。
+   1 天 = 上午+下午；1.5 天 = 第一天全天 + 第二天上午；4 天 = 四天全天。
+   项目多的时候可以一路加到 4 天，算法与甘特图 Tab 都按这个档位自动生成。 */
+const DAY_TOTAL_OPTIONS = [1, 1.5, 2, 2.5, 3, 3.5, 4];
 const DEFAULT_DAY_TOTAL = 2;
 const DEFAULT_TRACK_DURATION = 12;   // 径赛每组约 10~15 分钟
 const DEFAULT_FIELD_DURATION = 45;   // 田赛每项约 40~60 分钟
@@ -73,6 +84,15 @@ let scheduleGradeFilter = 'all';
 let scheduleGenderFilter = 'all';
 let scheduleDayFilter = 'all';   // 'all' 或某一天的日期键（如 2026-05-21）
 
+/* 多日渲染缓存：最多 4 天 × 上百个时段，切 Tab / 切筛选时复用已拼好的甘特图 HTML，
+   不必每次都把每一天重新拼一遍（赛程一改、筛选一变就失效，绝不显示旧内容）。 */
+const GANTT_DAY_CACHE = new Map();
+let scheduleRenderToken = 0;   // 赛程数据版本：改一次 +1，缓存随之清空
+function bumpScheduleRenderToken() {
+  scheduleRenderToken += 1;
+  GANTT_DAY_CACHE.clear();
+}
+
 const pageContent = document.getElementById('page-content');
 // 赛程页撑满整屏宽度，时间轴不再缩在中间一小块
 pageContent.classList.add('schedule-page-shell');
@@ -112,6 +132,10 @@ pageContent.innerHTML = `
         </label>
         <label>径赛每组（分钟） <input id="trackDuration" type="number" min="5" max="120" step="1" value="12"></label>
         <label>田赛每项（分钟） <input id="fieldDuration" type="number" min="5" max="480" step="5" value="45"></label>
+        <label class="schedule-recovery-field" title="跑完 400 米及以上（400 / 800 / 1500）的学生，至少休息这么多分钟才会被排下一场；0 = 不限制">长跑后休息（分钟）
+          <input id="scheduleRecoveryMinutes" type="number" min="${RECOVERY_MINUTES_MIN}" max="${RECOVERY_MINUTES_MAX}" step="5" value="${DEFAULT_LONG_RUN_RECOVERY_MINUTES}"
+            aria-label="长距离径赛后体能恢复时间" onchange="renderSchedule()">
+        </label>
         <label>径赛跑道数
           <select id="scheduleLaneCount">
             ${TRACK_LANE_OPTIONS.map(count => `<option value="${count}"${count === DEFAULT_TRACK_LANES ? ' selected' : ''}>${count} 道</option>`).join('')}
@@ -136,7 +160,7 @@ pageContent.innerHTML = `
           <p class="meet-guidance">默认全部「仅一次决赛」：跑（跳、投）一次就按成绩排名，小学运动会最常用。人数超过跑道数时会自动分成几个小组同时比，仍是一枪定胜负。选「预赛 + 决赛」才会先排预赛、再预留决赛时间（决赛名单待成绩录入后确认）。田赛（跳远、跳高、投掷）本来就只有一轮，不受此设置影响。改完点【生成 / 重新编排】生效。</p>
         </div>
       </details>
-      <p class="meet-guidance">四块场地并行开赛：跑道、沙坑、投掷区、跳高区各自一条时间轴，同一时间可以各跑各的；同一场地内串行（沙坑只有 1 个，立定跳远排完才排跳远）。所有项目只排在上午 / 下午时段内，不会排到晚上；当天 17:00 排满后，剩下的项目自动顺延到第二天 08:30，不会再出现「排不下」。径赛优先占位，田赛遇到兼项学生会自动避让，避不开的标「需插空进行」。检录时间为开赛前 15 分钟。</p>
+      <p class="meet-guidance">五块场地并行开赛：跑道、沙坑、立定跳远区（平地）、投掷区、跳高区各一条时间轴，同一时间可以各比各的；同一场地内串行。沙坑只跑急行跳远，立定跳远走平地/垫子区，两者互不占用。径赛严格按距离连排：50 → 100 → 200 → 400 → 800 → 1500，同一距离（男/女、各年级）全部比完再进下一个距离，裁判不用来回跑。所有项目只排在上午 / 下午时段内，不会排到晚上；当天排满后，剩下的项目自动顺延到第二天，不会再出现「排不下」。比赛天数可选 1 ~ 4 天（.5 天 = 最后一天只比上午半天），项目多就往上加，日期 Tab 会跟着多出第 3、第 4 天。田赛遇到兼项学生会自动避让，避不开的标「需插空进行」。检录时间为开赛前 15 分钟。<strong>体能恢复保护</strong>：跑完 400 米及以上（400 / 800 / 1500）的学生，至少休息「长跑后休息」设定的分钟数（默认 60 分钟）才会被排下一场；排不开就自动顺延，实在顺延不开就在甘特图 / 名单里标橙色「💤 体能恢复不足」。</p>
       <div id="scheduleError" class="meet-alert" role="alert"></div>
     </div>
   </div>
@@ -196,6 +220,31 @@ function readMeetData() {
   }
 }
 
+/**
+ * 取「最新」运动会数据做写入底稿。
+ * ⚠️ 内存里的 meetData 只是页面初始化那一刻的快照：报名页后来导入的 athletes /
+ *    registrations 它根本看不到。而报名和赛程共用同一个 Key ——
+ *    直接拿旧快照整体写回，就会把报名数据整包冲掉（"排完赛程刷新，报名全没了"）。
+ *    所以每次落盘前都从 Store 重取，只把赛程页自己负责的字段（赛制 / 赛程）盖上去。
+ */
+function freshMeetData() {
+  const stored = readMeetData();                 // Store / localStorage 里的（可能刚被报名页更新过）
+  const memory = meetData && typeof meetData === 'object' ? meetData : {};
+  const merged = {
+    ...memory,
+    ...stored,
+    eventFormats: memory.eventFormats || stored.eventFormats,   // 赛制归本页管
+  };
+  // 关键数组：谁有数据用谁的 ——
+  // · Store 里有（报名页刚导入的）→ 用它，内存这份已经过期；
+  // · Store 里没有（第一次用 / 数据只在内存里）→ 保留内存这份，绝不能抹成空
+  ['athletes', 'registrations', 'heats'].forEach(field => {
+    if (Array.isArray(stored[field]) && stored[field].length) return;
+    if (Array.isArray(memory[field]) && memory[field].length) merged[field] = memory[field];
+  });
+  return merged;
+}
+
 function persistSchedule(nextSchedule, settings) {
   if (scheduleStorageError) {
     showScheduleError(scheduleStorageError);
@@ -203,7 +252,7 @@ function persistSchedule(nextSchedule, settings) {
   }
   try {
     const updatedData = {
-      ...meetData,
+      ...freshMeetData(),          // ⚠️ 以最新报名数据为底，不用内存里的旧快照
       schedule: {
         version: 1,
         settings,
@@ -213,6 +262,7 @@ function persistSchedule(nextSchedule, settings) {
     Store.write(MEET_STORAGE_KEY, updatedData);
     meetData = updatedData;
     currentSchedule = nextSchedule;
+    bumpScheduleRenderToken();
     renderSchedule();
     showScheduleError('');
     return true;
@@ -333,7 +383,10 @@ function persistMeetData() {
     return false;
   }
   try {
-    Store.write(MEET_STORAGE_KEY, meetData);
+    // 同样以最新数据为底：只改赛制，不动报名数据
+    const updated = freshMeetData();
+    Store.write(MEET_STORAGE_KEY, updated);
+    meetData = updated;
     return true;
   } catch (error) {
     showScheduleError(`保存赛制设置失败：${error.message}`);
@@ -472,20 +525,91 @@ function venueByKey(key) {
 
 /** 旧赛程没有 venueKey，按场地名或项目类型回推 */
 function venueKeyOf(entry) {
+  // 老数据把「立定跳远」也塞在沙坑里，这里按项目名迁回平地/垫子区，保证旧赛程也能和沙坑并行
+  if (/立定跳远|立定三级跳/.test(String(entry?.eventName ?? ''))) return 'standingjump';
   if (entry?.venueKey && VENUE_RESOURCES.some(venue => venue.key === entry.venueKey)) return entry.venueKey;
   const byName = VENUE_RESOURCES.find(venue => venue.name === entry?.venue);
   if (byName) return byName.key;
   return classifyVenue(entry?.eventName, entry?.eventType);
 }
 
-/** 项目 → 场地：径赛走跑道，跳远类走沙坑，投掷类走投掷区，跳高走跳高区 */
+/**
+ * 项目 → 场地。场地划分按真实小学运动会的物理场地来：
+ * 沙坑只收「急行跳远」（要助跑 + 起跳板 + 落沙坑），立定跳远只要一块平地/垫子，
+ * 两者不是一回事，分到两个场地才能并行开赛。
+ */
 function classifyVenue(eventName, eventType) {
   const name = String(eventName ?? '');
   if (/跳高|撑杆/.test(name)) return 'highjump';
-  if (/跳远|三级跳|立定跳/.test(name)) return 'sandpit';
+  if (/立定跳远|立定三级跳/.test(name)) return 'standingjump';   // 平地/垫子区
+  if (/跳远|三级跳/.test(name)) return 'sandpit';                 // 沙坑：急行跳远
   if (/沙包|垒球|实心球|铅球|铁饼|标枪|投掷|掷/.test(name)) return 'throwing';
   if (eventType === 'field') return 'throwing';  // 认不出的田赛默认放投掷区（卡片上可手动改）
   return 'track';
+}
+
+/* 径赛连排顺序：按距离从短到长（起终点位置相近的项目连着比，裁判员不用满操场跑）。
+   50 → 100 → 200 → 400 → 800 → 1500；列表外的距离（如 3000 米）按实际米数排在最后。 */
+const TRACK_DISTANCE_ORDER = [50, 100, 150, 200, 300, 400, 600, 800, 1000, 1500];
+
+function normalizeRecoveryMinutes(value) {
+  // 留空 / 非数字一律退回默认（表单没填过就用 60 分钟，不会因为空串变成 0 而关掉保护）
+  if (value === undefined || value === null || String(value).trim() === '') {
+    return DEFAULT_LONG_RUN_RECOVERY_MINUTES;
+  }
+  const minutes = Number(value);
+  if (!Number.isFinite(minutes)) return DEFAULT_LONG_RUN_RECOVERY_MINUTES;
+  return Math.min(RECOVERY_MINUTES_MAX, Math.max(RECOVERY_MINUTES_MIN, Math.round(minutes)));
+}
+
+/** 径赛项目的距离（米）；不是径赛、或项目名里认不出距离 → null */
+function trackEventMeters(entry) {
+  if (venueKeyOf(entry) !== 'track') return null;
+  const match = String(entry?.eventName ?? '').match(/(\d+(?:\.\d+)?)\s*(?:米|m|M)/);
+  return match ? Number(match[1]) : null;
+}
+
+/** 是否长距离径赛：400 米及以上（400 / 800 / 1500…）—— 跑完必须留足恢复时间 */
+function isLongRunEntry(entry) {
+  const meters = trackEventMeters(entry);
+  return Number.isFinite(meters) && meters >= LONG_RUN_MIN_METERS;
+}
+
+/**
+ * 体能恢复判定：longRunEntry 结束 → nextStartAt 开赛，间隔够不够恢复？
+ * 够（或恢复保护已关闭）→ null；不够 → { gapMinutes, neededMinutes }
+ */
+function recoveryShortfall(longRunEntry, nextStartAt, recoveryMinutes) {
+  const required = normalizeRecoveryMinutes(recoveryMinutes);
+  if (required <= 0 || !isLongRunEntry(longRunEntry)) return null;
+  const end = new Date(longRunEntry?.startAt).getTime();
+  if (!Number.isFinite(end)) return null;
+  const nextStart = new Date(nextStartAt).getTime();
+  if (!Number.isFinite(nextStart)) return null;
+  const gapMinutes = (nextStart - (end + (Number(longRunEntry.durationMinutes) || 0) * 60000)) / 60000;
+  if (gapMinutes >= required) return null;
+  return {
+    gapMinutes: Math.max(0, Math.round(gapMinutes)),
+    neededMinutes: Math.ceil(required - gapMinutes),
+  };
+}
+
+/** 这个项目最早能接在 previousEntry 之后开赛的时间点（毫秒）：取「检录缓冲」与「体能恢复」里更晚的那个 */
+function earliestStartAfter(previousEntry, bufferMinutes, recoveryMinutes) {
+  const end = new Date(previousEntry?.startAt).getTime() + (Number(previousEntry?.durationMinutes) || 0) * 60000;
+  if (!Number.isFinite(end)) return 0;
+  const withBuffer = end + bufferMinutes * 60000;
+  if (!isLongRunEntry(previousEntry)) return withBuffer;
+  return Math.max(withBuffer, end + normalizeRecoveryMinutes(recoveryMinutes) * 60000);
+}
+
+/** 项目名 → 距离档位（越小越先比）；认不出距离的径赛排在最后 */
+function trackDistanceRank(eventName) {
+  const match = String(eventName ?? '').match(/(\d+(?:\.\d+)?)\s*(?:米|m|M)/);
+  if (!match) return Number.MAX_SAFE_INTEGER;
+  const meters = Number(match[1]);
+  const index = TRACK_DISTANCE_ORDER.indexOf(meters);
+  return index >= 0 ? index : TRACK_DISTANCE_ORDER.length + meters / 1000;
 }
 
 function normalizeDuration(value, fallback, min, max) {
@@ -494,10 +618,19 @@ function normalizeDuration(value, fallback, min, max) {
   return Math.min(max, Math.max(min, Math.round(minutes)));
 }
 
-/** 天数兜底：脏数据/旧数据退回默认 2 天 */
+/**
+ * 天数兜底：
+ * · 正好在档位里（1 / 1.5 / 2 / 2.5 / 3 / 3.5 / 4）→ 原样用
+ * · 数字但超出范围（老数据里存了 5 天、手填了 6）→ 夹到最近的合法档位，
+ *   绝不悄悄退回 2 天，否则老师设的天数会被无声吞掉、赛程少排一大截
+ * · 完全不是数字 → 才是默认 2 天
+ */
 function normalizeDayTotal(value) {
   const days = Number(value);
-  return DAY_TOTAL_OPTIONS.includes(days) ? days : DEFAULT_DAY_TOTAL;
+  if (DAY_TOTAL_OPTIONS.includes(days)) return days;
+  if (!Number.isFinite(days)) return DEFAULT_DAY_TOTAL;
+  return DAY_TOTAL_OPTIONS.reduce((best, option) =>
+    (Math.abs(option - days) < Math.abs(best - days) ? option : best), DAY_TOTAL_OPTIONS[0]);
 }
 
 function formatDateKey(date) {
@@ -529,7 +662,9 @@ function defaultSessionTimes(overrides = {}) {
 
 /**
  * 按「比赛总天数」排出每一天的上午 / 下午时段（先后顺序即排期顺序）。
- * 1 天 → 2 个时段；1.5 天 → 3 个；2 天 → 4 个；2.5 天 → 5 个。
+ * 整天 = 上午 + 下午；.5 的最后一天只排上午（半天）。
+ * 1 天 → 2 个时段；1.5 天 → 3 个；2 天 → 4 个；2.5 天 → 5 个；
+ * 3 天 → 6 个；3.5 天 → 7 个（第 4 天只有上午）；4 天 → 8 个。
  */
 function buildSessionPlan(days, times = {}) {
   const total = normalizeDayTotal(days);
@@ -615,11 +750,12 @@ function sessionFitting(candidate, durationMinutes, sessions) {
 
 /**
  * 在某块场地上找最早能排的时段：
- * 1. 同场地串行 —— 沙坑只有 1 个，所以立定跳远排完才排跳远
+ * 1. 同场地串行 —— 沙坑只有 1 个，所以急行跳远要一项一项来（立定跳远在平地/垫子区，不受影响）
  * 2. 严格锁在上午 / 下午时段内，绝不排到晚上
  * 3. 跨场地兼项避让（优先保住已排好的径赛），避让超预算就标「需插空进行」
  */
-function findVenueSlot({ venueKey, durationMinutes, participantIds, cursor, sessions, schedule, bufferMinutes = DEFAULT_CHECKIN_MINUTES }) {
+function findVenueSlot({ venueKey, durationMinutes, participantIds, cursor, sessions, schedule, bufferMinutes = DEFAULT_CHECKIN_MINUTES, recoveryMinutes = DEFAULT_LONG_RUN_RECOVERY_MINUTES }) {
+  const recovery = normalizeRecoveryMinutes(recoveryMinutes);
   // ① 本场地的时间轴：串行 + 时段限制
   let base = new Date(Math.max(cursor.getTime(), sessions[0].start.getTime()));
   for (let attempt = 0; attempt < 300; attempt += 1) {
@@ -637,21 +773,32 @@ function findVenueSlot({ venueKey, durationMinutes, participantIds, cursor, sess
   }
   const fallback = new Date(base);
 
-  // ② 兼项避让：预算内挪到不撞车的时间，挪不动就插空进行并打标
-  //   既避让跨场地（跑道 vs 沙坑），也避让同场地连轴转（100 米刚跑完就跑 50 米）
+  // ② 兼项避让 + 体能恢复保护：预算内挪到「不撞车、且长跑后休息够了」的时间，挪不动就插空并打标
+  //   · 跨场地（跑道 vs 沙坑）、同场地连轴转（100 米刚跑完就跑 50 米）都要避让
+  //   · 400 米及以上跑完，这名学生必须再歇够 recovery 分钟才能上场（下一场是径赛或田赛都一样）
   let candidate = new Date(base);
+  // 「不撞车、只是恢复不够」的位置：实在挪不出恢复期时退到这里 ——
+  // 宁可让学生休息得少一点并在甘特图上标橙色警告，也绝不退回「两场真撞车」的时间点
+  let safeCandidate = null;
   for (let attempt = 0; attempt < MAX_AVOID_ATTEMPTS; attempt += 1) {
     if (!sessionFitting(candidate, durationMinutes, sessions)) break;   // 挪出时段了，回原位插空
-    const clashes = schedule.filter(entry =>
-      overlapsWithBuffer(entry, candidate, durationMinutes, bufferMinutes)
-      && sharesAthlete(entry, participantIds));
-    if (!clashes.length) return { startAt: new Date(candidate), needsFlex: false };
-    const nextStart = Math.max(...clashes.map(entry =>
-      new Date(entry.startAt).getTime() + (entry.durationMinutes + bufferMinutes) * 60000));
-    // 为了一个兼项的学生把整项往后挪一个多小时不划算 —— 不如原地开赛，现场插空
-    if (new Date(nextStart).getTime() - base.getTime() > MAX_AVOID_SHIFT_MINUTES * 60000) break;
+    const shared = schedule.filter(entry => sharesAthlete(entry, participantIds));
+    const overlaps = shared.filter(entry =>
+      overlapsWithBuffer(entry, candidate, durationMinutes, bufferMinutes));
+    const shortfalls = shared.filter(entry => recoveryShortfall(entry, candidate, recovery));
+    if (!overlaps.length && !shortfalls.length) {
+      return { startAt: new Date(candidate), needsFlex: false };
+    }
+    if (!overlaps.length) safeCandidate = new Date(candidate);   // 不撞车，只是恢复期不够
+    const nextStart = Math.max(...[...overlaps, ...shortfalls].map(entry =>
+      earliestStartAfter(entry, bufferMinutes, recovery)));
+    // 为了一个兼项的学生把整项往后挪一个多小时不划算 —— 不如原地开赛，现场插空。
+    // 但体能恢复是硬规则：需要恢复时预算放宽到「恢复时间 + 60 分钟」，否则永远挪不过去。
+    const budget = (shortfalls.length ? recovery + MAX_AVOID_SHIFT_MINUTES : MAX_AVOID_SHIFT_MINUTES) * 60000;
+    if (nextStart - base.getTime() > budget) break;
     candidate = new Date(nextStart);
   }
+  if (safeCandidate) return { startAt: safeCandidate, needsFlex: false, shortRecovery: true };
   return { startAt: fallback, needsFlex: true };
 }
 
@@ -669,6 +816,8 @@ function buildSchedule(dateValue, startValue, trackDuration, fieldDuration, lane
   const laneLimit = normalizeLaneCount(laneCount); // 统一按有效跑道数编排（选 4 道就每 4 人一组）
   const trackMinutes = normalizeDuration(trackDuration, DEFAULT_TRACK_DURATION, 5, 120);
   const fieldMinutes = normalizeDuration(fieldDuration, DEFAULT_FIELD_DURATION, 5, 480);
+  // 长距离径赛（≥400 米）跑完后的体能恢复时间：排下一场时要给这名学生留够
+  const recoveryMinutes = normalizeRecoveryMinutes(options.recoveryMinutes);
   // 多日赛程：先按「比赛天数」排出每一天的上午 / 下午，排满当天就顺延到第二天
   const sessionPlan = Array.isArray(options.sessions) && options.sessions.length
     ? options.sessions
@@ -680,11 +829,25 @@ function buildSchedule(dateValue, startValue, trackDuration, fieldDuration, lane
   if (!sessions.length) return [];
 
   const schedule = [];
-  // 径赛优先：跑道先排满，田赛再在剩余时间轴上找位置
+  /**
+   * 排序规则（直接决定时间轴上的先后顺序）：
+   * ① 径赛优先占跑道（跑道是全场瓶颈，先在跑道上把径赛排完）
+   * ② 径赛严格按距离连排：50 → 100 → 200 → 400 → 800 → 1500，
+   *    同一距离内（男/女、各年级）全部排完再进下一个距离，绝不中间插长跑
+   * ③ 田赛按场地分块连排（沙坑 / 立定跳远区 / 投掷区 / 跳高区各自连着比）
+   */
   const ordered = [...events].sort((a, b) => {
     const venueA = classifyVenue(a.eventName, a.eventType);
     const venueB = classifyVenue(b.eventName, b.eventType);
     if ((venueA === 'track') !== (venueB === 'track')) return venueA === 'track' ? -1 : 1;
+    if (venueA === 'track' && venueB === 'track') {
+      const byDistance = trackDistanceRank(a.eventName) - trackDistanceRank(b.eventName);
+      if (byDistance) return byDistance;
+    } else if (venueA !== venueB) {
+      const byVenue = VENUE_RESOURCES.findIndex(venue => venue.key === venueA)
+        - VENUE_RESOURCES.findIndex(venue => venue.key === venueB);
+      if (byVenue) return byVenue;
+    }
     return (Number(a.grade) || 0) - (Number(b.grade) || 0)
       || String(a.genderGroup).localeCompare(String(b.genderGroup))
       || String(a.eventName).localeCompare(String(b.eventName), 'zh-CN');
@@ -702,6 +865,7 @@ function buildSchedule(dateValue, startValue, trackDuration, fieldDuration, lane
       sessions: daySessions,
       schedule,
       bufferMinutes: DEFAULT_CHECKIN_MINUTES,
+      recoveryMinutes,
     });
     if (!slot.startAt) {
       // 时段内实在排不下：记下来提醒老师，而不是硬排到晚上
@@ -748,20 +912,25 @@ function buildSchedule(dateValue, startValue, trackDuration, fieldDuration, lane
     cursors.set(venueKey, addMinutes(slot.startAt, durationMinutes));
   };
 
-  // 多日时按「场地内轮转」把项目分到各天：跑道、沙坑、投掷区、跳高区各自摊到每一天，
-  // 免得第二天只剩零头（按全局顺序轮转会让某个场地整体落到同一天）
+  // 多日时按「连排块」整体轮转：径赛以「同一距离」为一块，田赛以「同一场地」为一块。
+  // 整块搬到同一天，保证「50 米男女各组连着比完」不被两天拆开；也避免某块场地整体落到同一天。
   const dayIndexes = [...new Set(sessions.map(session => session.dayIndex))].sort((a, b) => a - b);
   const eventsByDay = new Map(dayIndexes.map(dayIndex => [dayIndex, []]));
   const orderIndex = new Map(ordered.map((event, index) => [event, index]));
-  const venueGroups = new Map();
+  const consecutiveBlocks = [];
   ordered.forEach(event => {
     const venueKey = classifyVenue(event.eventName, event.eventType);
-    venueGroups.set(venueKey, [...(venueGroups.get(venueKey) || []), event]);
+    const blockKey = venueKey === 'track'
+      ? `track:${trackDistanceRank(event.eventName)}`   // 同一距离 = 一块
+      : `field:${venueKey}`;                            // 同一场地 = 一块
+    const tail = consecutiveBlocks[consecutiveBlocks.length - 1];
+    if (tail && tail.key === blockKey) tail.events.push(event);
+    else consecutiveBlocks.push({ key: blockKey, events: [event] });
   });
-  [...venueGroups.values()].forEach(list => list.forEach((event, index) => {
-    eventsByDay.get(dayIndexes[index % dayIndexes.length]).push(event);
-  }));
-  // 每天内部仍按「径赛优先 → 年级 → 项目名」排
+  consecutiveBlocks.forEach((block, index) => {
+    eventsByDay.get(dayIndexes[index % dayIndexes.length]).push(...block.events);
+  });
+  // 每天内部仍按「径赛（按距离）→ 田赛（按场地）→ 年级 → 项目名」排
   [...eventsByDay.values()].forEach(list => list.sort((a, b) => orderIndex.get(a) - orderIndex.get(b)));
 
   const placeEvent = (event, pool) => {
@@ -809,11 +978,20 @@ function buildSchedule(dateValue, startValue, trackDuration, fieldDuration, lane
 
   // 兜底回填：还有没排下的，拿全部时段再试一次（把各天的空档补上）
   if (unscheduledEvents.length) {
-    const leftovers = unscheduledEvents.map(item => item.event).filter(Boolean);
+    // 同一个项目的多个分组只回填一次（否则上面 6 个分组各留一条，这里会重复排 6 遍，
+    // 提示里同一个项目刷几十行，老师根本看不出到底有几个项目没排下）
+    const leftovers = [...new Map(unscheduledEvents
+      .filter(item => item?.event)
+      .map(item => [item.event.key || `${item.eventName}|${item.grade}|${item.genderGroup}`, item.event])
+    ).values()];
     unscheduledEvents = [];
     VENUE_RESOURCES.forEach(venue => cursors.set(venue.key, new Date(sessions[0].start)));
     leftovers.forEach(event => placeEvent(event, sessions));
   }
+  // 最终提示也按「项目 + 场地」去重，一行一个项目
+  unscheduledEvents = [...new Map(unscheduledEvents.map(item => [
+    `${item.eventName}|${item.grade}|${item.genderGroup}|${item.venue}|${item.round}`, item,
+  ])).values()];
 
   return schedule.sort((a, b) => new Date(a.startAt) - new Date(b.startAt)
     || VENUE_RESOURCES.findIndex(venue => venue.key === a.venueKey) - VENUE_RESOURCES.findIndex(venue => venue.key === b.venueKey)
@@ -833,6 +1011,7 @@ function readScheduleForm() {
     afternoonEnd: value('afternoonEnd'),
     trackDuration: value('trackDuration'),
     fieldDuration: value('fieldDuration'),
+    recoveryMinutes: value('scheduleRecoveryMinutes'),
     lanes: value('scheduleLaneCount'),
     orderMode: value('fieldOrderMode'),
   };
@@ -878,10 +1057,21 @@ function validateSettings() {
       afternoonEnd: times.afternoonEnd,
       trackDurationMinutes: trackDuration,
       fieldDurationMinutes: fieldDuration,
+      longRunRecoveryMinutes: normalizeRecoveryMinutes(form.recoveryMinutes),
       laneCount: lanes,
       fieldOrderMode: form.orderMode,
     },
   };
+}
+
+/**
+ * 当前生效的「长跑后体能恢复时间」：优先用表单里正在填的值
+ * —— 老师改一下数字就能立刻看到告警数变化，不用先重新生成一遍赛程。
+ */
+function savedRecoveryMinutes() {
+  const live = document.getElementById('scheduleRecoveryMinutes')?.value;
+  if (live !== undefined && String(live).trim() !== '') return normalizeRecoveryMinutes(live);
+  return normalizeRecoveryMinutes(meetData.schedule?.settings?.longRunRecoveryMinutes);
 }
 
 function generateSchedule() {
@@ -906,7 +1096,7 @@ function generateSchedule() {
     settings.fieldDurationMinutes,
     settings.laneCount,
     settings.fieldOrderMode,
-    { days: settings.days, times: settings },
+    { days: settings.days, times: settings, recoveryMinutes: settings.longRunRecoveryMinutes },
   );
   persistSchedule(schedule, settings);
   scheduleDayFilter = 'all';
@@ -938,36 +1128,72 @@ function scheduleEnd(entry) {
   return addMinutes(new Date(entry.startAt), entry.durationMinutes);
 }
 
-function findScheduleConflicts(schedule) {
-  const conflicts = new Map();
+/**
+ * 兼项冲突检测，两类：
+ * ① overlap（时间重合）—— 同一名学生两场比赛真撞车（含 15 分钟检录缓冲），红色
+ * ② recovery（体能恢复不足）—— 长距离径赛（≥400 米）跑完后，下一场开赛间隔不足恢复时间，橙色
+ *    这类不一定要改时间，但老师必须知道「这孩子刚跑完 800 米就上场」
+ */
+function findScheduleConflicts(schedule, options = {}) {
+  const recoveryMinutes = normalizeRecoveryMinutes(options.recoveryMinutes);
+  const overlaps = new Map();     // athleteId → [{ pair: [entryId, entryId] }]
+  const recoveries = new Map();   // athleteId → [{ pair, gapMinutes, neededMinutes }]
   const athletes = new Map(meetData.athletes.map(athlete => [athlete.id, athlete]));
-  for (let leftIndex = 0; leftIndex < schedule.length; leftIndex++) {
+  const push = (map, athleteId, payload) => {
+    map.set(athleteId, [...(map.get(athleteId) || []), payload]);
+  };
+
+  for (let leftIndex = 0; leftIndex < schedule.length; leftIndex += 1) {
     const left = schedule[leftIndex];
     if (!left.participantIds?.length) continue;
     const leftStart = new Date(left.startAt).getTime();
     const leftEnd = leftStart + left.durationMinutes * 60000;
-    for (let rightIndex = leftIndex + 1; rightIndex < schedule.length; rightIndex++) {
+    for (let rightIndex = leftIndex + 1; rightIndex < schedule.length; rightIndex += 1) {
       const right = schedule[rightIndex];
       if (!right.participantIds?.length) continue;
       const rightStart = new Date(right.startAt).getTime();
       const rightEnd = rightStart + right.durationMinutes * 60000;
-      const buffer = DEFAULT_CHECKIN_MINUTES * 60000;
-      if (leftStart >= rightEnd + buffer || rightStart >= leftEnd + buffer) continue;
       const rightAthletes = new Set(right.participantIds);
       const shared = left.participantIds.filter(id => rightAthletes.has(id));
-      shared.forEach(id => {
-        const occurrences = conflicts.get(id) || [];
-        occurrences.push(left.id, right.id);
-        conflicts.set(id, occurrences);
-      });
+      if (!shared.length) continue;
+      const buffer = DEFAULT_CHECKIN_MINUTES * 60000;
+      if (!(leftStart >= rightEnd + buffer || rightStart >= leftEnd + buffer)) {
+        shared.forEach(id => push(overlaps, id, { pair: [left.id, right.id] }));
+        continue;      // 真撞车了，恢复期就不重复报
+      }
+      if (recoveryMinutes <= 0) continue;
+      // 不撞车但挨得太近：先比的那场若是长跑，这名学生还得再歇一会儿
+      const [first, second] = leftStart <= rightStart ? [left, right] : [right, left];
+      const shortfall = recoveryShortfall(first, second.startAt, recoveryMinutes);
+      if (!shortfall) continue;
+      shared.forEach(id => push(recoveries, id, { pair: [first.id, second.id], ...shortfall }));
     }
   }
-  return {
-    eventIds: new Set([...conflicts.values()].flat()),
-    details: [...conflicts.entries()].map(([athleteId, eventIds]) => ({
+
+  const buildDetails = (map, type) => [...map.entries()].map(([athleteId, items]) => {
+    const entryIds = [...new Set(items.flatMap(item => item.pair))];
+    return {
+      type,
+      athleteId,
       athlete: athletes.get(athleteId),
-      entries: [...new Set(eventIds)].map(id => schedule.find(entry => entry.id === id)).filter(Boolean),
-    })),
+      entries: entryIds.map(id => schedule.find(entry => entry.id === id)).filter(Boolean),
+      gapMinutes: type === 'recovery' ? Math.min(...items.map(item => item.gapMinutes || 0)) : 0,
+      neededMinutes: type === 'recovery' ? Math.max(...items.map(item => item.neededMinutes || 0)) : 0,
+    };
+  });
+
+  const overlapDetails = buildDetails(overlaps, 'overlap');
+  const recoveryDetails = buildDetails(recoveries, 'recovery');
+  const idsOf = list => new Set(list.flatMap(detail => detail.entries.map(entry => entry.id)));
+  return {
+    eventIds: new Set([...idsOf(overlapDetails), ...idsOf(recoveryDetails)]),
+    overlapEventIds: idsOf(overlapDetails),
+    recoveryEventIds: idsOf(recoveryDetails),
+    recoveryAthleteIds: new Set(recoveryDetails.map(detail => detail.athleteId)),
+    overlapDetails,
+    recoveryDetails,
+    details: [...overlapDetails, ...recoveryDetails],   // 兼容「只看总数」的旧用法
+    recoveryMinutes,
   };
 }
 
@@ -995,31 +1221,54 @@ function updateScheduleEntry(entryId, field, value) {
   persistSchedule(nextSchedule, meetData.schedule?.settings || {});
 }
 
-function renderParticipantList(entry) {
+function renderParticipantList(entry, recoveryAthleteIds) {
   const athleteById = new Map(meetData.athletes.map(athlete => [athlete.id, athlete]));
   if (!entry.participantIds?.length) return escapeScheduleHTML(entry.participantLabel || '晋级名单待定');
   return entry.participantIds.map((id, index) => {
     const athlete = athleteById.get(id);
     if (!athlete) return '';
     const label = `${index + 1}. ${athlete.bibNumber || '—'} ${athlete.name}（${athlete.className}）`;
-    return `<span class="schedule-participant">${escapeScheduleHTML(label)}</span>`;
+    const risky = recoveryAthleteIds?.has(id);
+    const suffix = risky ? ' 💤体能恢复不足' : '';
+    return `<span class="schedule-participant${risky ? ' recovery' : ''}"${risky ? ' title="刚跑完长距离径赛，休息不够"' : ''}>` 
+      + `${escapeScheduleHTML(label)}${escapeScheduleHTML(suffix)}</span>`;
   }).join('');
 }
 
 function renderConflictSummary(conflicts) {
   const container = document.getElementById('scheduleConflictSummary');
-  if (!conflicts.details.length) {
+  const overlapList = conflicts.overlapDetails || [];
+  const recoveryList = conflicts.recoveryDetails || [];
+  const recoveryMinutes = conflicts.recoveryMinutes ?? DEFAULT_LONG_RUN_RECOVERY_MINUTES;
+  if (!overlapList.length && !recoveryList.length) {
     container.classList.remove('visible');
     container.innerHTML = '';
     return;
   }
+  const athleteName = conflict => `${escapeScheduleHTML(conflict.athlete?.name || '未知运动员')}`
+    + `（${escapeScheduleHTML(conflict.athlete?.className || '')}）`;
+  const entryLine = conflict => conflict.entries
+    .slice()
+    .sort((a, b) => new Date(a.startAt) - new Date(b.startAt))
+    .map(entry => `${escapeScheduleHTML(entry.eventName)} ${escapeScheduleHTML(roundLabel(entry))}`
+      + `（${formatClock(new Date(entry.startAt))}）`)
+    .join(' → ');
+  const groups = [
+    overlapList.length ? `
+      <div class="schedule-conflict-group overlap">
+        <strong>⚠ 时间重合冲突（同一人两场撞车，共 ${overlapList.length} 人）</strong>
+        <ul>${overlapList.map(conflict => `<li>${athleteName(conflict)}：${entryLine(conflict)}</li>`).join('')}</ul>
+      </div>` : '',
+    recoveryList.length ? `
+      <div class="schedule-conflict-group recovery">
+        <strong>💤 体能恢复不足 ${recoveryMinutes} 分钟（共 ${recoveryList.length} 人）</strong>
+        <span class="schedule-conflict-hint">这些学生刚跑完 400 米及以上的长距离径赛就又要上场，请把后一场往后挪，或现场让他们多歇一会儿。</span>
+        <ul>${recoveryList.map(conflict => `<li>${athleteName(conflict)}：${entryLine(conflict)}`
+          + ` —— 仅间隔 ${conflict.gapMinutes} 分钟，还需再休息 ${conflict.neededMinutes} 分钟</li>`).join('')}</ul>
+      </div>` : '',
+  ].join('');
   container.classList.add('visible');
-  container.innerHTML = `
-    <strong>⚠ 检测到运动员赛程冲突，以下项目需要手动调整：</strong>
-    <ul>${conflicts.details.map(conflict => `
-      <li>${escapeScheduleHTML(conflict.athlete?.name || '未知运动员')}（${escapeScheduleHTML(conflict.athlete?.className || '')}）：${conflict.entries.map(entry => `${escapeScheduleHTML(entry.eventName)} ${escapeScheduleHTML(roundLabel(entry))}`).join('、')}</li>
-    `).join('')}</ul>
-  `;
+  container.innerHTML = groups;
 }
 
 function roundLabel(entry) {
@@ -1226,10 +1475,13 @@ function renderGanttDay(entries, sessions, conflictInfo) {
       const start = new Date(entry.startAt);
       const end = scheduleEnd(entry);
       const conflicted = conflictInfo?.eventIds.has(entry.id);
+      const recoveryRisk = conflictInfo?.recoveryEventIds?.has(entry.id);
       const { stage, scope, compact } = blockContent(entry, height);
       const showTextFlag = height >= 78;
+      const recoveryMinutes = conflictInfo?.recoveryMinutes ?? DEFAULT_LONG_RUN_RECOVERY_MINUTES;
       const flags = [
         conflicted ? `<span class="schedule-gantt-flag warn" title="兼项冲突">⚠${showTextFlag ? ' 冲突' : ''}</span>` : '',
+        recoveryRisk ? `<span class="schedule-gantt-flag recovery" title="体能恢复不足 ${recoveryMinutes} 分钟（该场有学生刚跑完长距离径赛）">💤${showTextFlag ? ' 体能恢复不足' : ''}</span>` : '',
         entry.needsFlex ? `<span class="schedule-gantt-flag flex" title="需插空进行">🕒${showTextFlag ? ' 需插空' : ''}</span>` : '',
       ].join('');
       // 精简版把轮次跟在项目名后面；完整信息都在 tooltip 里，绝不因为排版失真
@@ -1241,10 +1493,10 @@ function renderGanttDay(entries, sessions, conflictInfo) {
         ? `left:calc(${(lane * 100 / laneCount).toFixed(3)}% + 2px);right:auto;width:calc(${(100 / laneCount).toFixed(3)}% - 5px);`
         : '';
       const tooltip = `${entry.eventName} · ${scope} · ${stage} · ${formatClock(start)}-${formatClock(end)}`;
-      return `<div class="schedule-gantt-block tone-${venue.tone}${compact ? ' compact' : ''}${conflicted ? ' conflict' : ''}${entry.needsFlex ? ' flex' : ''}${laneCount > 1 ? ' narrow' : ''}"
+      return `<div class="schedule-gantt-block tone-${venue.tone}${compact ? ' compact' : ''}${conflicted ? ' conflict' : ''}${recoveryRisk ? ' recovery' : ''}${entry.needsFlex ? ' flex' : ''}${laneCount > 1 ? ' narrow' : ''}"
           data-venue="${venue.key}"
           style="top:${top}px;height:${height}px;${laneStyle}"
-          title="${escapeScheduleHTML(tooltip)}">
+          title="${escapeScheduleHTML(tooltip)}${recoveryRisk ? escapeScheduleHTML(` · 💤 体能恢复不足 ${recoveryMinutes} 分钟`) : ''}">
           <div class="schedule-gantt-block-head">
             <span class="schedule-gantt-block-time">${escapeScheduleHTML(`${formatClock(start)}–${formatClock(end)}`)}</span>
             ${flags}
@@ -1256,23 +1508,44 @@ function renderGanttDay(entries, sessions, conflictInfo) {
     return `<div class="schedule-gantt-track" data-venue="${venue.key}">${offBands}${inner}</div>`;
   }).join('');
 
-  return `<div class="schedule-gantt" style="--gantt-height:${totalHeight}px;--gantt-tick-px:${GANTT_TICK_MINUTES * px}px">
-      <div class="schedule-gantt-head">
+  /* 列数由场地资源数决定：新增场地自动多一列，不用改 CSS。
+     ⚠️ repeat() 的「次数」不能写成 var()，所以整串轨道尺寸由 JS 拼出来：
+        ① 写到 --gantt-columns（CSS 里用 var() 读）
+        ② 同时内联到 head / body 上 —— 万一某浏览器对 var() 整串替换解析失败，
+           内联的 grid-template-columns 也能兜住，绝不会退化成单列垂直堆叠。
+     列宽下限给到 120px：场地多时列可以收缩自适应，不至于把时间轴挤出屏幕。 */
+  const ganttColumns = `64px repeat(${VENUE_RESOURCES.length}, minmax(120px, 1fr))`;
+  return `<div class="schedule-gantt" style="--gantt-height:${totalHeight}px;--gantt-tick-px:${GANTT_TICK_MINUTES * px}px;--gantt-columns:${ganttColumns}">
+      <div class="schedule-gantt-head" style="grid-template-columns:${ganttColumns}">
         <div class="schedule-gantt-axis-head">时间</div>
         ${VENUE_RESOURCES.map(venue => `<div class="schedule-gantt-venue-head tone-${venue.tone}">
             <span>${venue.icon} ${escapeScheduleHTML(venue.name)}</span>
             <small>${escapeScheduleHTML(venue.note)}</small>
           </div>`).join('')}
       </div>
-      <div class="schedule-gantt-body">
+      <div class="schedule-gantt-body" style="grid-template-columns:${ganttColumns}">
         <div class="schedule-gantt-axis">${ticks}</div>
         ${blocks}
       </div>
     </div>`;
 }
 
-/** 多日 Tab：全部 / 第一天 / 第二天 … */
-function renderDayTabs(dayKeys, entries) {
+/** 这一天是不是只排半天（.5 天的最后一天只有上午）→ 返回说明文案 */
+function halfDayNote(dayKey, sessions) {
+  const daySessions = sessionsForDate(sessions, dayKey);
+  return daySessions.length === 1 ? ` · 半天（${daySessions[0]?.label || '上午'}）` : '';
+}
+
+/** 某一天的 Tab 文案：第 N 天 · 05/21；半天会标出来，免得老师以为漏排了下午 */
+function dayTabLabel(dayKey, ordinal, sessions) {
+  return `第 ${ordinal} 天 · ${String(dayKey).slice(5).replace('-', '/')}${halfDayNote(dayKey, sessions)}`;
+}
+
+/**
+ * 多日 Tab：全部 / 第 1 天 … 第 4 天 —— 按实际设置的总天数动态生成，
+ * 哪怕某天没排上项目（前面几天就排完了）也照样给一个 Tab，标 0 项，不偷偷藏起来。
+ */
+function renderDayTabs(dayKeys, entries, sessions = []) {
   if (dayKeys.length < 2) return '';
   const countOf = key => entries.filter(entry => dayKeyOf(entry) === key).length;
   const tab = (value, label, count) => `<button type="button" role="tab"
@@ -1280,12 +1553,28 @@ function renderDayTabs(dayKeys, entries) {
       aria-selected="${scheduleDayFilter === value}"
       onclick="setScheduleDay('${escapeScheduleHTML(value)}')">${escapeScheduleHTML(label)}<span>${count} 项</span></button>`;
   return `${tab('all', '全部', entries.length)}${dayKeys.map((key, index) =>
-    tab(key, `第 ${index + 1} 天 · ${key.slice(5).replace('-', '/')}`, countOf(key))).join('')}`;
+    tab(key, dayTabLabel(key, index + 1, sessions), countOf(key))).join('')}`;
 }
 
 function setScheduleDay(value) {
   scheduleDayFilter = value;
   renderSchedule();
+}
+
+/**
+ * 某一天的甘特图（带缓存）：切 Tab、切年级 / 性别时，只要这一天的项目和冲突没变，
+ * 就直接复用上次的 HTML，不再重拼一遍 —— 4 天的大赛程来回切也不卡。
+ */
+function ganttDayHTML(dayKey, dayEntries, daySessions, conflictInfo) {
+  const cacheKey = [
+    scheduleRenderToken, dayKey, scheduleGradeFilter, scheduleGenderFilter,
+    conflictInfo.recoveryMinutes, dayEntries.length, conflictInfo.eventIds.size,
+  ].join('|');
+  const cached = GANTT_DAY_CACHE.get(cacheKey);
+  if (cached) return cached;
+  const html = renderGanttDay(dayEntries, daySessions, conflictInfo);
+  GANTT_DAY_CACHE.set(cacheKey, html);
+  return html;
 }
 
 /** 排不下的项目单独提示，老师一眼看到要加时间还是砍项目 */
@@ -1316,7 +1605,7 @@ function renderSchedule() {
   const ganttBox = document.getElementById('scheduleGantt');
   const booksBox = document.getElementById('scheduleVenueBooks');
   const tabsBox = document.getElementById('scheduleDayTabs');
-  const conflictInfo = findScheduleConflicts(currentSchedule);
+  const conflictInfo = findScheduleConflicts(currentSchedule, { recoveryMinutes: savedRecoveryMinutes() });
   renderConflictSummary(conflictInfo);
 
   if (!currentSchedule.length) {
@@ -1349,28 +1638,42 @@ function renderSchedule() {
   booksBox.innerHTML = '';
   if (tabsBox) tabsBox.innerHTML = '';
 
+  const sessions = currentSessions();
   const dayKeys = [...new Set(filtered.map(dayKeyOf))].sort();
-  if (scheduleDayFilter !== 'all' && !dayKeys.includes(scheduleDayFilter)) scheduleDayFilter = 'all';
+  // Tab 按「设置的总天数」生成：把计划里的日期（哪怕还没排项目）也列出来
+  const plannedDayKeys = [...new Set(sessions.map(session => session?.dateKey).filter(Boolean))].sort();
+  const allDayKeys = [...new Set([...dayKeys, ...plannedDayKeys])].sort();
+  if (scheduleDayFilter !== 'all' && !allDayKeys.includes(scheduleDayFilter)) scheduleDayFilter = 'all';
   const shown = scheduleDayFilter === 'all'
     ? filtered
     : filtered.filter(entry => dayKeyOf(entry) === scheduleDayFilter);
 
-  if (tabsBox) tabsBox.innerHTML = renderDayTabs(dayKeys, filtered);
+  if (tabsBox) tabsBox.innerHTML = renderDayTabs(allDayKeys, filtered, sessions);
 
-  const sessions = currentSessions();
+  // 「全部」只画真正有项目的那天；单独点某一天时照样能点开（空的会给一句说明，不画空甘特图）
   const daysToRender = scheduleDayFilter === 'all' ? dayKeys : [scheduleDayFilter];
-  ganttBox.innerHTML = daysToRender.map((key, index) => {
+  ganttBox.innerHTML = daysToRender.map(key => {
     const dayEntries = filtered.filter(entry => dayKeyOf(entry) === key);
     const daySessions = sessionsForDate(sessions, key);
-    const ordinal = dayKeys.indexOf(key) + 1;   // 只看某一天时，序号仍按全局天数算
+    const ordinal = allDayKeys.indexOf(key) + 1;   // 只看某一天时，序号仍按全局天数算
+    if (!dayEntries.length) {
+      return `<section class="schedule-day-block">
+        <header class="schedule-day-head">
+          <h3>第 ${ordinal} 天 · ${escapeScheduleHTML(key)}${escapeScheduleHTML(halfDayNote(key, sessions))}</h3>
+          <span>0 个时段 · 前面的比赛日已排完，这天不用比</span>
+        </header>
+        <div class="meet-empty">该比赛日没有安排项目。</div>
+      </section>`;
+    }
+    const firstStart = Math.min(...dayEntries.map(entry => new Date(entry.startAt).getTime()));
     const lastEnd = Math.max(...dayEntries.map(entry =>
       new Date(entry.startAt).getTime() + entry.durationMinutes * 60000));
     return `<section class="schedule-day-block">
         <header class="schedule-day-head">
-          <h3>第 ${ordinal} 天 · ${escapeScheduleHTML(key)}</h3>
-          <span>${dayEntries.length} 个时段 · ${escapeScheduleHTML(formatClock(new Date(Math.min(...dayEntries.map(entry => new Date(entry.startAt))))))} 开赛 · ${escapeScheduleHTML(formatClock(new Date(lastEnd)))} 结束</span>
+          <h3>第 ${ordinal} 天 · ${escapeScheduleHTML(key)}${escapeScheduleHTML(halfDayNote(key, sessions))}</h3>
+          <span>${dayEntries.length} 个时段 · ${escapeScheduleHTML(formatClock(new Date(firstStart)))} 开赛 · ${escapeScheduleHTML(formatClock(new Date(lastEnd)))} 结束</span>
         </header>
-        ${renderGanttDay(dayEntries, daySessions, conflictInfo)}
+        ${ganttDayHTML(key, dayEntries, daySessions, conflictInfo)}
       </section>`;
   }).join('') + renderUnscheduledNotice(getUnscheduledEvents());
   booksBox.innerHTML = renderVenueBooks(shown, conflictInfo);
@@ -1464,16 +1767,26 @@ function updateScheduleFilters() {
 
 function renderScheduleLane(entries, conflictInfo, venue = VENUE_RESOURCES[0]) {
   if (!entries.length) return '<div class="meet-empty">该场地暂无编排项目。</div>';
+  // 体能恢复不足：按条目记「谁还没歇够」——卡片上直接写清楚，老师不用去甘特图里找
+  const recoveryNotes = new Map();
+  (conflictInfo?.recoveryDetails || []).forEach(detail => {
+    const note = `${detail.athlete?.name || '未知运动员'} 刚跑完长距离径赛，仅间隔 ${detail.gapMinutes} 分钟，`
+      + `还需再休息 ${detail.neededMinutes} 分钟`;
+    detail.entries.forEach(entry => {
+      recoveryNotes.set(entry.id, [...(recoveryNotes.get(entry.id) || []), note]);
+    });
+  });
   return `
     <div class="schedule-timeline">
       ${entries.map((entry, index) => {
         const startTime = new Date(entry.startAt);
         const checkinTime = addMinutes(startTime, -entry.checkinMinutes);
         const conflicted = conflictInfo.eventIds.has(entry.id);
+        const recoveryRisk = conflictInfo.recoveryEventIds?.has(entry.id);
         const modeLabel = venue.key === 'track'
           ? roundLabel(entry)
           : `出场顺序${entry.fieldOrderMode === 'random' ? '（随机）' : '（按班级轮流）'}`;
-        return `<article class="schedule-event-card ${conflicted ? 'schedule-conflict-card' : ''}">
+        return `<article class="schedule-event-card ${conflicted ? 'schedule-conflict-card' : ''}${recoveryRisk ? ' schedule-recovery-card' : ''}">
           <div class="schedule-event-time">
             <span class="schedule-time-range">${escapeScheduleHTML(formatClock(startTime))}–${escapeScheduleHTML(formatClock(scheduleEnd(entry)))}</span>
             <span class="schedule-checkin">检录 ${escapeScheduleHTML(formatClock(checkinTime))}</span>
@@ -1484,6 +1797,7 @@ function renderScheduleLane(entries, conflictInfo, venue = VENUE_RESOURCES[0]) {
               <span class="meet-muted">${entry.grade ? `${entry.grade}年级 · ` : ''}${escapeScheduleHTML(normalizeGender(entry.genderGroup))} · ${escapeScheduleHTML(modeLabel)}</span>
             </div>
             ${conflicted ? '<span class="schedule-warning">⚠ 需要手动调整</span>' : ''}
+            ${(recoveryNotes.get(entry.id) || []).map(note => `<span class="schedule-warning schedule-recovery">💤 ${escapeScheduleHTML(note)}</span>`).join('')}
             ${entry.needsFlex ? '<span class="schedule-warning schedule-flex">🕒 需插空进行（兼项避让不开，请现场机动）</span>' : ''}
             <label class="schedule-inline-edit">开始时间
               <input class="schedule-datetime" aria-label="${escapeScheduleHTML(entry.eventName)}比赛时间"
@@ -1499,7 +1813,7 @@ function renderScheduleLane(entries, conflictInfo, venue = VENUE_RESOURCES[0]) {
             </label>
             <details class="schedule-roster-details">
               <summary>运动员 / 出场顺序（${entry.participantIds.length || '待定'}）</summary>
-              <div class="schedule-participants">${renderParticipantList(entry)}</div>
+              <div class="schedule-participants">${renderParticipantList(entry, conflictInfo?.recoveryAthleteIds)}</div>
             </details>
           </div>
         </article>`;
@@ -1521,7 +1835,7 @@ function exportScheduleWord() {
     showScheduleError('请先生成赛程，再导出 Word 秩序册。');
     return;
   }
-  const conflictInfo = findScheduleConflicts(currentSchedule);
+  const conflictInfo = findScheduleConflicts(currentSchedule, { recoveryMinutes: savedRecoveryMinutes() });
   const athleteById = new Map(meetData.athletes.map(athlete => [athlete.id, athlete]));
   const rows = [...currentSchedule].sort((a, b) => new Date(a.startAt) - new Date(b.startAt)).map((entry, index) => {
     const startTime = new Date(entry.startAt);
@@ -1620,7 +1934,8 @@ function initializeSchedulePage() {
     }
     if (savedSchedule.entries.some(entry => !Number.isInteger(entry.grade))) {
       currentSchedule = [];
-      meetData = { ...meetData, schedule: null };
+      bumpScheduleRenderToken();
+      meetData = { ...freshMeetData(), schedule: null };   // 只作废赛程，报名数据原样保留
       try {
         Store.write(MEET_STORAGE_KEY, meetData);
         showScheduleError('检测到旧版未按年级隔离的赛程，已作废。请重新生成赛程，确保年级和性别分组正确。');
@@ -1629,6 +1944,7 @@ function initializeSchedulePage() {
       }
     } else {
       currentSchedule = savedSchedule.entries;
+      bumpScheduleRenderToken();
     }
   }
   if (scheduleStorageError) showScheduleError(scheduleStorageError);
@@ -1638,4 +1954,30 @@ function initializeSchedulePage() {
 Store.onReady(() => {
   initializeSchedulePage();
   bindGanttStickySync();     // iframe 内：让甘特图表头跟着父页滚动吸顶
+  bindCrossModuleMeetSync();
 });
+
+/**
+ * 跨模块同步：报名页（另一个 iframe）导入 / 改了报名数据后，本页内存里的 meetData 就过期了。
+ * 不刷新的话，下一次保存赛程会拿旧快照整体写回，把报名数据冲掉。
+ * 这里收到通知就重取，只更新数据；赛程本身变了才重画甘特图。
+ */
+function bindCrossModuleMeetSync() {
+  if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
+  const changedByOthers = event => Boolean(event?.detail?.changed?.includes?.(MEET_STORAGE_KEY));
+  const refresh = () => {
+    const latest = readMeetData();
+    const scheduleChanged = JSON.stringify(latest.schedule) !== JSON.stringify(meetData?.schedule);
+    meetData = { ...latest, eventFormats: meetData?.eventFormats || latest.eventFormats };
+    if (!scheduleChanged) return;
+    currentSchedule = Array.isArray(latest.schedule?.entries) ? latest.schedule.entries : [];
+    bumpScheduleRenderToken();
+    if (document.getElementById('scheduleGantt')) renderSchedule();
+  };
+  // 同文档（Store 内部派发）+ 父 / 顶层窗口转发过来的事件
+  window.addEventListener('store:sync', event => { if (changedByOthers(event)) refresh(); });
+  // 同源其它文档改了 localStorage（Store 内部已更新缓存，这里只需刷内存快照）
+  window.addEventListener('storage', event => {
+    if (event?.key === MEET_STORAGE_KEY) refresh();
+  });
+}

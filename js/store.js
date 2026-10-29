@@ -13,10 +13,17 @@
  *
  * 写入策略：先落 localStorage（本地永远有一份最新镜像）＋ 内存缓存，再异步推送云端；
  * 推送失败进入待写队列，下次同步后补推。
- * 冲突处理：后台同步回来的云端数据为准（本地未推送成功的写除外），覆盖缓存并触发重绘。
+ * 冲突处理：后台同步回来的云端数据为准（本地「已写入但云端未确认」的键除外），覆盖缓存并触发重绘。
+ *
+ * ⚠️ 数据丢失防线（SWR 云端优先 + 用户保存完立刻刷新 = 新数据被云端旧数据冲掉）：
+ *   1. write() 在推送【前】就给该键打上"未确认"标记，云端确认成功才清除；
+ *   2. 标记持久化到 localStorage，刷新后自动恢复 —— 新页面同步时这些键受保护，云端不许覆盖；
+ *   3. 重要表单用 Store.writeCritical()：await 云端确认，只有 ok=true 才提示"保存成功"；
+ *      失败则数据完整保留在本地（critical 标记永不过期、不会被丢弃），后台持续续传。
  *
  * 用法：
  *   Store.read(key, fallback) / Store.write(key, value)
+ *   await Store.writeCritical(key, value)   —— 报名保存等重要表单，强一致
  *   Store.ready           首次就绪（缓存就绪或冷启动同步完成）
  *   Store.onReady(cb)     cb 会在就绪时执行一次，之后每次云端同步带回变更时再执行（页面重绘用）
  */
@@ -69,6 +76,21 @@ const RETRY_DELAY = 1200;
 // 判定待写队列是否"新鲜"的时间窗。超过这个时间的失败写入很可能来自本地旧缓存，
 // 再补推就会把本地旧数据反向覆盖云端（数据污染的根源），因此直接丢弃、以云端为准
 const PENDING_FRESH_MS = 30000;
+// 「本地已改、云端还没确认」的保护窗：这段时间内云端数据一律不许覆盖本地，
+// 否则用户刚保存完一刷新，云端旧数据回来就把新数据冲掉了（数据丢失的根源）
+const UNCONFIRMED_TTL_MS = 5 * 60 * 1000;
+// 重要表单（报名保存等）的写入：云端确认前的重试次数
+const CRITICAL_WRITE_ATTEMPTS = 2;
+// 重要表单云端确认失败后的后台续传节奏（毫秒）
+const CRITICAL_RETRY_DELAYS = [1500, 5000, 15000, 30000];
+/**
+ * 「本地已写入、云端未确认」保护锁的前缀：刷新后靠它挡住云端旧数据覆盖。
+ * ⚠️ 每个存储键一条独立记录（前缀 + 键名），不是整体一个 JSON ——
+ *    多个 iframe / 标签页共享同一份 localStorage，整体覆盖会让别人的锁被空队列抹掉。
+ */
+const UNCONFIRMED_LOCK_PREFIX = 'pe_store_unconfirmed_v1::';
+// 运动会数据里"写空 = 可能把别人的数据冲掉"的关键数组（防覆盖检测用）
+const MEET_ARRAY_FIELDS = ['athletes', 'registrations', 'heats'];
 // 整体判定为"未连接"后的定时重连（有上限，不会无限重试）
 const MAX_RECONNECT = 3;
 const RECONNECT_DELAY = 8000;
@@ -91,8 +113,13 @@ const Store = {
   // 请求串行闸门：保证同一时刻只有一个 /api 请求在飞，
   // 超时也必须等这一发彻底结束（abort 生效）后才允许发下一次，避免并发堆积
   _requestChain: Promise.resolve(),
-  // 待写队列：key → { value, at }（at 用于判断这条失败写入是否还"新鲜"）
+  // 待写队列：key → { value, at, critical, attempts }（at 用于判断这条写入是否还"新鲜"；
+  // critical = 重要表单（报名保存等），失败后绝不丢弃，一直保留在本地并重试）
   _pendingWrites: new Map(),
+  // 本会话亲手写过的键（区分"云端真的没有"和"自己刚写的还没落库"）
+  _localWrites: new Set(),
+  // 重要表单云端写失败后的续传定时器：key → timer
+  _criticalTimers: new Map(),
   _loadingNode: null,
   _slowHintTimer: null,
   _backedUp: false,
@@ -100,7 +127,11 @@ const Store = {
   _reconnectAttempts: 0,
 
   async start() {
+    this._bindCrossDocumentSync();
     const hasCache = this._loadLocal();
+    // 刷新后接续：把上一次「已写入本地、云端未确认」的标记恢复回来，
+    // 否则新页面一同步，云端旧数据就会把用户刚保存的数据冲掉
+    this._restoreUnconfirmed();
     try {
       if (hasCache) {
         // ① 有缓存：先让页面用本地数据立即渲染
@@ -266,11 +297,20 @@ const Store = {
       this.mode = 'supabase';
       this._reconnectAttempts = 0;
       const before = this._snapshot();
-      // 先丢掉过期的失败写入，避免它们随后被补推、把本地旧数据反向覆盖到云端
+      // ① 再读一遍盘上的锁：别的 iframe 可能比本实例晚一步刚写下锁（顺序抢占防线）
+      this._refreshLocksFromStorage();
+      // ② 丢掉过期的失败写入，避免它们随后被补推、把本地旧数据反向覆盖到云端
       this._dropStalePending();
+      // ③ 云端覆盖：有锁的键一律跳过
       const changed = this._applyCloud(payload.data);
-      // 强制覆盖：不管有没有差异，都把云端结果整体写回 localStorage 镜像
-      this._mirrorLocal();
+      /* 回写本地镜像：只写「这次真正变了」的键 + 云端已删除（缓存为 null）的键。
+         ⚠️ 不再全量回写：多个 iframe 共享同一份 localStorage，一个缓存还是旧值的兄弟
+            iframe 全量回写，会把报名页刚落盘的新数据盖成旧数据（用户一刷新就"数据没了"）。 */
+      const toMirror = [...new Set([
+        ...changed,
+        ...STORE_KEYS.filter(key => this.cache.get(key) === null),
+      ])];
+      this._mirrorLocal(toMirror);
       this._logOverwrite(changed, before);
       if (!this._backedUp) { this._backupLocal(); this._backedUp = true; }
       this.lastSyncAt = Date.now();
@@ -323,14 +363,24 @@ const Store = {
 
   /**
    * 丢弃过期的失败写入
-   * 这些写入往往是本地旧缓存时代留下的，一旦联网就补推，会把云端新数据覆盖回旧版本
+   * 这些写入往往是本地旧缓存时代留下的，一旦联网就补推，会把云端新数据覆盖回旧版本。
+   *
+   * ⚠️ 例外：critical（重要表单，如报名保存）永不自动丢弃 ——
+   * 那是用户刚点保存录入的数据，宁可一直重试补推，也绝不能因为过了 30 秒就当垃圾丢掉、
+   * 再被云端旧数据覆盖（这正是"保存完一刷新数据就没了"的成因）。
    */
   _dropStalePending() {
     if (!this._pendingWrites.size) return;
     const now = Date.now();
     [...this._pendingWrites].forEach(([key, entry]) => {
-      if (now - entry.at <= PENDING_FRESH_MS) return;
-      this._pendingWrites.delete(key);
+      if (entry.critical) return;
+      // 30 秒内：新鲜，一律保留（可能只是网络抖一下）；
+      // 30 秒 ~ 5 分钟：只有重试过至少一次才继续保留，给用户留出「保存完马上刷新」的窗口；
+      // 超过 5 分钟：判定为本地旧缓存残留，丢弃，以云端为准
+      const fresh = now - entry.at <= PENDING_FRESH_MS;
+      const withinGrace = now - entry.at <= UNCONFIRMED_TTL_MS && (entry.attempts || 0) >= 1;
+      if (fresh || withinGrace) return;
+      this._clearUnconfirmed(key);   // 只删自己这条锁，别人的锁不受影响
       console.warn(`[Store] 已丢弃过期的失败写入 ${key}（${Math.round((now - entry.at) / 1000)} 秒前写入失败），以云端数据为准，不再补推，避免污染云端`);
     });
   },
@@ -380,30 +430,63 @@ const Store = {
 
   /**
    * 以云端为准更新缓存，返回发生变化的键
-   * 冲突处理：云端优先；但如果该键有"未推送成功"的本地写入，保留本地值（下次补推）
+   * 冲突处理：云端优先；但该键只要还有「本地已改、云端未确认」的写入就保留本地值。
+   *
+   * ⚠️ 这里只保护"写入失败"是不够的：写入还在飞（POST 还没返回）时队列里根本没有记录，
+   * 用户保存完立刻刷新 → 新页面同步拿回云端旧数据 → 把刚保存的数据直接冲掉。
+   * 所以 write() 在推送前就打标记，成功才清除。
    */
   _applyCloud(data) {
     const changed = [];
+    const protectedKeys = [];
     STORE_KEYS.forEach(key => {
-      // 只保护"刚刚写入失败"的键（用户这次会话刚改的，等补推）；
-      // 过期的失败写入已在 _dropStalePending 里清掉，必须让云端覆盖，否则旧缓存永远赖着不走
+      // 保护未确认的本地写入（正在推送 / 推送失败待补推）：
+      // critical 永久保护，普通写入在 UNCONFIRMED_TTL_MS 内保护；
+      // 过期的已在 _dropStalePending 里清掉，必须让云端覆盖，否则旧缓存永远赖着不走
+      // 有锁 = 本地这份数据还没被云端确认 → 直接跳过，云端说什么都不许覆盖
       const pending = this._pendingWrites.get(key);
-      if (pending && Date.now() - pending.at <= PENDING_FRESH_MS) return;
+      if (pending && (pending.critical || Date.now() - pending.at <= UNCONFIRMED_TTL_MS)) {
+        protectedKeys.push(key);
+        return;
+      }
       const next = data[key] === undefined ? null : data[key];
       const current = this.cache.get(key);
       if (JSON.stringify(current === undefined ? null : current) === JSON.stringify(next)) return;
+      // 云端这条是空的、本地却有数据 —— 只有「本会话亲手写过」的键才保本地：
+      // 这种情况多半是自己的写入还没落库 / 云端读取打了个空，静默清空 = 用户眼里的"数据消失了"。
+      // 本会话没写过的键仍以云端为准（别的设备删了就删了），不改变原有同步语义。
+      if (this._isEmptyValue(next) && !this._isEmptyValue(current) && this._localWrites.has(key)) {
+        console.warn(`[Store] ⚠️ 云端 ${key} 为空但本地刚写过数据，保留本地不清空（确认要以云端为准请用 forceSyncCloud()）`);
+        return;
+      }
       this.cache.set(key, next);
       changed.push(key);
     });
+    if (protectedKeys.length) {
+      console.warn(`[Store] ⛔ 云端数据未覆盖这些键（本地刚写入、云端还没确认，稍后自动补推）：${protectedKeys.join('、')}`);
+    }
     return changed;
+  },
+
+  /** 判断一个值算不算"空"（null / 空数组 / 空对象）；字符串与数字不算空，避免误判标题等标量 */
+  _isEmptyValue(value) {
+    if (value === null || value === undefined) return true;
+    if (Array.isArray(value)) return value.length === 0;
+    if (typeof value === 'object') return Object.keys(value).length === 0;
+    return false;
   },
 
   /**
    * 把云端结果回写 localStorage，保证本地始终有镜像
-   * 默认全量覆盖 STORE_KEYS：本地有而云端没有的键会被清掉，不留残存旧数据
+   * 云端没有的键会被清掉（传 changed 时只清这次真正变了的键），不留残存旧数据
+   *
+   * ⚠️ 绝不回写「带锁」的键：锁表示本地这份还没被云端确认，
+   *    而各个 iframe 共享同一份 localStorage —— 一个缓存还是旧值的兄弟 iframe
+   *    一旦回写，就会把报名页刚落盘的新数据盖成旧数据（锁保得住缓存，保不住 localStorage）。
    */
   _mirrorLocal(keys = STORE_KEYS) {
     keys.forEach(key => {
+      if (this._pendingWrites.has(key)) return;   // 有锁：这个键的本地镜像由写入方负责
       try {
         const value = this.cache.get(key);
         if (value === null || value === undefined) localStorage.removeItem(key);
@@ -414,11 +497,57 @@ const Store = {
     });
   },
 
+  /**
+   * 派发同步事件：本窗口 + 父窗口 / 顶层窗口。
+   * ⚠️ 各模块是 iframe 隔离的（报名页改的数据，赛程页收不到本窗口的事件），
+   *    所以要往 parent / top 也发一份；兄弟 iframe 之间靠下面的 storage 监听打通。
+   */
   _dispatchSync(changed, extra = {}) {
     if (typeof window === 'undefined') return;
-    window.dispatchEvent(new CustomEvent('store:sync', {
-      detail: { mode: this.mode, changed, at: Date.now(), ...extra },
-    }));
+    const detail = { mode: this.mode, changed, at: Date.now(), ...extra };
+    const fire = target => {
+      try {
+        const Ctor = typeof target.CustomEvent === 'function' ? target.CustomEvent : CustomEvent;
+        target.dispatchEvent(new Ctor('store:sync', { detail }));
+      } catch (error) {
+        /* 跨域等情况忽略 */
+      }
+    };
+    fire(window);
+    try {
+      if (window.parent && window.parent !== window) fire(window.parent);
+      if (window.top && window.top !== window && window.top !== window.parent) fire(window.top);
+    } catch (error) {
+      /* 跨域访问 parent 会抛错，忽略 */
+    }
+  },
+
+  /**
+   * 跨 iframe / 跨标签页同步：同源的其它文档改了 localStorage，本页立刻收到 storage 事件。
+   * 没有这条通道时，报名页保存完切到赛程页（iframe 已加载过）看到的还是旧缓存。
+   */
+  _bindCrossDocumentSync() {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
+    if (this._crossBound) return;
+    this._crossBound = true;
+    window.addEventListener('storage', event => {
+      const key = event.key;
+      if (!key || !STORE_KEYS.includes(key)) return;
+      // 本页这份键还有「云端未确认」的写入 → 保留本地，绝不让别人（或云端旧值）覆盖
+      if (this._pendingWrites.has(key)) return;
+      let next = null;
+      try {
+        next = event.newValue === null || event.newValue === undefined ? null : JSON.parse(event.newValue);
+      } catch (error) {
+        console.warn(`[Store] 解析跨页面数据失败：${key}`, error);
+        return;
+      }
+      const current = this.cache.get(key);
+      if (JSON.stringify(current === undefined ? null : current) === JSON.stringify(next)) return;
+      this.cache.set(key, next);
+      console.log(`[Store] 🔄 检测到其它页面更新了 ${key}，已同步到本页缓存`);
+      this._dispatchSync([key], { crossDocument: true });
+    });
   },
 
   /**
@@ -442,35 +571,347 @@ const Store = {
   /** 页面渲染前调用一次（或直接把渲染函数交给 onReady） */
   read(key, fallback = null) {
     const value = this.cache.get(key);
-    return value === undefined ? fallback : value;
+    const result = value === undefined ? fallback : value;
+    if (this._isMeetKey(key)) {
+      console.log(`[Store] 读取键：${key}，报名数据：${this._countOf(result)}条`
+        + `，赛程：${Array.isArray(result?.schedule?.entries) ? `${result.schedule.entries.length} 个时段` : '无'}`);
+    }
+    return result;
   },
 
-  /** 写入：本地镜像 + 内存缓存立即生效，云端异步推送 */
-  write(key, value) {
-    this.cache.set(key, value);
+  /**
+   * 写入：本地镜像 + 内存缓存立即生效，云端异步推送
+   * ⚠️ 推送【前】就打上"未确认"标记，成功后才清除 ——
+   *    否则这段"写入已发出、云端还没返回"的窗口里，云端旧数据一回就会被覆盖（数据丢失）
+   * @param {string} key
+   * 报名数据（athletes / registrations）与赛程（schedule）共用同一个 Key，
+   * 所以写整体对象时【合并而非替换】：新对象里缺失 / 被写空的字段保留本地已有数据，
+   * 避免赛程页拿自己那份过期的内存快照整体写回、把报名数据冲掉。
+   *
+   * @param {*} value
+   * @param {{push?: boolean, allowEmpty?: boolean}} options
+   *        push=false 时只落本地（由 writeCritical 自己 await 推送）
+   *        allowEmpty=true 表示"用户明确要清空"（删除全部报名等），才允许把数组写空
+   */
+  write(key, value, options = {}) {
+    const before = this._isMeetKey(key) ? this.cache.get(key) : undefined;
+    const merged = this._mergeMeetData(key, value, options);
+    this.cache.set(key, merged);
+    this._localWrites.add(key);
+    if (this._isMeetKey(key)) {
+      console.log(`[Store] 写入键：${key}，写入前报名数据：${this._countOf(before)}条，写入后报名数据：${this._countOf(merged)}条`);
+    }
     try {
-      localStorage.setItem(key, JSON.stringify(value));
+      localStorage.setItem(key, JSON.stringify(merged));
     } catch (error) {
       console.warn(`[Store] 写入本地镜像失败：${key}`, error);
     }
-    if (this.cloudState !== 'off') this._persistSafely(key, value);
-    return value;
+    if (options.push === false) return merged;
+    // 云端可用才需要"未确认保护"（纯本地模式没有云端数据来覆盖）；
+    // 重要表单走 writeCritical，它自己会打 critical 标记，不受这里影响
+    if (this.cloudState !== 'off') {
+      this._markUnconfirmed(key, merged);
+      this._persistSafely(key, merged);
+    }
+    return merged;
+  },
+
+  /**
+   * 运动会数据的合并写入（防覆盖核心）：
+   * ① 缺失字段用本地已有的补上（赛程页只关心 schedule，不该动 athletes / registrations）
+   * ② 除非调用方显式 allowEmpty，否则不许用空数组把本地已有的报名数据冲掉
+   */
+  _mergeMeetData(key, next, options = {}) {
+    if (!this._isMeetKey(key)) return next;
+    const current = this.cache.get(key);
+    if (!this._isPlainObject(current) || !this._isPlainObject(next)) return next;
+    const merged = { ...current, ...next };
+    if (options.allowEmpty) return merged;
+    const blocked = [];
+    MEET_ARRAY_FIELDS.forEach(field => {
+      const before = current[field];
+      const after = next[field];
+      if (!Array.isArray(before) || before.length === 0) return;      // 本地本来就没数据，谈不上覆盖
+      if (Array.isArray(after) && after.length > 0) return;           // 新数据也有，正常替换
+      merged[field] = before;
+      blocked.push(`${field}（本地 ${before.length} 条）`);
+    });
+    if (blocked.length) {
+      console.error(`[Store] ⛔ ${key} 拒绝用空数据覆盖：${blocked.join('、')}，已保留本地数据`
+        + '（若确实要清空请传 allowEmpty: true）');
+    }
+    return merged;
+  },
+
+  _isMeetKey(key) {
+    return MEET_DATA_KEYS.includes(key) && key !== 'sportsMeetTitle';
+  },
+
+  _isPlainObject(value) {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+  },
+
+  /** 报名数据条数（日志用）：优先 athletes，其次 registrations */
+  _countOf(value) {
+    if (!this._isPlainObject(value)) return 0;
+    if (Array.isArray(value.athletes)) return value.athletes.length;
+    if (Array.isArray(value.registrations)) return value.registrations.length;
+    return 0;
+  },
+
+  /**
+   * 重要表单的强一致写入（报名保存、清空报名等）：本地立即生效，然后【等云端确认】
+   * @returns {Promise<{ok:boolean, mode:string, localSaved:boolean, error?:string}>}
+   *   ok=true  —— 云端已确认落库（此时才应提示"保存成功"）
+   *   ok=false —— 云端写入失败：数据完整保留在本地（localSaved 恒为 true）并持续重试，
+   *               调用方必须弹窗报错，绝不能提示"保存成功"
+   *
+   * 成功后派发 store:sync，强制通知其它模块（赛程编排等）立刻重取数据，不用等轮询。
+   */
+  async writeCritical(key, value, { label = '', attempts = CRITICAL_WRITE_ATTEMPTS, allowEmpty = false } = {}) {
+    /* ⚠️ 时序铁律（用户可能 0.1 秒后按 F5，任何一步都不能排在 fetch 后面）：
+     *   ① 先同步落 localStorage（write 内部完成）
+     *   ② 再同步打锁并落盘
+     *   ③ 最后才发网络请求
+     * 反过来的话：请求发出后、锁还没写盘的那几毫秒里刷新，云端旧数据就会把新数据冲掉。 */
+    const saved = this.write(key, value, { push: false, allowEmpty });   // ① 本地立即生效（含合并防覆盖）
+    const entry = this._pendingWrites.get(key);
+    const lockEntry = {
+      value: saved,          // 推的是合并后的最终值，和本地镜像 / 缓存完全一致
+      at: entry?.at ?? Date.now(),
+      critical: true,
+      attempts: entry?.attempts || 0,
+      label: label || entry?.label || '',
+    };
+    this._pendingWrites.set(key, lockEntry);
+    this._writeLock(key, lockEntry);                  // ② 同步上锁（在发请求之前）
+
+    if (this.cloudState === 'off') {
+      const reason = this.lastError?.message
+        || '云端存储未连接（服务端未配置 Supabase，或网络不可用）';
+      console.error(`[Store] 重要数据 ${key} 未能写入云端：${reason}；已完整保留在本地`);
+      this._dispatchSync([key], { localWrite: true, cloudConfirmed: false, critical: true });
+      return { ok: false, mode: this.mode, localSaved: true, error: reason };
+    }
+
+    try {
+      await this._persistWithRetry(key, saved, attempts);   // ③ 到这里才发网络请求
+      this._clearUnconfirmed(key);
+      console.log(`[Store] ✅ ${key} 已写入云端并确认`);
+      // 通知所有模块立刻重取（赛程编排不用等下次轮询就能看到新报名）
+      this._dispatchSync([key], { localWrite: true, cloudConfirmed: true, critical: true });
+      return { ok: true, mode: this.mode, localSaved: true };
+    } catch (error) {
+      const failed = this._pendingWrites.get(key);
+      if (failed) {
+        failed.attempts = (failed.attempts || 0) + 1;
+        failed.lastError = error?.message || String(error);
+        failed.critical = true;
+        this._writeLock(key, failed);            // 锁保持（重要表单永不上交云端旧数据）
+      }
+      this._scheduleCriticalRetry(key);          // 后台持续续传，绝不静默丢弃
+      this._onPersistError(key, error);
+      this._dispatchSync([key], { localWrite: true, cloudConfirmed: false, critical: true });
+      return {
+        ok: false, mode: this.mode, localSaved: true, error: error?.message || String(error),
+      };
+    }
+  },
+
+  /** 带重试的云端推送（503 = 服务端没配 Supabase，不必重试） */
+  async _persistWithRetry(key, value, attempts = 1) {
+    let lastError = null;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        await this._persist(key, value);
+        return true;
+      } catch (error) {
+        lastError = error;
+        if (error?.status === 503) throw error;
+        if (attempt < attempts) await this._delay(RETRY_DELAY);
+      }
+    }
+    throw lastError;
+  },
+
+  /** 重要表单云端确认失败后的后台续传：按 CRITICAL_RETRY_DELAYS 逐步退避，成功即解除保护 */
+  _scheduleCriticalRetry(key) {
+    if (typeof window === 'undefined') return;
+    if (this._criticalTimers.has(key)) return;
+    let step = 0;
+    const runNext = async () => {
+      const entry = this._pendingWrites.get(key);
+      if (!entry) { this._criticalTimers.delete(key); return; }
+      try {
+        await this._persist(key, entry.value);
+        this._clearUnconfirmed(key);
+        this._criticalTimers.delete(key);
+        console.log(`[Store] ✅ ${key} 已补传云端（重试第 ${step + 1} 次成功）`);
+        if (typeof window !== 'undefined' && typeof window.showToast === 'function') {
+          window.showToast('数据已补传到云端', 'success');
+        }
+        this._dispatchSync([key], { localWrite: true, cloudConfirmed: true, retried: true });
+        return;
+      } catch (error) {
+        entry.attempts = (entry.attempts || 0) + 1;
+        entry.lastError = error?.message || String(error);
+        this._writeLock(key, entry);
+        step += 1;
+        if (step >= CRITICAL_RETRY_DELAYS.length) {
+          this._criticalTimers.delete(key);
+          console.warn(`[Store] ${key} 仍未写入云端，数据已完整保留在本机，联网后会自动继续重试（不要再刷新或清理浏览器数据）`);
+          return;
+        }
+        this._criticalTimers.set(key, setTimeout(runNext, CRITICAL_RETRY_DELAYS[step]));
+      }
+    };
+    this._criticalTimers.set(key, setTimeout(runNext, CRITICAL_RETRY_DELAYS[0]));
   },
 
   async _persistSafely(key, value) {
     try {
       await this._persist(key, value);
-      this._pendingWrites.delete(key);
+      this._clearUnconfirmed(key);
     } catch (error) {
       // 服务端没配 Supabase：安静地退回纯本地模式，不打扰用户
       if (error && error.status === 503) {
         this.cloudState = 'off';
         this.mode = 'local';
-        this._pendingWrites.delete(key);
+        this._clearUnconfirmed(key);
         return;
       }
-      this._pendingWrites.set(key, { value, at: Date.now() });
+      const entry = this._pendingWrites.get(key) || { value, at: Date.now(), attempts: 0 };
+      entry.attempts = (entry.attempts || 0) + 1;
+      entry.lastError = error?.message || String(error);
+      this._pendingWrites.set(key, entry);
+      this._writeLock(key, entry);
       this._onPersistError(key, error);
+    }
+  },
+
+  /**
+   * 打上「本地已改、云端未确认」标记。
+   * ⚠️ 同步、立即落 localStorage —— 必须在发起 fetch 【之前】完成，
+   *    用户哪怕 0.1 秒后按 F5，锁也必须已经在盘上。
+   *
+   * ⚠️ 锁是【按存储键单独一条】localStorage 记录，不是整体一个 JSON：
+   *    报名页（iframe A）写锁后，赛程页（iframe B）做自己的例行同步时，
+   *    如果它是"整体覆盖一个锁文件"，就会用自己【空的】队列把 A 刚写的锁抹掉
+   *    → 用户一刷新，云端旧数据长驱直入。按 key 存，谁写的锁谁才能删。
+   */
+  _markUnconfirmed(key, value) {
+    const prev = this._pendingWrites.get(key);
+    const entry = {
+      value,
+      at: prev?.at ?? Date.now(),
+      critical: Boolean(prev?.critical),
+      attempts: prev?.attempts || 0,
+      label: prev?.label || '',
+    };
+    this._pendingWrites.set(key, entry);
+    this._writeLock(key, entry);
+  },
+
+  /** 写一条锁到 localStorage（同步） */
+  _writeLock(key, entry) {
+    try {
+      localStorage.setItem(this._lockKeyOf(key), JSON.stringify({
+        at: entry.at,
+        critical: Boolean(entry.critical),
+        attempts: entry.attempts || 0,
+        label: entry.label || '',
+      }));
+    } catch (error) {
+      console.warn(`[Store] 写入保护锁失败：${key}`, error);
+    }
+  },
+
+  /** 解除保护：只有【确认过】的实例才能删自己那条锁 */
+  _clearUnconfirmed(key) {
+    this._pendingWrites.delete(key);
+    try {
+      localStorage.removeItem(this._lockKeyOf(key));
+    } catch (error) {
+      console.warn(`[Store] 清除保护锁失败：${key}`, error);
+    }
+  },
+
+  _lockKeyOf(key) {
+    return `${UNCONFIRMED_LOCK_PREFIX}${key}`;
+  },
+
+  /** 刷新后恢复保护锁：本地镜像里就是用户刚保存的那份数据，继续保护 + 续传 */
+  _restoreUnconfirmed() {
+    const locks = [];
+    try {
+      for (let i = 0; i < localStorage.length; i += 1) {
+        const raw = localStorage.key(i);
+        if (raw && raw.startsWith(UNCONFIRMED_LOCK_PREFIX)) locks.push(raw);
+      }
+    } catch (error) {
+      console.warn('[Store] 枚举保护锁失败', error);
+      return;
+    }
+    locks.forEach(lockKey => {
+      const key = lockKey.slice(UNCONFIRMED_LOCK_PREFIX.length);
+      let info = null;
+      try {
+        info = JSON.parse(localStorage.getItem(lockKey) || '{}');
+      } catch (error) {
+        info = {};
+      }
+      const value = this._readLocalValue(key);
+      if (value === undefined || value === null) return;   // 本地都没这份数据，没什么可保护的
+      this._pendingWrites.set(key, {
+        value,
+        at: info?.at || Date.now(),
+        critical: Boolean(info?.critical),
+        attempts: info?.attempts || 0,
+        label: info?.label || '',
+      });
+      console.warn(`[Store] ⛔ 检测到「${key}」上次写入云端未确认（${Math.round((Date.now() - (info?.at || Date.now())) / 1000)} 秒前），本地数据已上锁保护，云端不得覆盖，将自动补推`);
+      // 只有云端还连着才排续传，避免"根本没配云端"时每次开页面都空转重试
+      if (this.cloudState !== 'off') this._scheduleCriticalRetry(key);
+    });
+  },
+
+  /**
+   * 同步前再读一遍盘上的锁：别的文档可能刚刚（比本实例启动更晚）写下锁。
+   * 顺序抢占防线：不管云端请求什么时候回来，只要盘上有锁就绝不覆盖。
+   */
+  _refreshLocksFromStorage() {
+    try {
+      for (let i = 0; i < localStorage.length; i += 1) {
+        const lockKey = localStorage.key(i);
+        if (!lockKey || !lockKey.startsWith(UNCONFIRMED_LOCK_PREFIX)) continue;
+        const key = lockKey.slice(UNCONFIRMED_LOCK_PREFIX.length);
+        if (this._pendingWrites.has(key)) continue;         // 本实例已知道，不重复
+        const value = this._readLocalValue(key);
+        if (value === undefined || value === null) continue;
+        let info = {};
+        try { info = JSON.parse(localStorage.getItem(lockKey) || '{}'); } catch (error) { info = {}; }
+        this._pendingWrites.set(key, {
+          value,
+          at: info?.at || Date.now(),
+          critical: Boolean(info?.critical),
+          attempts: info?.attempts || 0,
+          label: info?.label || '',
+        });
+        console.warn(`[Store] ⛔ ${key} 检测到其它页面刚写入的保护锁，本次云端数据不覆盖本地`);
+      }
+    } catch (error) {
+      console.warn('[Store] 读取保护锁失败', error);
+    }
+  },
+
+  /** 直接读本地镜像（不依赖缓存是否已灌入，start 早期也能用） */
+  _readLocalValue(key) {
+    if (this.cache.has(key)) return this.cache.get(key);
+    try {
+      const raw = localStorage.getItem(key);
+      return raw === null ? undefined : JSON.parse(raw);
+    } catch (error) {
+      return undefined;
     }
   },
 
@@ -492,10 +933,15 @@ const Store = {
     for (const [key, entry] of [...this._pendingWrites]) {
       try {
         await this._persist(key, entry.value);
-        this._pendingWrites.delete(key);
+        this._clearUnconfirmed(key);
         console.log(`[Store] 已补推 ${key} 到云端`);
       } catch (error) {
-        console.warn(`[Store] 补推 ${key} 仍未成功`, error);
+        entry.attempts = (entry.attempts || 0) + 1;
+        entry.lastError = error?.message || String(error);
+        this._writeLock(key, entry);
+        console.warn(`[Store] 补推 ${key} 仍未成功（第 ${entry.attempts} 次），数据保留在本地`, error);
+        // 重要表单：继续排后台续传，绝不因为补推失败就丢
+        if (entry.critical) this._scheduleCriticalRetry(key);
       }
     }
   },
@@ -535,7 +981,9 @@ const Store = {
     // 内存缓存与待写队列同步清理（只动运动会相关的键，别误伤其他模块）
     MEET_DATA_KEYS.forEach(key => {
       this.cache.delete(key);
-      this._pendingWrites.delete(key);
+      this._clearUnconfirmed(key);
+      const timer = this._criticalTimers.get(key);
+      if (timer) { clearTimeout(timer); this._criticalTimers.delete(key); }
     });
 
     let cloud = [];
@@ -578,14 +1026,26 @@ const Store = {
       key,
       at: entry.at,
       ageSeconds: Math.round((Date.now() - entry.at) / 1000),
+      critical: Boolean(entry.critical),
+      attempts: entry.attempts || 0,
       value: entry.value,
     }));
+  },
+
+  /** 手动重试所有未确认写入（「重试同步」按钮用） */
+  async retryPendingWrites() {
+    await this._flushPending();
+    return this.getPendingWrites();
   },
 
   /** 清空待写队列（forceSyncCloud 会调用，避免旧数据被补推） */
   clearPendingWrites() {
     const count = this._pendingWrites.size;
+    // 逐键解除（只删本实例这些键的锁，其它页面/其它键的锁不动）
+    [...this._pendingWrites.keys()].forEach(key => this._clearUnconfirmed(key));
     this._pendingWrites.clear();
+    this._criticalTimers.forEach(timer => clearTimeout(timer));
+    this._criticalTimers.clear();
     return count;
   },
 

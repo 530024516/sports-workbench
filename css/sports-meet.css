@@ -193,7 +193,8 @@
 
 .schedule-lanes {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  /* 场地数量可变（现在 5 块），用 auto-fit 自适应，别写死列数 */
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
   gap: 18px;
   align-items: start;
 }
@@ -350,6 +351,39 @@
   border-color: var(--danger);
   border-left-color: var(--danger) !important;
   background: #FFF1F2;
+}
+
+/* 体能恢复不足（长跑后休息不够）：橙色，与红色「时间撞车」区分 */
+.schedule-recovery-card {
+  border-color: #fb923c;
+  border-left-color: #ea580c !important;
+  background: #FFF7ED;
+}
+
+.schedule-warning.schedule-recovery { color: #9a3412; }
+
+.schedule-participant.recovery {
+  color: #9a3412;
+  font-weight: 700;
+  background: #ffedd5;
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+.schedule-conflict-group + .schedule-conflict-group { margin-top: 10px; }
+
+.schedule-conflict-group.recovery {
+  border-left: 3px solid #ea580c;
+  padding-left: 10px;
+}
+
+.schedule-conflict-group.recovery strong { color: #9a3412; }
+
+.schedule-conflict-hint {
+  display: block;
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 
 .schedule-settings label {
@@ -1773,14 +1807,22 @@
   position: relative;      /* 定位上下文 + 越界裁剪 */
   overflow: hidden;        /* 老浏览器兜底 */
   overflow: clip;          /* 只裁剪、不建滚动容器 → 表头 sticky 依然生效 */
+  box-sizing: border-box;
   width: 100%;             /* 时间轴撑满可用宽度，不再缩在中间 */
-  min-width: 660px;
+  /* ⚠️ 不再写死 660px 下限：列数会变（现在 5 块场地），写死反而会把时间轴挤出可视区。
+     最小宽度交给列自己的 minmax(120px, …) 去撑，窄屏由外层 .page-content 横向滚动接管。 */
+  max-width: 100%;
+  min-width: 0;
 }
 
 .schedule-gantt-head,
 .schedule-gantt-body {
+  /* ⚠️ 这两行缺一不可：display:grid 是二维布局的开关，grid-template-columns 决定列。
+     列数由 JS 按场地资源数写入 --gantt-columns（repeat() 的「次数」不能用 var()，
+     所以整串轨道尺寸传进来；JS 同时也在元素上写了内联 grid-template-columns 兜底）。 */
   display: grid;
-  grid-template-columns: 64px repeat(4, minmax(140px, 1fr));
+  grid-template-columns: var(--gantt-columns, 64px repeat(5, minmax(120px, 1fr)));
+  /* 默认 stretch：表头 5 个格子等高（场地名再长也不会把某一格撑高） */
 }
 
 /* 顶部表头：跟随唯一滚动条吸顶，滚到明细列表时依然看得见场地列 */
@@ -1816,7 +1858,19 @@
 
 .schedule-gantt-axis-head { font-size: 12px; color: var(--text-secondary); }
 
-.schedule-gantt-venue-head { display: flex; flex-direction: column; gap: 2px; }
+.schedule-gantt-venue-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  overflow: hidden;     /* 场地名再长也不撑破列宽、不撑高表头（表头高度是锁死的 66px） */
+}
+
+.schedule-gantt-venue-head > span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 .schedule-gantt-venue-head small {
   font-size: 11px;
@@ -1826,14 +1880,19 @@
 
 .schedule-gantt-venue-head.tone-track { border-top: 3px solid #1d4ed8; }
 .schedule-gantt-venue-head.tone-sandpit { border-top: 3px solid #b45309; }
+.schedule-gantt-venue-head.tone-standingjump { border-top: 3px solid #0891b2; }
 .schedule-gantt-venue-head.tone-throwing { border-top: 3px solid #047857; }
 .schedule-gantt-venue-head.tone-highjump { border-top: 3px solid #7e22ce; }
 
 .schedule-gantt-axis,
 .schedule-gantt-track {
-  position: relative;
+  position: relative;   /* ⚠️ 卡片是 position:absolute + top 定位 → 每一列都必须是定位上下文，
+                           否则卡片会相对整个网页定位、满天飞（新增场地列时也要有这条） */
   height: var(--gantt-height, 1530px);
   max-height: var(--gantt-height, 1530px);   /* 双保险：再脏的数据也撑不高 */
+  min-width: 0;         /* 允许列在窄屏下收缩，不被内容顶宽 */
+  overflow: hidden;     /* 老浏览器兜底 */
+  overflow: clip;       /* 卡片横向不越界串到隔壁场地列 */
   border-left: 1px solid var(--border);
 }
 
@@ -1918,6 +1977,7 @@
 
 .schedule-gantt-block.tone-track { --gantt-main:#1d4ed8; --gantt-soft:#e5edff; --gantt-line:#93b4fd; }
 .schedule-gantt-block.tone-sandpit { --gantt-main:#b45309; --gantt-soft:#fdf1dc; --gantt-line:#f0c078; }
+.schedule-gantt-block.tone-standingjump { --gantt-main:#0891b2; --gantt-soft:#d8f3fa; --gantt-line:#7cc7da; }
 .schedule-gantt-block.tone-throwing { --gantt-main:#047857; --gantt-soft:#dcf5ea; --gantt-line:#84d3b4; }
 .schedule-gantt-block.tone-highjump { --gantt-main:#7e22ce; --gantt-soft:#f2e6fd; --gantt-line:#c99bf2; }
 
@@ -1972,9 +2032,19 @@
 
 .schedule-gantt-flag.warn { background: #fee2e2; color: #b91c1c; }
 .schedule-gantt-flag.flex { background: #fef3c7; color: #b45309; }
+/* 体能恢复不足：橙色，和红色「时间撞车」区分开 */
+.schedule-gantt-flag.recovery { background: #ffedd5; color: #9a3412; }
 
 .schedule-gantt-block.conflict { border-color: #fca5a5; }
 .schedule-gantt-block.flex { border-style: dashed; }
+/* 长跑后休息不够：整块卡片变橙（盖掉 conflict 的红 + 场地主题色） */
+.schedule-gantt-block.recovery {
+  --gantt-main: #ea580c;
+  --gantt-soft: #ffedd5;
+  --gantt-line: #fdba74;
+  border-color: #fb923c;
+  border-left: 3px solid #ea580c;
+}
 
 .schedule-time-pair { display: inline-flex; align-items: center; gap: 4px; }
 .schedule-time-dash { color: var(--text-secondary); }
