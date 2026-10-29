@@ -1967,6 +1967,13 @@ function bindCrossModuleMeetSync() {
   const changedByOthers = event => Boolean(event?.detail?.changed?.includes?.(MEET_STORAGE_KEY));
   const refresh = () => {
     const latest = readMeetData();
+    /* ⛔ 反向清空防线：对方此刻读到的是空值（多半是它还在初始化、时序上先拿到了空），
+       而本页内存里有报名数据 —— 绝不接受，否则等于让它把数据清掉。 */
+    if (!latest.athletes?.length && !latest.registrations?.length
+      && (meetData?.athletes?.length || meetData?.registrations?.length)) {
+      console.warn('[赛程编排] 忽略其它页面传来的空报名数据，保留本地现有数据');
+      return;
+    }
     const scheduleChanged = JSON.stringify(latest.schedule) !== JSON.stringify(meetData?.schedule);
     meetData = { ...latest, eventFormats: meetData?.eventFormats || latest.eventFormats };
     if (!scheduleChanged) return;
@@ -1980,4 +1987,6 @@ function bindCrossModuleMeetSync() {
   window.addEventListener('storage', event => {
     if (event?.key === MEET_STORAGE_KEY) refresh();
   });
+  /* 🚨 控制台 window.forceRecover() 的强行恢复事件：无条件重取重画 */
+  window.addEventListener('store:recovered', refresh);
 }

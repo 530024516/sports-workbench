@@ -60,6 +60,14 @@ const MEET_DATA_KEYS = [
   'sportsMeetTitle',
 ];
 
+/**
+ * 版本标记：排障第一步就是在控制台确认浏览器跑的是不是这一版。
+ * ⚠️ 老版本（没有时光机备份 / 云端 0 条防污染 / forceRecover）会把云端返回的 null 直接写回
+ *    localStorage，表现就是"刷新一下主键立刻变 0 条"，日志还会打"本次无差异"。
+ *    如果你的控制台里看不到下面这行，说明浏览器还在用缓存里的旧 store.js —— 先硬刷（Cmd+Shift+R）。
+ */
+const STORE_BUILD = 'v3-数据丢失防线（时光机备份 + 云端0条防污染 + forceRecover）2026-10-29';
+
 // 所有接口请求的统一超时上限
 // 20 秒：Vercel（尤其免费版）冷启动 + Supabase 首次连接经常超过 5 秒，
 // 5 秒会在 Network 面板表现为 (canceled)、传输 0 kB，数据永远拉不下来
@@ -89,8 +97,27 @@ const CRITICAL_RETRY_DELAYS = [1500, 5000, 15000, 30000];
  *    多个 iframe / 标签页共享同一份 localStorage，整体覆盖会让别人的锁被空队列抹掉。
  */
 const UNCONFIRMED_LOCK_PREFIX = 'pe_store_unconfirmed_v1::';
-// 运动会数据里"写空 = 可能把别人的数据冲掉"的关键数组（防覆盖检测用）
+// 运动会数据里"写空 = 可能把别人的数据冲掉"的关键数组（合并时保留本地已有值）
 const MEET_ARRAY_FIELDS = ['athletes', 'registrations', 'heats'];
+// ⛔ 绝对防御字段：从"有"写成"无"直接抛异常终止写入，除非调用方显式 force: true
+const MEET_CRITICAL_FIELDS = ['athletes', 'registrations'];
+// 「本地时光机」备份键：每次成功保存非空数据时另存一份，主数据被清空时可一键恢复
+// ⚠️ 实际落盘时按存储键分槽（pe_sports_meet_backup_v1::<key>），互不顶掉；
+//    没有后缀的裸键只用于「主数据（报名/赛程/成绩）」这份，同时兼容老版本写过的备份。
+const MEET_BACKUP_KEY = 'pe_sports_meet_backup_v1';
+// 主数据键：报名 / 预分组 / 赛程 / 成绩排名 全在这一个键里，判断"有没有数据"只看报名条数
+const MEET_MAIN_KEY = 'pe_sports_meet_v1';
+/**
+ * 「一键清空」意图的跨文档通道。
+ * 兄弟 iframe 收到"主数据被清空"的消息时，必须能区分两件事：
+ *   ① 用户在别的页面亲手点了「一键清空」→ 必须跟着清空（否则清空了又被老数据复活）；
+ *   ② 兄弟页面自己也在启动中、手上恰好是空快照 → 必须无视（否则就是"刷新一下数据没了"）。
+ * 世代号落地到 localStorage 就是为了做这个区分，它本身不是业务数据键。
+ */
+const MEET_PURGE_EPOCH_KEY = 'pe_meet_purge_epoch_v1';
+// 清空指令的"有效期"：世代号带时间戳，只认 10 秒内刚发生的清空。
+// 否则隔天别的页面导入新数据时，一次残留的世代号前进会被误判成清空指令，把新数据抹掉
+const PURGE_SIGNAL_TTL_MS = 10000;
 // 整体判定为"未连接"后的定时重连（有上限，不会无限重试）
 const MAX_RECONNECT = 3;
 const RECONNECT_DELAY = 8000;
@@ -125,15 +152,38 @@ const Store = {
   _backedUp: false,
   _reconnectTimer: null,
   _reconnectAttempts: 0,
+  // 「一键清空」世代号：purge 时 +1，用于作废"清空之前发出、清空之后才回来"的同步结果，
+  // 否则在飞的 GET 会把刚清掉的数据又写回本地（用户眼里就是"清空了又活过来"）
+  _purgeEpoch: 0,
+  // 本实例看到的世代号（含别的 iframe 写的）：storage 事件靠它识别"明确的清空指令"
+  _purgeEpochSeen: 0,
+  // 上一次同步的防污染报告：{ protected, refused, healed }，供 _logOverwrite 打印
+  _lastSyncReport: null,
+  /**
+   * 云端"暂停开关"（排障 / 强行恢复用）。
+   * true 时：sync() / _applyCloud() / _persist() 全部空转 —— 云端那份 0 条再也碰不到本地，
+   * 只留本地读写照常工作。用 window.pauseCloud() / window.resumeCloud() 控制。
+   */
+  _cloudPaused: false,
+  // 时光机自愈的重入保护（自愈内部会反推云端，可能绕回 read）
+  _healing: false,
 
   async start() {
+    console.log(`[Store] 载入 store.js ${STORE_BUILD}`);
     this._bindCrossDocumentSync();
+    // 先认下当前世代号：之后 storage 事件里只要世代号前进了，就说明别人执行了明确的一键清空
+    this._purgeEpochSeen = this._storedPurgeSignal().epoch;
     const hasCache = this._loadLocal();
+    /* ① 启动第一原则：无条件检查备份。
+       只要主键是空的，立刻【同步】从 pe_sports_meet_backup_v1 拉数据覆盖主键，
+       不等云端、不看差异、不看有没有缓存 —— 这是备份存在的唯一意义。
+       恢复成功就立刻派发 store:sync，让页面马上用 216 条重绘。 */
+    const restored = this._restoreFromBackup({ reason: 'start() 启动' });
     // 刷新后接续：把上一次「已写入本地、云端未确认」的标记恢复回来，
     // 否则新页面一同步，云端旧数据就会把用户刚保存的数据冲掉
     this._restoreUnconfirmed();
     try {
-      if (hasCache) {
+      if (hasCache || restored) {
         // ① 有缓存：先让页面用本地数据立即渲染
         this._finishStart();
         // ② 渲染之后再后台静默同步（不 await，避免阻塞首屏）
@@ -191,6 +241,7 @@ const Store = {
 
   /** 后台静默同步（对外：手动刷新数据用）。失败会自动重试一次。 */
   async sync({ attempts = MAX_SYNC_ATTEMPTS } = {}) {
+    if (this._cloudPaused) return { ok: false, changed: [], reason: 'paused' };
     if (this.syncing) return { ok: false, changed: [], reason: 'syncing' };
     this.syncing = true;
     try {
@@ -283,12 +334,20 @@ const Store = {
 
   /** 单次同步：失败一律 throw，由 _syncWithRetry 负责重试与降级 */
   async _syncOnce({ timeout = REQUEST_TIMEOUT } = {}) {
+    // ⏸ 排障 / 强行恢复期间：连请求都不发，云端 0 条一点机会都没有
+    if (this._cloudPaused) return { ok: false, changed: [], reason: 'paused' };
+    const epoch = this._purgeEpoch;      // 发出请求时记下世代号
     let payload;
     try {
       payload = await this._fetchJSON('/api/data', { headers: { Accept: 'application/json' } }, timeout);
     } catch (error) {
       this.lastError = error;
       throw error;
+    }
+    // 请求在飞的时候执行过「一键清空」→ 这份结果已经过期，直接作废，绝不能落盘
+    if (epoch !== this._purgeEpoch) {
+      console.warn('[Store] 本次同步期间执行过一键清空，同步结果已作废（不落盘、不回写）');
+      return { ok: false, reason: 'purged', changed: [] };
     }
     this.schema = payload.keys || null;
 
@@ -349,16 +408,28 @@ const Store = {
     return String(value);
   },
 
-  /** 明确的覆盖日志：控制台一眼看出哪些键被云端覆盖了、从多少变成多少 */
+  /**
+   * 明确的覆盖日志：控制台一眼看出哪些键被云端覆盖了、从多少变成多少。
+   * ⚠️ 被防污染拦下（refused / healed / protected）的键必须单独报警：
+   *    以前只在"真的变了"时才打印，拦下的情况一律落到"本次无差异"里，
+   *    于是排障时看着那句"已强制覆盖（本次无差异）"会误以为同步成功 —— 其实云端正被 0 条污染。
+   */
   _logOverwrite(changed, before) {
-    if (!changed.length) {
-      console.log('[Store] ✅ 云端数据已强制覆盖本地缓存与 localStorage 镜像（本次无差异）');
-      return;
+    const report = this._lastSyncReport || { protected: [], refused: [], healed: [] };
+    if (!changed.length && !report.refused.length && !report.healed.length && !report.protected.length) {
+      console.log('[Store] ✅ 云端数据与本地缓存、localStorage 镜像完全一致（0 个键有变化）');
+    } else if (changed.length) {
+      const detail = changed
+        .map(key => `${key}：${before.get(key) ?? '空'} → ${this._sizeOf(this.cache.get(key))}`)
+        .join('；');
+      console.log(`[Store] ✅ 云端数据已覆盖本地缓存与 localStorage 镜像，${changed.length} 个键有变化 → ${detail}`);
     }
-    const detail = changed
-      .map(key => `${key}：${before.get(key) ?? '空'} → ${this._sizeOf(this.cache.get(key))}`)
-      .join('；');
-    console.log(`[Store] ✅ 云端数据已强制覆盖本地缓存与 localStorage 镜像，${changed.length} 个键有变化 → ${detail}`);
+    if (report.refused.length) {
+      console.warn(`[Store] ⛔ 云端这些键是 0 条而本地有数据 → 已拒绝覆盖，并反推回云端修复：${report.refused.join('、')}`);
+    }
+    if (report.healed.length) {
+      console.warn(`[Store] ⏳ 云端这些键是 0 条且本地也被清空 → 已从时光机备份恢复并反推回云端：${report.healed.join('、')}`);
+    }
   },
 
   /**
@@ -439,6 +510,13 @@ const Store = {
   _applyCloud(data) {
     const changed = [];
     const protectedKeys = [];
+    const report = { protected: protectedKeys, refused: [], healed: [] };
+    this._lastSyncReport = report;
+    // ⏸ 暂停期间：一个键都不许改（forceRecover 恢复出来的数据谁也别碰）
+    if (this._cloudPaused) {
+      console.warn('[Store] ⏸ 云端同步已暂停，本次云端数据未落到本地（forceRecover 期间保护本地数据）');
+      return changed;
+    }
     STORE_KEYS.forEach(key => {
       // 保护未确认的本地写入（正在推送 / 推送失败待补推）：
       // critical 永久保护，普通写入在 UNCONFIRMED_TTL_MS 内保护；
@@ -451,14 +529,58 @@ const Store = {
       }
       const next = data[key] === undefined ? null : data[key];
       const current = this.cache.get(key);
-      if (JSON.stringify(current === undefined ? null : current) === JSON.stringify(next)) return;
+      /* ⛔ 云端空数据防污染 —— 必须放在「无差异」早退【之前】。
+         否则"云端 0 条 + 本地也 0 条"会被判定成无差异直接 return，
+         备份永远没机会救场（日志里那句"本次无差异"就是这么绕过防线的）。
+         两个分支都会【反向推回云端】，把被污染成 0 条的云端表修回来。 */
+      if (this._isMeetKey(key) && this._countOf(next) === 0) {
+        if (this._countOf(current) > 0) {
+          console.warn(`[Store] ⛔ 云端 ${key} 为 0 条，本地有 ${this._countOf(current)} 条 → 拒绝覆盖并反推回云端`);
+          report.refused.push(key);
+          this._pushBackToCloud(key, current);
+          return;
+        }
+        // 本地也是空的 → 无条件问备份要数据（备份恢复成功会自己反推云端）
+        if (this._healMeetDataFromBackup(key, '云端返回 0 条')) {
+          report.healed.push(key);
+          console.warn(`[Store] ⛔ 云端 ${key} 为 0 条，已从备份恢复 `
+            + `${this._countOf(this.cache.get(key))} 条并反推回云端，拒绝云端空覆盖`);
+          changed.push(key);
+          return;
+        }
+      }
+      if (JSON.stringify(current === undefined ? null : current) === JSON.stringify(next)) {
+        // 云端带回非空数据 → 顺手刷新备份，保证备份永远是最新那一份
+        if (this._isMeetKey(key) && this._countOf(next) > 0) this._updateBackup(key, next, {});
+        return;
+      }
       // 云端这条是空的、本地却有数据 —— 只有「本会话亲手写过」的键才保本地：
       // 这种情况多半是自己的写入还没落库 / 云端读取打了个空，静默清空 = 用户眼里的"数据消失了"。
       // 本会话没写过的键仍以云端为准（别的设备删了就删了），不改变原有同步语义。
       if (this._isEmptyValue(next) && !this._isEmptyValue(current) && this._localWrites.has(key)) {
         console.warn(`[Store] ⚠️ 云端 ${key} 为空但本地刚写过数据，保留本地不清空（确认要以云端为准请用 forceSyncCloud()）`);
+        this._pushBackToCloud(key, current);
         return;
       }
+      /* ⛔ 云端空数据防冲击（运动会数据专用，无条件）：
+         云端拉回来的 athletes / registrations 是 0 条，而本地（或刚恢复的备份）有数据 →
+         绝对不许覆盖。这是"刷新一次数据就没了"的最后一道闸门 ——
+         不管是谁把云端洗成了 0 条，本地这份都原地不动，并【反向推回云端】把 0 条盖回去。 */
+      if (this._isMeetKey(key) && this._isPlainObject(current)) {
+        const cloudLost = MEET_CRITICAL_FIELDS.some(field => {
+          const localCount = Array.isArray(current[field]) ? current[field].length : 0;
+          const cloudCount = this._isPlainObject(next) && Array.isArray(next[field]) ? next[field].length
+            : (next === null || next === undefined ? 0 : -1);
+          return localCount > 0 && cloudCount === 0;
+        });
+        if (cloudLost) {
+          console.warn(`[Store] ⛔ 云端 ${key} 的报名数据是空的（0 条），本地有 `
+            + `${this._countOf(current)} 条 → 拒绝覆盖，并把本地数据反推回云端`);
+          this._pushBackToCloud(key, current);
+          return;
+        }
+      }
+      this._traceEmptyWrite(key, current, next, '_applyCloud()（云端覆盖）');
       this.cache.set(key, next);
       changed.push(key);
     });
@@ -466,6 +588,20 @@ const Store = {
       console.warn(`[Store] ⛔ 云端数据未覆盖这些键（本地刚写入、云端还没确认，稍后自动补推）：${protectedKeys.join('、')}`);
     }
     return changed;
+  },
+
+  /**
+   * 「反杀云端」：本地有数据而云端是空的 → 把本地这份推回云端，把云端的 0 条盖掉。
+   * 上锁 + 立即重试，保证推送期间云端旧（空）数据也别想再覆盖本地。
+   */
+  _pushBackToCloud(key, value) {
+    if (this._cloudPaused) return;                 // ⏸ 暂停期间不上锁、不推送
+    if (this.cloudState === 'off') return;         // 明确没配云端 / 服务端 503，不做无谓重试
+    if (this._pendingWrites.has(key)) return;      // 已经有写入在飞/待推，不重复排队
+    this._localWrites.add(key);
+    this._markUnconfirmed(key, value);             // 同步上锁（防推进过程中被云端空数据反扑）
+    this._persistSafely(key, value);               // 立即推一次，失败由 _scheduleCriticalRetry 接力
+    this._scheduleCriticalRetry(key);
   },
 
   /** 判断一个值算不算"空"（null / 空数组 / 空对象）；字符串与数字不算空，避免误判标题等标量 */
@@ -489,6 +625,14 @@ const Store = {
       if (this._pendingWrites.has(key)) return;   // 有锁：这个键的本地镜像由写入方负责
       try {
         const value = this.cache.get(key);
+        // 🚨 看门狗：这里写的是 localStorage —— 兄弟 iframe 读的就是它，最容易"看见 0 条"
+        let rawBefore = null;
+        try { rawBefore = localStorage.getItem(key); } catch (error) { rawBefore = null; }
+        if (rawBefore !== null) {
+          try {
+            this._traceEmptyWrite(key, JSON.parse(rawBefore), value, '_mirrorLocal()（回写 localStorage）');
+          } catch (error) { /* 解析不了就算了 */ }
+        }
         if (value === null || value === undefined) localStorage.removeItem(key);
         else localStorage.setItem(key, JSON.stringify(value));
       } catch (error) {
@@ -535,6 +679,15 @@ const Store = {
       if (!key || !STORE_KEYS.includes(key)) return;
       // 本页这份键还有「云端未确认」的写入 → 保留本地，绝不让别人（或云端旧值）覆盖
       if (this._pendingWrites.has(key)) return;
+      /* ✅ 唯一的例外：别的 iframe 明确执行了「一键清空」（世代号前进了）。
+         用户亲自确认过的清空必须生效，否则兄弟页面"死活不清空"会被当成 Bug 再报一次。 */
+      if (this._detectForeignPurge()) {
+        this.cache.delete(key);
+        try { localStorage.removeItem(key); } catch (error) { /* 忽略 */ }
+        console.log(`[Store] 🧨 检测到其它页面执行了一键清空，${key} 已同步清空（不再从备份复活）`);
+        this._dispatchSync([key], { reason: 'purgeMeetData', crossDocument: true });
+        return;
+      }
       let next = null;
       try {
         next = event.newValue === null || event.newValue === undefined ? null : JSON.parse(event.newValue);
@@ -543,11 +696,65 @@ const Store = {
         return;
       }
       const current = this.cache.get(key);
+      /* ⛔ 反向清空防线：别的文档把这个键删了 / 写成空（很可能是它那边还在初始化、
+         时序上先读到了空值），而本页有数据 —— 绝不接受，否则等于让它把主数据清空。 */
+      if (this._isEmptyValue(next) && !this._isEmptyValue(current)) {
+        console.warn(`[Store] ⛔ 忽略其它页面对 ${key} 的清空（本页有数据，${this._countOf(current)} 条）`);
+        return;
+      }
+      // 报名数据被写成"空"而本页有数据：同样拒绝（只认整体为空的情况，上面已覆盖；这里再兜一层字段级）
+      if (this._isMeetKey(key) && this._isPlainObject(next) && this._isPlainObject(current)
+        && MEET_CRITICAL_FIELDS.some(field => {
+          const beforeCount = Array.isArray(current[field]) ? current[field].length : 0;
+          const afterCount = Array.isArray(next[field]) ? next[field].length : 0;
+          return beforeCount > 0 && afterCount === 0;
+        })) {
+        console.warn(`[Store] ⛔ 忽略其它页面对 ${key} 报名数据的清空（本地 ${this._countOf(current)} 条）`);
+        return;
+      }
+      /* ⛔ 兄弟页面用的是"空状态"、本页也恰好是空的 → 绝不接受这个空值：
+         先问备份要数据（多半是它在初始化时把空值写回了共享的 localStorage），
+         备份也没有才认这份空。（用户亲手清空时备份已一并删除，不会误复活。） */
+      if (this._isMeetKey(key) && this._countOf(next) === 0 && this._countOf(current) === 0) {
+        if (this._healMeetDataFromBackup(key, '兄弟页面传来空数据')) {
+          console.warn(`[Store] ⛔ 兄弟页面把 ${key} 清空了，已从备份恢复 `
+            + `${this._countOf(this.cache.get(key))} 条，忽略这次空值`);
+          this._dispatchSync([key], { restored: true, reason: 'crossDocumentEmpty' });
+          return;
+        }
+      }
       if (JSON.stringify(current === undefined ? null : current) === JSON.stringify(next)) return;
       this.cache.set(key, next);
       console.log(`[Store] 🔄 检测到其它页面更新了 ${key}，已同步到本页缓存`);
       this._dispatchSync([key], { crossDocument: true });
     });
+  },
+
+  /** 盘上的「一键清空」指令：{ epoch, at }（早期版本可能只存了纯数字，一并兼容） */
+  _storedPurgeSignal() {
+    try {
+      const raw = localStorage.getItem(MEET_PURGE_EPOCH_KEY);
+      if (!raw) return { epoch: 0, at: 0 };
+      const parsed = JSON.parse(raw);
+      if (typeof parsed === 'number') return { epoch: parsed, at: Date.now() };
+      return { epoch: Number(parsed?.epoch) || 0, at: Number(parsed?.at) || 0 };
+    } catch (error) {
+      return { epoch: 0, at: 0 };
+    }
+  },
+
+  /**
+   * 别的文档刚刚执行了「一键清空」？（世代号前进 = 用户亲手点过，属于明确的清空指令）
+   * ⚠️ 只认 PURGE_SIGNAL_TTL_MS 内发生的：世代号没有过期清理机制，
+   *    隔天后第一次数据变更如果不看时间戳，就会被当成"清空指令"把新导入的数据抹掉。
+   */
+  _detectForeignPurge() {
+    const { epoch, at } = this._storedPurgeSignal();
+    if (epoch <= this._purgeEpochSeen) return false;
+    this._purgeEpochSeen = epoch;                 // 认下这个世代号，后续不再重复判断
+    if (at && Date.now() - at > PURGE_SIGNAL_TTL_MS) return false;
+    this._purgeEpoch = Math.max(this._purgeEpoch, epoch);
+    return true;
   },
 
   /**
@@ -570,6 +777,14 @@ const Store = {
 
   /** 页面渲染前调用一次（或直接把渲染函数交给 onReady） */
   read(key, fallback = null) {
+    /* 缓存还没灌（页面脚本常在 Store.start() 之前就 read()）：
+       先把 localStorage 镜像灌进缓存，绝不能因为"缓存里没有"就返回空 ——
+       报名页 pageData = loadMeetData() 就是这么拿到 0 条、渲染出空页面的。 */
+    if (!this.cache.has(key)) this._hydrateFromLocal(key);
+    /* ⛔ 自愈底线：只要主数据是空的，就【无条件、同步】试一次时光机备份。
+       不看云同步走到哪一步、不看有没有差异 —— 备份在，任何页面任何时刻读到的都必须是 216 条。
+       这是"三个页面（报名 / 赛程 / 成绩）表现绝对一致"的最后保证。 */
+    if (this._isMeetKey(key)) this._healMeetDataFromBackup(key);
     const value = this.cache.get(key);
     const result = value === undefined ? fallback : value;
     if (this._isMeetKey(key)) {
@@ -589,13 +804,15 @@ const Store = {
    * 避免赛程页拿自己那份过期的内存快照整体写回、把报名数据冲掉。
    *
    * @param {*} value
-   * @param {{push?: boolean, allowEmpty?: boolean}} options
+   * @param {{push?: boolean, allowEmpty?: boolean, force?: boolean}} options
    *        push=false 时只落本地（由 writeCritical 自己 await 推送）
-   *        allowEmpty=true 表示"用户明确要清空"（删除全部报名等），才允许把数组写空
+   *        allowEmpty / force=true 表示"用户在界面上明确要清空"，才允许把报名数据写空
+   *        （否则 athletes / registrations 从有到无会【抛异常终止写入】）
    */
   write(key, value, options = {}) {
     const before = this._isMeetKey(key) ? this.cache.get(key) : undefined;
-    const merged = this._mergeMeetData(key, value, options);
+    const merged = this._mergeMeetData(key, value, options);   // ⛔ 空覆盖在这里抛异常
+    this._traceEmptyWrite(key, before, merged, 'write()');      // 🚨 看门狗：谁把主数据写成 0 条
     this.cache.set(key, merged);
     this._localWrites.add(key);
     if (this._isMeetKey(key)) {
@@ -606,12 +823,15 @@ const Store = {
     } catch (error) {
       console.warn(`[Store] 写入本地镜像失败：${key}`, error);
     }
+    if (this._isMeetKey(key)) this._updateBackup(key, merged, options);
     if (options.push === false) return merged;
     // 云端可用才需要"未确认保护"（纯本地模式没有云端数据来覆盖）；
     // 重要表单走 writeCritical，它自己会打 critical 标记，不受这里影响
     if (this.cloudState !== 'off') {
-      this._markUnconfirmed(key, merged);
-      this._persistSafely(key, merged);
+      // 只有"调用方声明这是用户亲手要清空"时，才允许把空数据推给云端
+      const allowEmpty = options.force === true || options.allowEmpty === true;
+      this._markUnconfirmed(key, merged, { clear: allowEmpty && !this._hasContent(key, merged) });
+      this._persistSafely(key, merged, { allowEmpty });
     }
     return merged;
   },
@@ -625,26 +845,156 @@ const Store = {
     if (!this._isMeetKey(key)) return next;
     const current = this.cache.get(key);
     if (!this._isPlainObject(current) || !this._isPlainObject(next)) return next;
+    // 缺失字段用本地已有的补上（赛程页只写 schedule，不该动 athletes）
     const merged = { ...current, ...next };
-    if (options.allowEmpty) return merged;
+    const force = options.force === true || options.allowEmpty === true;
+    // ⛔ 绝对防御：报名数据（athletes / registrations）从"有"写成"无"，
+    //    一律抛异常终止写入 —— 后台自动同步、页面跳转、跨 iframe 时序错乱带来的空数据
+    //    都不准覆盖。唯一例外：用户在界面上亲手点了"清空数据"，由调用方显式传 force: true。
     const blocked = [];
-    MEET_ARRAY_FIELDS.forEach(field => {
-      const before = current[field];
-      const after = next[field];
-      if (!Array.isArray(before) || before.length === 0) return;      // 本地本来就没数据，谈不上覆盖
-      if (Array.isArray(after) && after.length > 0) return;           // 新数据也有，正常替换
-      merged[field] = before;
-      blocked.push(`${field}（本地 ${before.length} 条）`);
+    MEET_CRITICAL_FIELDS.forEach(field => {
+      const beforeCount = Array.isArray(current[field]) ? current[field].length : 0;
+      const afterCount = Array.isArray(next[field]) ? next[field].length : 0;
+      if (beforeCount === 0 || afterCount > 0) return;
+      if (force) return;                       // 用户明确要清空，放行
+      blocked.push(`${field}（本地 ${beforeCount} 条 → 要写入 ${afterCount} 条）`);
     });
     if (blocked.length) {
-      console.error(`[Store] ⛔ ${key} 拒绝用空数据覆盖：${blocked.join('、')}，已保留本地数据`
-        + '（若确实要清空请传 allowEmpty: true）');
+      const message = `已阻止用空数据覆盖 ${key}：${blocked.join('、')}。`
+        + '若确实要清空，请在界面上点「清空数据」并传 force: true';
+      console.error(`[Store] ⛔ ${message}`);
+      throw new Error(`[Store] ${message}`);
     }
+    // 其它数组（heats 等）：缺失 / 写空时保留本地已有数据，只合并不报错
+    MEET_ARRAY_FIELDS.filter(field => !MEET_CRITICAL_FIELDS.includes(field)).forEach(field => {
+      const before = current[field];
+      const after = next[field];
+      if (!Array.isArray(before) || before.length === 0) return;
+      if (Array.isArray(after) && after.length > 0) return;
+      merged[field] = before;
+    });
     return merged;
   },
 
   _isMeetKey(key) {
     return MEET_DATA_KEYS.includes(key) && key !== 'sportsMeetTitle';
+  },
+
+  /** 主数据键：报名条数就是它的全部家当，判断"有没有数据"只看 athletes / registrations */
+  _isCountableMeetKey(key) {
+    return key === MEET_MAIN_KEY;
+  },
+
+  /**
+   * 某个键到底"有没有内容"：
+   * 主数据看报名条数（跟刷新丢数据这条战线的口径完全一致），
+   * 项目库这类数组看长度，模板配置这类对象看字段数。
+   */
+  _hasContent(key, value) {
+    if (this._isCountableMeetKey(key)) return this._countOf(value) > 0;
+    if (Array.isArray(value)) return value.length > 0;
+    if (this._isPlainObject(value)) return Object.keys(value).length > 0;
+    return Boolean(value) && String(value).trim() !== '';
+  },
+
+  /* ---------------- 「本地时光机」备份 ----------------
+   * 每次成功保存非空数据，额外存一份（带时间戳）。
+   * ⚠️ 按存储键【分槽】落盘（pe_sports_meet_backup_v1::<key>）：
+   *    以前所有运动会键共用一个槽，谁最后写谁说话 —— 一旦别的功能键覆盖了这一份，
+   *    报名数据唯一的备份就没了，刷新后只能显示空页面。
+   *    裸键 pe_sports_meet_backup_v1 仍然写着主数据那一份，兼容老版本写过的备份。
+   * 页面加载 / 读取时只要主数据为空 → 无条件从备份恢复。
+   * 用户在界面上明确清空（force / allowEmpty）→ 连备份一起删掉，免得"清空后又自己长回来"。
+   */
+  _backupKeyOf(key) {
+    return `${MEET_BACKUP_KEY}::${key}`;
+  },
+
+  _updateBackup(key, value, options = {}) {
+    if (this._hasContent(key, value)) {
+      const payload = JSON.stringify({
+        savedAt: Date.now(), key, count: this._countOf(value), data: value,
+      });
+      try {
+        localStorage.setItem(this._backupKeyOf(key), payload);
+        if (this._isCountableMeetKey(key)) localStorage.setItem(MEET_BACKUP_KEY, payload);
+      } catch (error) {
+        console.warn('[Store] 写入本地备份失败', error);   // 备份失败不能影响主流程
+      }
+      return;
+    }
+    // 数据被清空：只有用户亲手操作（force / allowEmpty）才允许清掉备份
+    if (options.force === true || options.allowEmpty === true) {
+      try {
+        localStorage.removeItem(this._backupKeyOf(key));
+        if (this._isCountableMeetKey(key)) localStorage.removeItem(MEET_BACKUP_KEY);
+      } catch (error) { /* 忽略 */ }
+    }
+  },
+
+  /** 读某个键的备份槽：优先自己的分槽，退回老版本的裸备份（且必须是同一个键） */
+  _readBackupSlot(key) {
+    const parse = raw => {
+      if (!raw) return null;
+      try {
+        const slot = JSON.parse(raw);
+        if (!slot || typeof slot !== 'object') return null;
+        if (slot.key && slot.key !== key) return null;      // 这份备份属于别的键，不能用
+        return slot;
+      } catch (error) {
+        return null;
+      }
+    };
+    return parse(localStorage.getItem(this._backupKeyOf(key)))
+      || parse(localStorage.getItem(MEET_BACKUP_KEY));
+  },
+
+  /**
+   * 页面启动 / 读数据时：主数据为空而备份有数据 → 无条件恢复（返回是否真的恢复过）
+   * @param {{reason?:string, key?:string, dispatch?:boolean}} options
+   *        key 留空 = 把运动会相关的键全部过一遍（start() 用），
+   *        这样任何一个页面在初始化时，只要主数据丢了，百分百能拉起来。
+   */
+  _restoreFromBackup(options = {}) {
+    if (this._healing) return false;                              // 防重入（_pushBackToCloud 可能绕回来）
+    this._healing = true;
+    const restoredKeys = [];
+    try {
+      MEET_DATA_KEYS.filter(key => this._isMeetKey(key)).forEach(key => {
+        if (options.key && key !== options.key) return;
+        const slot = this._readBackupSlot(key);
+        if (!slot) return;
+        if (!this._hasContent(key, slot.data)) return;            // 备份本身就是空的，没得恢复
+        const current = this._readLocalValue(key);
+        if (this._hasContent(key, current)) {
+          // 本地盘上有内容、只是还没灌进缓存（比如 read() 早于 start()）：用盘上这份，绝不用旧备份顶
+          if (current !== undefined && !this.cache.has(key)) this.cache.set(key, current);
+          return;
+        }
+        this.cache.set(key, slot.data);
+        try { localStorage.setItem(key, JSON.stringify(slot.data)); } catch (error) { /* 忽略 */ }
+        console.warn(`[Store] ⏳ ${key} 为空，已从本地备份自动恢复 ${this._countOf(slot.data) || '若干'} 条数据`
+          + `（备份时间：${new Date(slot.savedAt || Date.now()).toLocaleString('zh-CN')}）`
+          + (options.reason ? `，触发点：${options.reason}` : ''));
+        // 备份反杀云端：主数据既然被清了，云端多半也是 0 条 → 恢复后立刻把数据推回云端
+        this._pushBackToCloud(key, slot.data);
+        restoredKeys.push(key);
+      });
+    } finally {
+      this._healing = false;
+    }
+    if (!restoredKeys.length) return false;
+    if (options.dispatch !== false) {
+      this._dispatchSync(restoredKeys, { restored: true, reason: options.reason || 'restoreFromBackup' });
+    }
+    return true;
+  },
+
+  /** 自愈入口：主数据空 → 拉备份（read / 云端空 / 兄弟页面清空 都会走这里） */
+  _healMeetDataFromBackup(key, reason) {
+    if (!this._isMeetKey(key)) return false;
+    if (this._hasContent(key, this._readLocalValue(key))) return false;
+    return this._restoreFromBackup({ key, reason: reason || '主数据为空自愈' });
   },
 
   _isPlainObject(value) {
@@ -668,18 +1018,23 @@ const Store = {
    *
    * 成功后派发 store:sync，强制通知其它模块（赛程编排等）立刻重取数据，不用等轮询。
    */
-  async writeCritical(key, value, { label = '', attempts = CRITICAL_WRITE_ATTEMPTS, allowEmpty = false } = {}) {
+  async writeCritical(key, value, {
+    label = '', attempts = CRITICAL_WRITE_ATTEMPTS, allowEmpty = false, force = false,
+  } = {}) {
     /* ⚠️ 时序铁律（用户可能 0.1 秒后按 F5，任何一步都不能排在 fetch 后面）：
      *   ① 先同步落 localStorage（write 内部完成）
      *   ② 再同步打锁并落盘
      *   ③ 最后才发网络请求
      * 反过来的话：请求发出后、锁还没写盘的那几毫秒里刷新，云端旧数据就会把新数据冲掉。 */
-    const saved = this.write(key, value, { push: false, allowEmpty });   // ① 本地立即生效（含合并防覆盖）
+    const saved = this.write(key, value, { push: false, allowEmpty, force });   // ① 本地立即生效（含防覆盖）
     const entry = this._pendingWrites.get(key);
+    // clear = 用户亲手要清空（写空就是目的）→ 允许把空数据推到云端；其它情况一律不许写空
+    const clearIntent = (allowEmpty === true || force === true) && !this._hasContent(key, saved);
     const lockEntry = {
       value: saved,          // 推的是合并后的最终值，和本地镜像 / 缓存完全一致
       at: entry?.at ?? Date.now(),
       critical: true,
+      clear: clearIntent,
       attempts: entry?.attempts || 0,
       label: label || entry?.label || '',
     };
@@ -695,7 +1050,7 @@ const Store = {
     }
 
     try {
-      await this._persistWithRetry(key, saved, attempts);   // ③ 到这里才发网络请求
+      await this._persistWithRetry(key, saved, attempts, { allowEmpty: clearIntent });   // ③ 到这里才发网络请求
       this._clearUnconfirmed(key);
       console.log(`[Store] ✅ ${key} 已写入云端并确认`);
       // 通知所有模块立刻重取（赛程编排不用等下次轮询就能看到新报名）
@@ -719,12 +1074,11 @@ const Store = {
   },
 
   /** 带重试的云端推送（503 = 服务端没配 Supabase，不必重试） */
-  async _persistWithRetry(key, value, attempts = 1) {
+  async _persistWithRetry(key, value, attempts = 1, options = {}) {
     let lastError = null;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       try {
-        await this._persist(key, value);
-        return true;
+        return await this._persist(key, value, options);
       } catch (error) {
         lastError = error;
         if (error?.status === 503) throw error;
@@ -743,7 +1097,11 @@ const Store = {
       const entry = this._pendingWrites.get(key);
       if (!entry) { this._criticalTimers.delete(key); return; }
       try {
-        await this._persist(key, entry.value);
+        const sent = await this._persist(key, entry.value, { allowEmpty: entry.clear === true });
+        if (sent === false) {               // 空数据：闸门已交出锁，别再无限续传
+          this._criticalTimers.delete(key);
+          return;
+        }
         this._clearUnconfirmed(key);
         this._criticalTimers.delete(key);
         console.log(`[Store] ✅ ${key} 已补传云端（重试第 ${step + 1} 次成功）`);
@@ -768,9 +1126,10 @@ const Store = {
     this._criticalTimers.set(key, setTimeout(runNext, CRITICAL_RETRY_DELAYS[0]));
   },
 
-  async _persistSafely(key, value) {
+  async _persistSafely(key, value, options = {}) {
     try {
-      await this._persist(key, value);
+      const sent = await this._persist(key, value, options);
+      if (sent === false) return;          // 空数据被闸门拦下（锁已在里面交出），无需重试
       this._clearUnconfirmed(key);
     } catch (error) {
       // 服务端没配 Supabase：安静地退回纯本地模式，不打扰用户
@@ -799,12 +1158,13 @@ const Store = {
    *    如果它是"整体覆盖一个锁文件"，就会用自己【空的】队列把 A 刚写的锁抹掉
    *    → 用户一刷新，云端旧数据长驱直入。按 key 存，谁写的锁谁才能删。
    */
-  _markUnconfirmed(key, value) {
+  _markUnconfirmed(key, value, options = {}) {
     const prev = this._pendingWrites.get(key);
     const entry = {
       value,
       at: prev?.at ?? Date.now(),
       critical: Boolean(prev?.critical),
+      clear: options.clear !== undefined ? Boolean(options.clear) : Boolean(prev?.clear),
       attempts: prev?.attempts || 0,
       label: prev?.label || '',
     };
@@ -818,6 +1178,8 @@ const Store = {
       localStorage.setItem(this._lockKeyOf(key), JSON.stringify({
         at: entry.at,
         critical: Boolean(entry.critical),
+        // clear = 这次写入就是"用户在界面上清空"，刷新后续传时同样允许写空到云端
+        clear: Boolean(entry.clear),
         attempts: entry.attempts || 0,
         label: entry.label || '',
       }));
@@ -861,11 +1223,21 @@ const Store = {
         info = {};
       }
       const value = this._readLocalValue(key);
-      if (value === undefined || value === null) return;   // 本地都没这份数据，没什么可保护的
+      if (value === undefined || value === null) {
+        try { localStorage.removeItem(lockKey); } catch (error) { /* 忽略 */ }
+        return;   // 本地都没这份数据，没什么可保护的
+      }
+      /* ⚠️ 运动会数据本身是空的就不要上锁：锁会让它之后的每次云端同步都跳过这个键，
+         连"云端 0 条 → 从备份恢复"这条自愈路径都进不去 —— 这正是报名页读不出备份的成因之一。 */
+      if (this._isMeetKey(key) && !this._hasContent(key, value)) {
+        try { localStorage.removeItem(lockKey); } catch (error) { /* 忽略 */ }
+        return;
+      }
       this._pendingWrites.set(key, {
         value,
         at: info?.at || Date.now(),
         critical: Boolean(info?.critical),
+        clear: Boolean(info?.clear),
         attempts: info?.attempts || 0,
         label: info?.label || '',
       });
@@ -886,14 +1258,17 @@ const Store = {
         if (!lockKey || !lockKey.startsWith(UNCONFIRMED_LOCK_PREFIX)) continue;
         const key = lockKey.slice(UNCONFIRMED_LOCK_PREFIX.length);
         if (this._pendingWrites.has(key)) continue;         // 本实例已知道，不重复
-        const value = this._readLocalValue(key);
-        if (value === undefined || value === null) continue;
         let info = {};
         try { info = JSON.parse(localStorage.getItem(lockKey) || '{}'); } catch (error) { info = {}; }
+        const value = this._readLocalValue(key);
+        if (value === undefined || value === null) continue;
+        // 同上：运动会数据为空时不上锁，别让空数据的锁挡住自愈通道
+        if (this._isMeetKey(key) && !this._hasContent(key, value) && info?.clear !== true) continue;
         this._pendingWrites.set(key, {
           value,
           at: info?.at || Date.now(),
           critical: Boolean(info?.critical),
+          clear: Boolean(info?.clear),
           attempts: info?.attempts || 0,
           label: info?.label || '',
         });
@@ -915,13 +1290,62 @@ const Store = {
     }
   },
 
-  async _persist(key, value) {
+  /** 把 localStorage 镜像灌进缓存（缓存里还没有这个键时才用） */
+  _hydrateFromLocal(key) {
+    if (this.cache.has(key)) return;
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw === null) return;
+      this.cache.set(key, JSON.parse(raw));
+    } catch (error) {
+      /* JSON 坏了就当没有，交给备份自愈 */
+    }
+  },
+
+  /**
+   * 🚨 排障看门狗：只要主数据（pe_sports_meet_v1）从"有"变成"0 条"，立刻打印调用栈。
+   * 这条战线最难受的地方是"刷新一下就没了"却永远抓不到凶手 —— 装了它之后，
+   * 控制台会把凶手所在的文件和行号（store.js / schedule.js / results.js …）直接打出来。
+   */
+  _traceEmptyWrite(key, before, after, phase) {
+    if (!this._isCountableMeetKey(key)) return;
+    const beforeCount = this._countOf(before);
+    const afterCount = this._countOf(after);
+    if (beforeCount === 0 || afterCount > 0) return;
+    console.error(
+      `[Store] 🚨🚨 ${phase} 把 ${key} 从 ${beforeCount} 条写成了 ${afterCount} 条！`
+      + '（这就是"刷新后数据没了"的直接凶手，下面这行调用栈就是它）\n'
+      + String(new Error('empty-write-trace').stack || '').split('\n').slice(1, 8).join('\n'),
+    );
+  },
+
+  /**
+   * 推送到云端的唯一出口。
+   * ⛔ 云端之所以会被洗成 0 条，绝大多数是"某个页面内存里恰好是空快照，又把它整体写回去了"。
+   *    所以这里设一道闸门：本机这份运动会数据是空的，一律不许推，也不许反复重试。
+   *    唯一例外 options.allowEmpty —— 用户在界面上亲手点的清空 / 删除（writeCritical force）。
+   */
+  async _persist(key, value, options = {}) {
+    // ⏸ 暂停期间不往云端推任何东西（强行恢复后想推，请先 window.resumeCloud()）
+    if (this._cloudPaused) return false;
+    if (this._isMeetKey(key) && !this._hasContent(key, value) && options.allowEmpty !== true) {
+      const pending = this._pendingWrites.get(key);
+      if (!pending || pending.clear !== true) {
+        console.warn(`[Store] ⛔ 本机 ${key} 是空的，已拦下这次云端推送`
+          + '（要在云端清空请走界面上的「清空数据」，否则一次误写就会把云端 216 条洗成 0 条）');
+        this._clearUnconfirmed(key);      // 连同已放飞的重试一起作废，别让它无限续传
+        const timer = this._criticalTimers.get(key);
+        if (timer) { clearTimeout(timer); this._criticalTimers.delete(key); }
+      }
+      return false;
+    }
     // 写入同样带超时：网络挂起时不会一直 pending，失败会进入待写队列
     await this._fetchJSON('/api/data', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ key, value }),
     });
+    return true;
   },
 
   /**
@@ -932,7 +1356,8 @@ const Store = {
     if (!this._pendingWrites.size) return;
     for (const [key, entry] of [...this._pendingWrites]) {
       try {
-        await this._persist(key, entry.value);
+        const sent = await this._persist(key, entry.value, { allowEmpty: entry.clear === true });
+        if (sent === false) continue;      // 空数据被拦下，锁已在闸门里交出
         this._clearUnconfirmed(key);
         console.log(`[Store] 已补推 ${key} 到云端`);
       } catch (error) {
@@ -955,6 +1380,23 @@ const Store = {
    */
   async purgeMeetData() {
     const clearedKeys = [];
+    // 世代号 +1：作废所有还在飞的同步结果，免得清空完又被旧数据复活
+    this._purgeEpoch += 1;
+    this._purgeEpochSeen = this._purgeEpoch;
+    const purgeSignal = JSON.stringify({ epoch: this._purgeEpoch, at: Date.now() });
+    /* 世代号同时落到 localStorage：这是给兄弟 iframe 看的"明确的清空指令"。
+       没有它，兄弟页面会把这次清空当成"对方还在初始化、手上正好是空快照"，
+       按防污染规则无视掉 —— 用户眼里就是"点了清空，隔壁 Tab 数据还在"。 */
+    try { localStorage.setItem(MEET_PURGE_EPOCH_KEY, purgeSignal); } catch (error) { /* 忽略 */ }
+    /* 时光机备份（含按存储键分槽的每一份）一起删，否则"一键清空"之后数据又从备份里长回来 */
+    try {
+      const backupKeys = [];
+      for (let i = 0; i < localStorage.length; i += 1) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith(MEET_BACKUP_KEY)) backupKeys.push(key);
+      }
+      backupKeys.forEach(key => localStorage.removeItem(key));
+    } catch (error) { /* 忽略 */ }
     MEET_DATA_KEYS.forEach(key => {
       try {
         localStorage.removeItem(key);
@@ -966,14 +1408,17 @@ const Store = {
     });
     // 兜底：历史遗留的同前缀键也一并清掉
     try {
-      for (let i = 0; i < localStorage.length; i++) {
+      /* ⚠️ 先快照键名再删：边遍历 localStorage.length 边 removeItem 会让索引错位、
+         漏删一半（时光机备份就是这么"清空了又活过来"的）。 */
+      const staleKeys = [];
+      for (let i = 0; i < localStorage.length; i += 1) {
         const key = localStorage.key(i);
-        if (!key) continue;
-        if (/^pe_sports_meet|^pe_meet_template|^sportsMeet/i.test(key)) {
-          localStorage.removeItem(key);
-          if (!clearedKeys.includes(key)) clearedKeys.push(key);
-        }
+        if (key && /^pe_sports_meet|^pe_meet_template|^sportsMeet/i.test(key)) staleKeys.push(key);
       }
+      staleKeys.forEach(key => {
+        localStorage.removeItem(key);
+        if (!clearedKeys.includes(key)) clearedKeys.push(key);
+      });
     } catch (error) {
       console.warn('[Store] 枚举本地键失败', error);
     }
@@ -1001,7 +1446,7 @@ const Store = {
         console.warn('[Store] 服务端不支持 purge，退化为逐键清空', purgeError);
         for (const key of MEET_DATA_KEYS) {
           try {
-            await this._persist(key, null);
+            await this._persist(key, null, { allowEmpty: true });
             cloud.push({ key, status: 'ok', fallback: true });
           } catch (singleError) {
             error = singleError?.message || String(singleError);
@@ -1150,6 +1595,171 @@ const Store = {
     return keys.length;
   },
 
+  /* ---------------- 排障 / 强行恢复（控制台入口） ---------------- */
+
+  /** 删掉盘上所有「未确认」保护锁（暂停云端时用，免得残留的锁挡住恢复后的写入） */
+  _clearLocksFromStorage() {
+    let removed = 0;
+    try {
+      const lockKeys = [];
+      for (let i = 0; i < localStorage.length; i += 1) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith(UNCONFIRMED_LOCK_PREFIX)) lockKeys.push(key);
+      }
+      lockKeys.forEach(key => { localStorage.removeItem(key); removed += 1; });
+    } catch (error) { /* 忽略 */ }
+    return removed;
+  },
+
+  /**
+   * ⏸ 暂停一切云端同步（控制台：window.pauseCloud()）
+   * 停掉重连定时器 / 续传定时器、清空待写队列与盘上的锁；此后 sync() 与 _applyCloud() 空转，
+   * 云端那份 0 条再也碰不到本地。本地读写照常工作。
+   */
+  pauseCloud(reason = 'manual') {
+    this._cloudPaused = true;
+    if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
+    this._criticalTimers.forEach(timer => clearTimeout(timer));
+    this._criticalTimers.clear();
+    this._pendingWrites.clear();
+    const locks = this._clearLocksFromStorage();
+    console.warn(`[Store] ⏸ 已暂停全部云端同步（原因：${reason}，清掉 ${locks} 个保护锁）。`
+      + '恢复用 window.resumeCloud()');
+    return { ok: true, paused: true, clearedLocks: locks };
+  },
+
+  /** ▶ 恢复云端同步（可选立刻同步一次） */
+  resumeCloud({ syncNow = false } = {}) {
+    this._cloudPaused = false;
+    console.log('[Store] ▶ 云端同步已恢复');
+    if (syncNow) return this.sync();
+    return { ok: true, paused: false };
+  },
+
+  /** 遍历顶层窗口 + 所有同源 iframe 的 window（跨域的直接跳过） */
+  _forEachDocumentWindow(callback) {
+    const seen = new Set();
+    const visit = win => {
+      if (!win || seen.has(win)) return;
+      seen.add(win);
+      try { callback(win); } catch (error) { /* 跨域忽略 */ }
+      let frames = null;
+      try { frames = win.frames; } catch (error) { return; }
+      if (!frames) return;
+      for (let i = 0; i < frames.length; i += 1) {
+        let frame = null;
+        try { frame = frames[i]; } catch (error) { frame = null; }
+        if (frame) visit(frame);
+      }
+    };
+    if (typeof window === 'undefined') return;
+    visit(window);
+    try { if (window.parent && window.parent !== window) visit(window.parent); } catch (error) { /* 忽略 */ }
+    try { if (window.top && window.top !== window) visit(window.top); } catch (error) { /* 忽略 */ }
+  },
+
+  /**
+   * 🚨 终极强行恢复（控制台：window.forceRecover()）
+   * ① 先暂停所有云端同步 —— 云端那份 0 条再也碰不到本地；
+   * ② 强行把「时光机备份」写进主键（内存缓存 + localStorage 一起写）；
+   * ③ 立刻在【本窗口 + 每一个 iframe + 父/顶层窗口】派发 store:sync，
+   *    让所有页面当场重绘（报名页 / 赛程页 / 成绩页 一起）。
+   *
+   * @param {{keys?:string[], pushCloud?:boolean, broadcast?:boolean}} options
+   *        pushCloud=true  恢复后立刻把这份数据反推回云端（默认 false：先保住本地，云端单独修）
+   *        broadcast=true  把恢复动作广播到每一个同源 iframe（默认 true）
+   * @returns {{ok:boolean, restored:Array<{key:string,count:number,savedAt:number}>, missing:string[]}}
+   */
+  forceRecover(options = {}) {
+    const keys = options.keys || MEET_DATA_KEYS.filter(key => this._isMeetKey(key));
+    if (options.pauseCloud !== false) this.pauseCloud('forceRecover');
+    const restored = [];
+    const missing = [];
+    keys.forEach(key => {
+      const slot = this._readBackupSlot(key);
+      if (!slot || !this._hasContent(key, slot.data)) { missing.push(key); return; }
+      const data = slot.data;
+      this.cache.set(key, data);
+      this._localWrites.add(key);
+      try { localStorage.setItem(key, JSON.stringify(data)); } catch (error) {
+        console.warn(`[Store] 恢复 ${key} 写盘失败`, error);
+      }
+      // 顺手刷新备份，保证时光机里存的就是刚恢复出来的这份
+      this._updateBackup(key, data, {});
+      restored.push({ key, count: this._countOf(data), savedAt: slot.savedAt || 0 });
+    });
+
+    const detail = { restored, missing, at: Date.now(), reason: 'forceRecover' };
+    const changed = restored.map(item => item.key);
+    // 本窗口（父 / 顶层由 _dispatchSync 顺带转发）
+    this._dispatchSync(changed, { restored: true, forced: true, reason: 'forceRecover' });
+
+    if (options.broadcast !== false) {
+      /* iframe 之间是隔离的：往 parent / top 派发，兄弟 iframe 一个也收不到。
+         所以这里逐个 iframe 上门：让它们各自恢复缓存，并在各自窗口里派发事件触发重绘。 */
+      this._forEachDocumentWindow(win => {
+        if (win === window) return;
+        try {
+          if (win.Store && typeof win.Store.forceRecover === 'function') {
+            win.Store.forceRecover({ keys, broadcast: false, pauseCloud: options.pauseCloud !== false });
+          }
+          const Ctor = typeof win.CustomEvent === 'function' ? win.CustomEvent : CustomEvent;
+          win.dispatchEvent(new Ctor('store:sync', {
+            detail: { mode: this.mode, changed, at: Date.now(), restored: true, forced: true, reason: 'forceRecover' },
+          }));
+          win.dispatchEvent(new Ctor('store:recovered', { detail }));
+        } catch (error) { /* 跨域忽略 */ }
+      });
+    }
+    try {
+      window.dispatchEvent(new CustomEvent('store:recovered', { detail }));
+    } catch (error) { /* 忽略 */ }
+
+    if (options.pushCloud && restored.length) {
+      this.resumeCloud();
+      restored.forEach(item => this._pushBackToCloud(item.key, this.cache.get(item.key)));
+    }
+    const summary = restored.map(item => `${item.key}=${item.count}条`).join('、');
+    console.warn(`[Store] 🚨 forceRecover 完成：${summary || '没有任何备份可用'}`);
+    if (missing.length) console.warn(`[Store] ⚠ 这些键没有可用备份：${missing.join('、')}`);
+    return { ok: restored.length > 0, restored, missing };
+  },
+
+  /**
+   * 排障用：把「时光机备份」的家底全列出来（控制台：window.peekBackup()）
+   * 一眼看清备份里到底有没有那 216 条、是什么时候存的、主数据现在又是几条。
+   */
+  peekBackup() {
+    const rows = MEET_DATA_KEYS.filter(key => this._isMeetKey(key)).map(key => {
+      const slot = this._readBackupSlot(key);
+      const current = this._readLocalValue(key);
+      return {
+        key,
+        backupCount: slot ? this._countOf(slot.data) : 0,
+        backupSavedAt: slot?.savedAt ? new Date(slot.savedAt).toLocaleString('zh-CN') : '（无备份）',
+        currentCount: this._countOf(current),
+        hasContent: this._hasContent(key, current),
+      };
+    });
+    const raw = { rows, mainKey: MEET_MAIN_KEY, cloudPaused: this._cloudPaused };
+    console.table ? console.table(rows) : console.log(rows);
+    return raw;
+  },
+
+  /** 只把本地这份推回云端（forceRecover 之后单独修云端用：window.pushLocalToCloud()） */
+  pushLocalToCloud(keys = MEET_DATA_KEYS.filter(key => this._isMeetKey(key))) {
+    this.resumeCloud();
+    const pushed = [];
+    keys.forEach(key => {
+      const value = this._readLocalValue(key);
+      if (!this._hasContent(key, value)) return;      // 本地也是空的，绝不推（不污染云端）
+      this._pushBackToCloud(key, value);
+      pushed.push(key);
+    });
+    console.log(`[Store] 📤 已把本地数据推回云端：${pushed.join('、') || '（本地没有非空数据，未推送）'}`);
+    return { ok: pushed.length > 0, pushed };
+  },
+
   /** 迁移工具：把 localStorage 里的旧数据一次性写入云端 */
   async importFromLocalStorage(keys = STORE_KEYS) {
     const values = {};
@@ -1195,4 +1805,16 @@ if (typeof window !== 'undefined') {
   window.Store = Store;
   window.forceSyncCloud = () => Store.forceSyncCloud();
   window.getPendingWrites = () => Store.getPendingWrites();
+  /* 🚨 数据被洗成 0 条时的急救入口（每个 iframe 的控制台都能敲）：
+       forceRecover()        暂停云端 + 用时光机备份强行恢复主数据 + 所有页面立刻重绘
+       forceRecover({pushCloud: true})  恢复完顺便把这份数据推回云端，把云端 0 条修好
+       pauseCloud() / resumeCloud()     手动暂停 / 恢复云端同步
+       pushLocalToCloud()    只把本地这份推回云端
+       peekBackup()          看看时光机里到底存了多少条 */
+  window.storeBuild = STORE_BUILD;
+  window.forceRecover = options => Store.forceRecover(options || {});
+  window.pauseCloud = () => Store.pauseCloud('console');
+  window.resumeCloud = () => Store.resumeCloud();
+  window.pushLocalToCloud = () => Store.pushLocalToCloud();
+  window.peekBackup = () => Store.peekBackup();
 }

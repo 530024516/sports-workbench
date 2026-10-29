@@ -219,12 +219,21 @@ document.querySelectorAll('.sports-meet-tab').forEach((tab, index, tabs) => {
 });
 
 const requestedTab = window.location.hash.slice(1);
-if (requestedTab === 'unit-design') {
-  window.location.replace('unit-design.html');
-} else {
-  Store.onReady(() => {
-    // 云端标题就绪后再渲染，避免每次都回落到默认标题
-    renderSportsMeetTitle(loadSportsMeetTitle());
-    selectSportsMeetTab(sportsMeetTabs.some(tab => tab.id === requestedTab) ? requestedTab : 'registration', false);
-  });
-}
+/* ⚠️ 严禁自动跳转 / 自动切 Tab：用户点哪个 Tab 就停在哪个 Tab。
+ *
+ * 两个坑都在这里堵死：
+ * ① 原来有一段"hash 等于旧页签 unit-design 就整页跳走"的逻辑 —— 已删除。
+ * ② Store.onReady 的回调【每次 store:sync 都会再跑一遍】（Store 内部拿它当"数据变了要重绘"用）。
+ *    而子 iframe 加载完成后会做一次云端同步（Supabase 冷启动常常要 2~3 秒），
+ *    同步完派发的 store:sync 会冒泡到父页 → 父页又跑一次 onReady → 又调一次
+ *    selectSportsMeetTab(初始 Tab) —— 这就是"切到新 Tab，过 3 秒又被弹回上一个 Tab"。
+ *    所以下面用 sportsMeetBooted 锁死：Tab 只在首次就绪时选一次，之后无论数据怎么同步都不再动。
+ */
+let sportsMeetBooted = false;
+Store.onReady(() => {
+  // 云端标题就绪后再渲染，避免每次都回落到默认标题
+  renderSportsMeetTitle(loadSportsMeetTitle());
+  if (sportsMeetBooted) return;      // 已经选过了：后续任何同步都不许再切 Tab
+  sportsMeetBooted = true;
+  selectSportsMeetTab(sportsMeetTabs.some(tab => tab.id === requestedTab) ? requestedTab : 'registration', false);
+});

@@ -164,9 +164,9 @@ function loadMeetData() {
  */
 /**
  * @param {object} data
- * @param {{allowEmpty?: boolean}} options
- *        allowEmpty=true：用户明确要清空 / 删到一条不剩，才允许把报名数据写空
- *        （Store 默认会拒绝"用空数据覆盖已有数据"，防止误清空）
+ * @param {{force?: boolean}} options
+ *        force=true：用户在界面上亲手点了删除 / 清空，才允许把报名数据写空。
+ *        Store 默认会【抛异常终止写入】，任何后台同步 / 页面跳转带来的空数据都不准覆盖。
  */
 async function saveMeetData(data, options = {}) {
   pageData = data;
@@ -183,7 +183,7 @@ async function saveMeetData(data, options = {}) {
     }
     const result = await Store.writeCritical(STORAGE_KEY, data, {
       label: '运动会报名数据',
-      allowEmpty: options.allowEmpty === true,
+      force: options.force === true || options.allowEmpty === true,
     });
     renderPage();
     renderStorageAlert();
@@ -1275,7 +1275,7 @@ async function revokeClassRegistrations(className) {
     schedule: null,
     results: [],
   };
-  if (!(await saveMeetData(updatedData, { allowEmpty: true }))) return;   // 撤销班级：可能删空
+  if (!(await saveMeetData(updatedData, { force: true }))) return;   // 撤销班级：可能删空
   const closeButton = document.querySelector?.('.modal-close');
   if (closeButton && typeof closeModal === 'function') closeModal(closeButton);
   selectedAthleteIds.clear();
@@ -1468,7 +1468,7 @@ async function deleteSelectedAthletes() {
       .filter(heat => heat.entries.length > 0),
   };
 
-  if (!(await saveMeetData(updatedData, { allowEmpty: true }))) return;   // 删除选中：可能删空
+  if (!(await saveMeetData(updatedData, { force: true }))) return;   // 删除选中：可能删空
   selectedAthleteIds.clear();
   renderAthletes();
   showToast(`已删除 ${count} 条报名数据`);
@@ -1501,7 +1501,7 @@ async function confirmClearAllRegistrations() {
 
   const count = pageData.athletes.length;
   const updatedData = { ...emptyMeetData(), laneCount, schedule: null };
-  if (!(await saveMeetData(updatedData, { allowEmpty: true }))) return;   // 清空全部：就是要写空
+  if (!(await saveMeetData(updatedData, { force: true }))) return;   // 清空全部：就是要写空
   closeModal(document.querySelector('.modal-close'));
   selectedAthleteIds.clear();
   currentPage = 1;
@@ -1609,10 +1609,16 @@ function bindCrossModuleMeetSync() {
     const active = document.activeElement;
     return Boolean(active && ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName));
   };
-  const refresh = () => {
-    if (isBusy()) return;
+  const applyLatest = () => {
     const latest = Store.read(STORAGE_KEY, null);
     if (!latest || !Array.isArray(latest.athletes)) return;
+    /* ⛔ 反向清空防线：对方此刻读到的是空值（多半是它还在初始化），
+       而本页有报名数据 —— 绝不接受，否则等于让它把数据清掉。 */
+    if (!latest.athletes.length && !latest.registrations?.length
+      && (pageData?.athletes?.length || pageData?.registrations?.length)) {
+      console.warn('[报名管理] 忽略其它页面传来的空报名数据，保留本地现有数据');
+      return;
+    }
     pageData = {
       ...emptyMeetData(),
       ...latest,
@@ -1624,10 +1630,17 @@ function bindCrossModuleMeetSync() {
     renderPage();
     renderStorageAlert();
   };
+  const refresh = () => {
+    if (isBusy()) return;
+    applyLatest();
+  };
   window.addEventListener('store:sync', event => {
     if (event?.detail?.changed?.includes?.(STORAGE_KEY)) refresh();
   });
   window.addEventListener('storage', event => {
     if (event?.key === STORAGE_KEY) refresh();
   });
+  /* 🚨 控制台 window.forceRecover() 的强行恢复事件：无条件重取重画，
+     不走"输入中不打断"的判断 —— 老师要的是"敲完立刻看到 216 条"。 */
+  window.addEventListener('store:recovered', applyLatest);
 }
