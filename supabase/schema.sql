@@ -91,6 +91,22 @@ create table if not exists public.sports_meet (
   updated_at timestamptz not null default now()
 );
 
+-- 离线资源库：保存的大单元设计（一行 = 一个资源，用「具名列」而非 data(jsonb) 通用包装）
+-- modules_json 里放完整大单元数据：11 个模块 + 18 课时计划表 + 选题 meta
+create table if not exists public.offline_resources (
+  id text primary key,
+  category text not null default '',
+  level text not null default '',
+  content text not null default '',
+  modules_json jsonb not null default '{}'::jsonb,
+  ord integer not null default 0,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists offline_resources_created_idx
+  on public.offline_resources (created_at desc);
+
 -- 应用设置：单双周模式、工作台显示设置、运动会标题等（一行一个键）
 create table if not exists public.app_settings (
   id text primary key,
@@ -116,6 +132,7 @@ alter table public.course_schedule enable row level security;
 alter table public.todos enable row level security;
 alter table public.fitness_logs enable row level security;
 alter table public.unit_designs enable row level security;
+alter table public.offline_resources enable row level security;
 alter table public.sports_meet enable row level security;
 alter table public.app_settings enable row level security;
 
@@ -125,7 +142,7 @@ declare
 begin
   foreach t in array array[
     'students','fitness_records','attendance','lesson_plans','resources','courses',
-    'course_schedule','todos','fitness_logs','unit_designs','sports_meet','app_settings'
+    'course_schedule','todos','fitness_logs','unit_designs','offline_resources','sports_meet','app_settings'
   ]
   loop
     execute format('drop policy if exists "anon_full_access" on public.%I', t);

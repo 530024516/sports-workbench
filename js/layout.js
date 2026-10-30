@@ -21,6 +21,7 @@ const Layout = {
         { id: 'fitness', label: '体测数据', icon: '💪', href: 'fitness.html' },
         { id: 'lessons', label: '教案与资源', icon: '📋', href: 'lessons.html' },
         { id: 'unit-design', label: '大单元设计', icon: '🧩', href: 'unit-design.html' },
+        { id: 'offline-resources', label: '离线资源库', icon: '📦', href: 'offline-resources.html' },
       ],
     },
     {

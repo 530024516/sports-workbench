@@ -41,6 +41,8 @@ const STORE_KEYS = [
   'pe_fitness_weekly_log_v1',
   'pe_schedule_v1',
   'pe_big_unit_design_v1',
+  // 离线资源库：本地优先读写，联网时同步到 Supabase offline_resources 表
+  'pe_offline_resources_v1',
   'pe_sports_meet_v1',
   'pe_sports_meet_events_v1',
   'pe_meet_template_config_v1',

@@ -7,7 +7,10 @@
   "scripts": {
     "dev": "node server.js",
     "start": "node server.js",
-    "test": "node tests/store-smoke.mjs"
+    "test": "node tests/store-smoke.mjs && node tests/unit-design-smoke.mjs && node tests/offline-resources-smoke.mjs",
+    "test:store": "node tests/store-smoke.mjs",
+    "test:unit": "node tests/unit-design-smoke.mjs",
+    "test:resources": "node tests/offline-resources-smoke.mjs"
   },
   "engines": {
     "node": ">=18"
