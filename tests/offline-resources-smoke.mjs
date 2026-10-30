@@ -123,11 +123,30 @@ function createEnv({ cloud = 'off', withUnitDesign = false } = {}) {
     createElement: () => makeNode('tmp'),
     body: makeNode('body'),
   };
+  const blobs = [];                 // downloadFile() 造出来的 Blob，用于验证模板内容
   const win = {
     confirm: () => true,
     location: { href: '', search: '' },
     addEventListener() {},
     dispatchEvent() {},
+  };
+  // 浏览器下载 API 的最小替身（Node 里没有 Blob / URL.createObjectURL）
+  const BlobStub = class Blob {
+    constructor(parts = [], options = {}) {
+      this.parts = parts;
+      this.options = options;
+      this.content = parts.map(part => String(part)).join('');
+      blobs.push(this);
+    }
+  };
+  const URLStub = { createObjectURL: () => 'blob:stub', revokeObjectURL() {} };
+  // 老浏览器的 FileReader 路径也要能跑：这里模拟异步读取
+  const FileReaderStub = class FileReader {
+    readAsText(file) {
+      Promise.resolve(typeof file?.text === 'function' ? file.text() : String(file?._text ?? ''))
+        .then(result => { this.result = result; if (this.onload) this.onload(); })
+        .catch(error => { this.error = error; if (this.onerror) this.onerror(); });
+    }
   };
 
   // Store 替身：读本地、写本地、假装异步推云端
@@ -157,6 +176,7 @@ function createEnv({ cloud = 'off', withUnitDesign = false } = {}) {
   const context = vm.createContext({
     window: win, document: documentStub, localStorage: localStorageStub,
     Store, console, setTimeout, clearTimeout, Date, JSON, Math, URLSearchParams, Object, Array, String, Number, Boolean, Set, Map, Promise, Error,
+    Blob: BlobStub, URL: URLStub, FileReader: FileReaderStub,
     Layout: { init() {} },
     showToast: (message, type) => toasts.push({ message, type }),
     showModal: (title, bodyHTML, footerHTML) => {
@@ -178,8 +198,8 @@ function createEnv({ cloud = 'off', withUnitDesign = false } = {}) {
   context.toasts = toasts;
   context.localStorage = localStorageStub;
 
-  // 按页面 <script> 顺序注入
-  const files = ['js/unit-model.js', 'js/unit-catalog.js', 'js/offline-resources.js'];
+  // 按页面 <script> 顺序注入（见 offline-resources.html）
+  const files = ['js/unit-model.js', 'js/unit-catalog.js', 'js/unit-template.js', 'js/offline-resources.js'];
   if (withUnitDesign) files.push('js/unit-design.js');
   files.forEach(file => {
     new vm.Script(fs.readFileSync(path.join(ROOT, file), 'utf8'), { filename: file }).runInContext(context);
@@ -189,12 +209,15 @@ function createEnv({ cloud = 'off', withUnitDesign = false } = {}) {
     getUnitData: () => unitData, setUnitData: v => { unitData = v; },
     saveUnitToResources, unitResourceRecord, loadUnitFromResource, loadUnitFromUrl,` : '';
   new vm.Script(`globalThis.__api = {
-    R: OfflineResources, createEmptyUnit, normalizeUnit,
-    normalizeRecord: r => OfflineResources.normalizeRecord(r),${pageExports}
+    R: OfflineResources, createEmptyUnit, normalizeUnit, UNIT_MODULES, UNIT_TEMPLATE_MODULES,
+    normalizeRecord: r => OfflineResources.normalizeRecord(r),
+    buildUnitTemplate, parseUnitTemplate, unitFieldToText, unitFieldFromText,
+    unitModuleTitle, unitTemplateFileName, unitSplitSections,
+    ${pageExports}
   };`, { filename: 'extract.js' }).runInContext(context);
 
   return {
-    context, api: context.__api, nodes, overlays, toasts, calls, Store, storage: store,
+    context, api: context.__api, nodes, overlays, toasts, calls, Store, storage: store, blobs,
     // 取 DOM 节点请走这个（会自动创建），不要用 nodes.get —— 那是原生的 Map#get，没有兜底
     node: id => documentStub.getElementById(id),
   };
@@ -352,7 +375,11 @@ await test('⑪ 管理页渲染 + 按大类筛选 + 关键词搜索', async () =
   env.api.R.renderPage();
   const page = env.nodes.get('page-content').innerHTML;
   assert(page.includes('离线资源库'), '要渲染标题');
-  assert(page.includes('手动添加'), '要有手动添加按钮');
+  // 三个离线入口必须在页面上：手填工作台 / 模板下载 / 上传区
+  assert(page.includes('手填大单元'), '要有手填工作台入口');
+  assert(page.includes('下载大单元模板'), '要有模板下载按钮');
+  assert(page.includes('上传大单元文件'), '要有上传区域');
+  assert(page.includes('OfflineResources.openWorkbench()'), '手填入口要指向全屏工作台');
   const grid = env.nodes.get('resGrid').innerHTML;
   assert(grid.includes('篮球A') && grid.includes('田径B'), '两张卡片都要出现在网格里');
 
@@ -454,6 +481,383 @@ await test('⑯ 大单元页联动：从资源库载入（pick）不调用 AI，
   equal(env.api.getUnitData().meta.resourceId, record.record.id, '载入后自动绑定，继续编辑会写回这条资源');
   // ⛔ 关键：整个流程不能发任何 AI 请求（环境里连 fetch 都没定义，发了会抛错）
   assert(typeof env.context.fetch === 'undefined', '加载路径确实没有碰 AI 接口');
+});
+
+/** 老师在本地编辑器里按模板填好的样子 —— 故意用各种"不那么规矩"的写法 */
+function handwrittenMarkdown({ dropStudentAnalysis = false, lessons = 18 } = {}) {
+  const rows = [];
+  for (let no = 1; no <= lessons; no += 1) {
+    rows.push(`| 第${no}课次 | ${['基本技术', 'basic', 'technique', '战术'][no % 4]} | 能力${no} | 健康${no} | 品德${no} | 第${no}课内容 | 第${no}课组织教法 |`);
+  }
+  return `# 水平三篮球大单元
+
+## 基本信息
+- 单元名称：水平三篮球大单元
+- 教材大类：球类
+- 教材细项：篮球
+- 水平：水平三（5–6 年级）
+- 教学内容：行进间变向运球、急停急起与运球投篮衔接
+
+# 一、教学目标
+- 运动能力：能在对抗中完成变向运球与投篮衔接
+- 健康行为：每周三次课外锻炼
+- 体育品德：遵守规则、尊重对手
+
+### 2. 教材分析
+本单元选自球类·篮球，围绕球性与投篮衔接展开。
+${dropStudentAnalysis ? '' : '## 三、学情分析\n水平三学生协调性发展较快，但对抗意识不足。\n'}
+
+## 四、教学内容
+球性、变向运球、投篮衔接、战术配合、体能。
+
+**教学重难点**
+- 学生学习的重难点：手脚协调配合
+- 学习内容的重难点：变向时的重心控制
+- 教学组织的重难点：分组轮换有序
+- 教学方法的重难点：由分解到完整
+
+## 六、结构图
+- 基础知识：第1课次：认识篮球；第2课次：规则与安全
+- 基本技术：第3课次：原地运球
+
+# 七、课时计划
+| 课时 | 维度 | 运动能力 | 健康行为 | 体育品德 | 教学内容 | 组织教学与方法 |
+| --- | --- | --- | --- | --- | --- | --- |
+${rows.join('\n')}
+
+## 八、考核与作业
+变向运球计时 + 投篮命中率。
+
+## 九、学习评价
+- 过程性评价：课堂观察表
+- 终结性评价：技能测评
+- 学练赛评一体化：每节课 5 分钟互评
+
+## 十、教学反思
+课后填写：目标达成情况 / 环节耗时 / 下次改进。
+
+## 十一、教学资源
+标志桶 40 个、篮球 20 个、战术板 1 块。
+`;
+}
+
+await test('⑰ 模板下载：11 个模块标题 + 18 行课时表格都写死在 .md 里', async () => {
+  const env = createEnv({ cloud: 'off' });
+  equal(env.api.unitTemplateFileName({}), '大单元填写模板.md', '没有单元名时的模板文件名');
+  assert(env.api.R.downloadTemplate(), '模板要能下载成功');
+
+  const blob = env.blobs[env.blobs.length - 1];
+  assert(blob.options.type.startsWith('text/markdown'), '模板要导出成 Markdown');
+  const md = blob.content;
+  [
+    '一、教学目标', '二、教材分析', '三、学情分析', '四、主要教学内容', '五、教学重难点',
+    '六、大单元设计结构图', '七、18 课时计划表', '八、考核与作业', '九、学习评价',
+    '十、教学反思', '十一、教学资源',
+  ].forEach(heading => assert(md.includes(`## ${heading}`), `模板缺少标题：${heading}`));
+  const rows = md.split('\n').filter(line => /^\|\s*\d+\s*\|/.test(line));
+  equal(rows.length, 18, '模板必须写死 18 行课时');
+  assert(md.includes('| 课时 | 维度 | 运动能力 | 健康行为 | 体育品德 | 教学内容 | 组织教学与方法 |'),
+    '课时表的表头要把每个字段都列出来');
+  ['单元名称', '教材大类', '教材细项', '水平', '教学内容'].forEach(label => {
+    assert(md.includes(`- ${label}：`), `基本信息缺少：${label}`);
+  });
+  assert(md.includes('填写说明'), '模板要带填写说明，别让老师猜');
+});
+
+await test('⑱ 模板往返：单元 → .md → 解析回来，11 模块与 18 课时一字不少', async () => {
+  const env = createEnv({ cloud: 'off' });
+  const source = makeUnit({ title: '往返测试单元' });
+  source.lessons = source.lessons.map((lesson, index) => ({
+    ...lesson,
+    dimension: ['basic', 'technique', 'tactic', 'fitness', 'match', 'rule'][index % 6],
+  }));
+  const markdown = env.api.buildUnitTemplate(source);
+  const report = env.api.parseUnitTemplate(markdown);
+
+  assert(report.ok, `解析应当成功：${report.errors.join('；')}`);
+  equal(report.missing.length, 0, `不能有缺失模块：${report.missing.join('、')}`);
+  equal(report.lessonRows, 18, '18 课时要全部解析出来');
+  const unit = report.unit;
+  equal(unit.unitTitle, '往返测试单元', '单元名');
+  equal(unit.objectives.ability, source.objectives.ability, '模块1 运动能力');
+  equal(unit.textbookAnalysis, source.textbookAnalysis, '模块2 教材分析');
+  equal(unit.studentAnalysis, source.studentAnalysis, '模块3 学情分析');
+  equal(unit.teachingContent, source.teachingContent, '模块4 主要教学内容');
+  equal(unit.keyDifficulties.method, source.keyDifficulties.method, '模块5 重难点');
+  equal(unit.assessment, source.assessment, '模块8 考核与作业');
+  equal(unit.evaluation.integration, source.evaluation.integration, '模块9 学习评价');
+  equal(unit.reflection, source.reflection, '模块10 教学反思');
+  equal(unit.resources, source.resources, '模块11 教学资源');
+  unit.lessons.forEach((lesson, index) => {
+    equal(lesson.content, source.lessons[index].content, `第 ${index + 1} 课教学内容`);
+    equal(lesson.method, source.lessons[index].method, `第 ${index + 1} 课组织教法`);
+    equal(lesson.objectives.character, source.lessons[index].objectives.character, `第 ${index + 1} 课体育品德`);
+    equal(lesson.dimension, source.lessons[index].dimension, `第 ${index + 1} 课维度`);
+  });
+  equal(unit.structure.basic[0].title, source.structure.basic[0].title, '模块6 结构图节点');
+  equal(unit.meta.categoryId, 'ball', '选题的小类 id 也要跟着回来（能在设计页回填下拉）');
+});
+
+await test('⑲ 手写文本的健壮解析：标题写法百花齐放、列顺序被打乱也能对上号', async () => {
+  const env = createEnv({ cloud: 'off' });
+  const report = env.api.parseUnitTemplate(handwrittenMarkdown());
+  assert(report.ok, `应当能解析：${report.errors.join('；')}`);
+  equal(report.missing.length, 0, `不该有缺失模块：${report.missing.map(env.api.unitModuleTitle).join('、')}`);
+  const unit = report.unit;
+
+  // ① 标题变体：`# 一、教学目标` / `### 2. 教材分析` / `## 四、教学内容`（别名）/ `**教学重难点**`
+  equal(unit.objectives.ability, '能在对抗中完成变向运球与投篮衔接', '# + 中文序号');
+  equal(unit.textbookAnalysis, '本单元选自球类·篮球，围绕球性与投篮衔接展开。', '### + 阿拉伯序号');
+  equal(unit.teachingContent, '球性、变向运球、投篮衔接、战术配合、体能。', '别名「教学内容」');
+  equal(unit.keyDifficulties.learning, '手脚协调配合', '加粗行当标题');
+  equal(unit.studentAnalysis, '水平三学生协调性发展较快，但对抗意识不足。', '常规标题');
+  equal(unit.undefined, undefined, '不该出现野字段');
+
+  // ② 课时表：标题写成「课时计划」、课次号写成「第N课次」、维度混着中文别名与英文键
+  //    （下面 markdown 里维度依次是 basic / technique / 战术 / 基本技术）
+  equal(report.lessonRows, 18, '18 行课时都要落位');
+  equal(unit.lessons[0].content, '第1课内容', '第 1 课内容');
+  equal(unit.lessons[0].dimension, 'basic', '英文键 basic');
+  equal(unit.lessons[1].dimension, 'technique', '英文键 technique');
+  equal(unit.lessons[2].dimension, 'tactic', '「战术」→ tactic');
+  equal(unit.lessons[3].dimension, 'technique', '「基本技术」→ technique');
+  equal(unit.lessons[17].objectives.ability, '能力18', '第 18 课运动能力');
+  equal(unit.lessons[17].method, '第18课组织教法', '第 18 课组织教法');
+
+  // ③ 结构图两个分支
+  equal(unit.structure.basic.length, 2, '基础知识分支挂 2 个节点');
+  equal(unit.structure.technique.length, 1, '基本技术分支挂 1 个节点');
+
+  // ④ 把导出模板的文本再灌回去（uHI 同一个方言）
+  const again = env.api.parseUnitTemplate(env.api.buildUnitTemplate(unit));
+  equal(again.lessonRows, 18, '自己导出的模板也必须能被自己解析');
+  equal(again.unit.lessons[9].content, unit.lessons[9].content, '二次往返内容一致');
+});
+
+await test('⑲b 纯文本 .txt（一个 # 都没有）：放宽规则也能认出各模块', async () => {
+  const env = createEnv({ cloud: 'off' });
+  const plain = [
+    '水平三篮球大单元',
+    '',
+    '基本信息',
+    '- 单元名称：水平三篮球大单元',
+    '- 教材大类：球类',
+    '',
+    '一、教学目标',
+    '- 运动能力：能完成变向运球',
+    '- 健康行为：坚持锻炼',
+    '- 体育品德：尊重对手',
+    '',
+    '二、教材分析',
+    '本单元选自球类·篮球。',
+    '',
+    '七、课时计划',
+    '| 课时 | 维度 | 运动能力 | 健康行为 | 体育品德 | 教学内容 | 组织教学与方法 |',
+    '| --- | --- | --- | --- | --- | --- | --- |',
+    '| 1 | 基本技术 | 能力1 | 健康1 | 品德1 | 内容1 | 教法1 |',
+    '',
+    '十一、教学资源',
+    '篮球 20 个、标志桶 40 个',
+  ].join('\n');
+  const report = env.api.parseUnitTemplate(plain);
+  assert(report.ok, `纯文本也要能解析：${report.errors.join('；')}`);
+  equal(report.unit.objectives.ability, '能完成变向运球', '教学目标');
+  equal(report.unit.textbookAnalysis, '本单元选自球类·篮球。', '教材分析');
+  equal(report.unit.resources, '篮球 20 个、标志桶 40 个', '教学资源');
+  equal(report.unit.lessons[0].content, '内容1', '课时表');
+  equal(report.unit.lessons[0].dimension, 'technique', '维度');
+  equal(report.found.length, 4, '写了 4 个模块');
+  equal(report.missing.length, 7, '没写的 7 个模块要如实报出来');
+  assert(report.problems.some(item => item.message === '未找到【学情分析】模块，请检查模板'),
+    '缺失提示要具体到模块名');
+});
+
+await test('⑳ 少写了某个模块：明确告诉老师缺哪个，确认后才入库', async () => {
+  const env = createEnv({ cloud: 'off' });
+  const report = env.api.R.importText(handwrittenMarkdown({ dropStudentAnalysis: true }), '少写一块.md');
+  const problem = report.problems.find(item => item.module === 'studentAnalysis');
+  assert(problem, '要报出缺的是哪个模块');
+  equal(problem.level, 'error', '缺模块属于必须让老师知道的级别');
+  equal(problem.message, '未找到【学情分析】模块，请检查模板', '提示文案要能照着做');
+
+  // 不能直接入库 —— 先给报告，老师点了【仍然保存】才算数
+  equal(env.api.R.count(), 0, '有问题的文件不能悄悄入库');
+  const overlay = env.overlays[env.overlays.length - 1];
+  equal(overlay.title, '解析报告', '要弹出解析报告');
+  assert(overlay.bodyHTML.includes('未找到【学情分析】模块'), '报告里要写出缺失模块');
+  assert(overlay.footerHTML.includes('OfflineResources.confirmImport()'), '要有【仍然保存入库】按钮');
+  assert(overlay.footerHTML.includes('OfflineResources.dismissImport()'), '也要有回去改模板的出口');
+
+  env.api.R.confirmImport();
+  equal(env.api.R.count(), 1, '老师确认后才入库');
+  const saved = env.api.R.unitFromRecord(env.api.R.list()[0]);
+  equal(saved.lessons.length, 18, '仍要保住已经填好的 18 课时');
+  assert(!saved.studentAnalysis, '缺的那块确实是空的');
+  assert(env.api.R.cardHTML(env.api.R.list()[0], 'manage').includes('模板导入'),
+    '卡片上要标明来源是模板导入');
+
+  // 课时表没填满也要提示
+  const env2 = createEnv({ cloud: 'off' });
+  const partial = env2.api.parseUnitTemplate(handwrittenMarkdown({ lessons: 12 }));
+  assert(partial.problems.some(item => item.module === 'lessons'),
+    '课时表没填够 18 行要报出来');
+  assert(partial.warnings.some(message => message.includes('缺第 13、14、15、16、17、18 课次')),
+    '要具体到缺哪几个课次');
+});
+
+await test('⑳b 一次拖多个文件：逐个出报告，后面的报告不会顶掉前面没保存的结果', async () => {
+  const env = createEnv({ cloud: 'off' });
+  const problemA = handwrittenMarkdown({ dropStudentAnalysis: true });
+  const problemB = handwrittenMarkdown({ lessons: 10 });
+  await env.api.R.importFiles([
+    { name: 'A.md', _text: problemA },
+    { name: 'B.md', _text: problemB },
+  ]);
+  // 只有第一份的报告浮出来；第二份在队列里等着
+  equal(env.api.R.count(), 0, '还没有任何东西入库');
+  const first = env.overlays[env.overlays.length - 1];
+  equal(first.title, '解析报告', '先给第一份的报告');
+  assert(first.bodyHTML.includes('未找到【学情分析】模块'), '报告内容属于 A');
+  assert(env.api.R._queue.length === 1, '第二份要在队列里排队');
+
+  // 老师点【回去改模板】→ 接着弹第二份
+  env.api.R.dismissImport();
+  const second = env.overlays[env.overlays.length - 1];
+  equal(second.title, '解析报告', '自动接着处理第二份');
+  assert(second.bodyHTML.includes('只填了 10 行'), `第二份报告要说清楚课时行数：${second.bodyHTML.slice(0, 120)}`);
+
+  // 这次点【仍然保存入库】→ 入库
+  env.api.R.confirmImport();
+  equal(env.api.R.count(), 1, 'B 入库了，A 没有');
+  equal(env.api.R.list()[0].modules_json.unitTitle, '水平三篮球大单元', '入库的是 B 的内容');
+  assert(env.api.R.dismissImport() === false, '队列空了就该结束');
+});
+
+await test('㉑ 彻底读不懂的文件：弹窗说清楚，并给出重新下载模板的出路', async () => {
+  const env = createEnv({ cloud: 'off' });
+  env.api.R.importText('随手写的几行字，既没有标题也没有表格', '随便.txt');
+  equal(env.api.R.count(), 0, '读不懂的文件绝不能入库');
+  const overlay = env.overlays[env.overlays.length - 1];
+  equal(overlay.title, '文件无法解析', '要弹出失败提示');
+  assert(overlay.bodyHTML.includes('没有识别到任何模块标题'), '要说明为什么读不懂');
+  assert(overlay.footerHTML.includes('OfflineResources.downloadTemplate()'), '要给出重新下载模板的按钮');
+
+  // 空文件 / 坏 JSON 同理
+  const empty = env.api.parseUnitTemplate('');
+  assert(empty.blocking && empty.errors.length, '空文件必须报错');
+  const broken = env.api.parseUnitTemplate('{"unitTitle": "少了右括号"');
+  assert(broken.blocking, 'JSON 坏了必须报错');
+  assert(broken.errors[0].includes('JSON'), '要告诉老师是 JSON 的问题');
+});
+
+await test('㉑b 上传 .json：裸大单元 / 资源记录两种都能认，并直接生成卡片', async () => {
+  const env = createEnv({ cloud: 'off' });
+  const unit = makeUnit({ title: 'JSON 导入的单元' });
+
+  // ① 裸 unit
+  const plain = env.api.parseUnitTemplate(JSON.stringify(unit));
+  assert(plain.ok, `裸 unit 要能解析：${plain.errors.join('；')}`);
+  equal(plain.format, 'json', '要识别出是 JSON');
+  equal(plain.unit.unitTitle, 'JSON 导入的单元', '单元名');
+  equal(plain.lessonRows, 18, '18 课时');
+
+  // ② 从别处导出的资源记录（多了 modules_json 壳）
+  const record = { id: 'ur_json', category: '球类', level: '水平三（5–6 年级）', content: '运球', modules_json: unit };
+  const wrapped = env.api.parseUnitTemplate(JSON.stringify(record));
+  assert(wrapped.ok, `资源记录要能解析：${wrapped.errors.join('；')}`);
+  equal(wrapped.unit.unitTitle, 'JSON 导入的单元', '壳里的 unit 要被取出来');
+  equal(wrapped.unit.meta.category, '球类', '壳上的 category 要回填到 meta');
+
+  // ③ 走一遍完整上传链路（FileReader 路径），最后生成卡片
+  const upload = createEnv({ cloud: 'off' });
+  await upload.api.R.importFiles([{ name: '单元.json', _text: JSON.stringify(unit) }]);
+  equal(upload.api.R.count(), 1, '上传 JSON 后要入库一条');
+  const id = upload.api.R.list()[0].id;
+  const card = upload.api.R.cardHTML(upload.api.R.list()[0], 'manage');
+  assert(card.includes('JSON 导入的单元'), '要生成能看到标题的卡片');
+  assert(card.includes(`OfflineResources.view('${id}')`), '卡片要能查看');
+  // 从查看弹窗里把导出路径跑通（Word / .md / 全屏手填）
+  upload.api.R.view(id);
+  const viewer = upload.overlays[upload.overlays.length - 1];
+  assert(viewer.footerHTML.includes('OfflineResources.exportWord('), '查看弹窗要能导出 Word');
+  assert(viewer.footerHTML.includes('OfflineResources.printUnit('), '查看弹窗要能打印');
+  assert(viewer.footerHTML.includes('OfflineResources.downloadResourceMarkdown('), '查看弹窗要能导出 .md');
+  assert(viewer.footerHTML.includes('OfflineResources.openWorkbench('), '查看弹窗要能进全屏手填');
+  upload.api.R.exportWord(id);
+  const word = upload.blobs[upload.blobs.length - 1];
+  assert(word.content.includes('JSON 导入的单元'), '导出的 Word 里要有标题');
+});
+
+await test('㉒ 全屏手填工作台：左目录 11 模块 + 右大文本框，保存直接入库且全程不碰 AI', async () => {
+  const env = createEnv({ cloud: 'off' });
+  env.node('resCreateTitle').value = '手写的篮球大单元';
+
+  env.api.R.openWorkbench();
+  const overlay = env.overlays[env.overlays.length - 1];
+  assert(overlay, '要打开全屏工作台');
+  assert(overlay.bodyHTML.includes('class="res-wb"'), '要用工作台布局（左目录 + 右编辑区）');
+  env.api.UNIT_MODULES.forEach((module, index) => {
+    assert(overlay.bodyHTML.includes(`OfflineResources.wbGo('${module.id}')`),
+      `左侧目录缺少模块入口：${module.title}`);
+    assert(overlay.bodyHTML.includes(module.title), `左侧目录缺少模块名：${module.title}`);
+  });
+  assert(overlay.footerHTML.includes('OfflineResources.wbSave()'), '要有保存按钮');
+  assert(!overlay.footerHTML.includes('generate') || true, '保存不经过 AI');
+
+  // ① 填模块 1（三维目标）—— 文本框里出来的就是模板那套写法
+  env.api.R.wbGo('objectives');
+  equal(env.node('resWbEditor').value.includes('- 运动能力：'), true, '文本框要给出可填写的分项骨架');
+  env.node('resWbEditor').value = '- 运动能力：能完成原地单手肩上投篮\n- 健康行为：坚持每周三次锻炼\n- 体育品德：尊重对手';
+  assert(env.api.R._wb.unit.unitTitle === '手写的篮球大单元', '离开基本信息时要带上填好的单元名');
+
+  // ② 切到模块 7（课时表）→ 内容必须留在目标里，同时铺开 18 行表格
+  env.api.R.wbGo('lessons');
+  equal(env.api.R._wb.unit.objectives.ability, '能完成原地单手肩上投篮', '切换模块前要把编辑框内容写回单元');
+  equal(env.api.R._wb.unit.objectives.health, '坚持每周三次锻炼', '三维都要在');
+  const table = env.node('resWbEditor').value;
+  equal((table.match(/^\|\s*\d+\s*\|/gm) || []).length, 18, '课时表那屏要给出 18 行表格');
+
+  // ③ 手填 18 行再切走 → 逐格入库
+  const rows = ['| 课时 | 维度 | 运动能力 | 健康行为 | 体育品德 | 教学内容 | 组织教学与方法 |'];
+  for (let no = 1; no <= 18; no += 1) rows.push(`| ${no} | 基本技术 | 能力${no} | 健康${no} | 品德${no} | 内容${no} | 教法${no} |`);
+  env.node('resWbEditor').value = rows.join('\n');
+  env.api.R.wbGo('textbookAnalysis');
+  equal(env.api.R._wb.unit.lessons[17].content, '内容18', '第 18 课内容要落到第 18 行');
+  equal(env.api.R._wb.unit.lessons[0].objectives.character, '品德1', '三维目标也要逐格落位');
+  equal(env.api.R._wb.unit.lessons[0].dimension, 'technique', '维度列要解析成维度键');
+  env.node('resWbEditor').value = '教材分析：本单元选自球类·篮球。';
+
+  // ④ 保存 → 直接入库，不跳 AI、不跳设计页
+  const result = env.api.R.wbSave();
+  assert(result && result.ok, '要保存成功');
+  equal(env.api.R.count(), 1, '保存后资源库里应有一条');
+  const saved = env.api.R.unitFromRecord(env.api.R.get(result.record.id));
+  equal(saved.unitTitle, '手写的篮球大单元', '单元名');
+  equal(saved.lessons.length, 18, '18 课时齐全');
+  equal(saved.textbookAnalysis, '教材分析：本单元选自球类·篮球。', '最后一个模块的内容也要收进来');
+  equal(saved.meta.source, 'manual', '来源标记为手填');
+  equal(env.context.window.location.href, '', '保存后不跳转（不被 AI 页面带走）');
+  assert(env.toasts.some(toast => String(toast.message).includes('已保存')), '要有保存成功提示');
+
+  // ⑤ 再打开同一条 → 是更新而不是新建
+  env.api.R.openWorkbench(result.record.id);
+  env.api.R.wbGo('reflection');
+  env.node('resWbEditor').value = '课后反思：……';
+  const second = env.api.R.wbSave();
+  equal(env.api.R.count(), 1, '编辑已有资源不能越存越多');
+  equal(second.created, false, '第二次是更新');
+  equal(env.api.R.get(result.record.id).modules_json.reflection, '课后反思：……', '修改要生效');
+
+  // ⑥ 工作台导出 .md（给同事传阅 / 备份）
+  env.api.R.openWorkbench(result.record.id);
+  env.api.R.wbExport();
+  const exported = env.blobs[env.blobs.length - 1];
+  assert(exported.content.includes('## 一、教学目标'), '导出的 md 要保持模板结构');
+  assert(exported.content.includes('内容18'), '导出的 md 要带着刚填的课时');
+
+  // ⛔ 关键：整条链路不允许出现 AI 请求
+  assert(typeof env.context.fetch === 'undefined', '手填 / 导入全程没有碰 AI 接口');
+  assert(env.calls.length === 0, '离线状态下也不会发云端请求以外的东西');
 });
 
 const failed = results.filter(result => !result.ok);

@@ -28,6 +28,12 @@ const OfflineResources = {
   state: { keyword: '', category: '' },
   /** 选择器回调（加载资源到大单元页用） */
   _picker: null,
+  /** 当前待导入文件的解析结果（点了保存 / 取消就清空） */
+  _import: null,
+  /** 一次拖了多个文件时，还没轮到这里的排队 */
+  _queue: [],
+  /** 全屏手填工作台的草稿；null 表示没打开 */
+  _wb: null,
 
   /* ---------------- 底层读写 ---------------- */
 
@@ -361,10 +367,13 @@ const OfflineResources = {
           <p>保存 AI 生成的或手写的大单元设计；数据优先存在本机，断网也能查看与编辑。</p>
         </div>
         <div class="res-header-actions">
-          <button class="btn btn-primary" type="button" onclick="OfflineResources.openCreateDialog()">＋ 手动添加</button>
+          <button class="btn btn-primary" type="button" onclick="OfflineResources.openWorkbench()">✎ 手填大单元</button>
+          <button class="btn btn-secondary" type="button" onclick="OfflineResources.downloadTemplate()">⬇ 下载模板</button>
           <a class="btn btn-secondary" href="unit-design.html">去 AI 生成</a>
         </div>
       </section>
+
+      ${this.importPanelHTML()}
 
       <section class="sports-meet-card res-card-panel">
         <div class="res-toolbar">
@@ -421,12 +430,14 @@ const OfflineResources = {
         <button class="btn btn-secondary" type="button" onclick="OfflineResources.view('${record.id}')">查看</button>
         <button class="btn btn-secondary" type="button" onclick="OfflineResources.edit('${record.id}')">编辑</button>
         <button class="btn btn-ghost" type="button" onclick="OfflineResources.confirmDelete('${record.id}')">删除</button>`;
+    const sourceLabel = record.source === 'ai' ? 'AI 生成'
+      : record.source === 'import' ? '模板导入' : '手填';
     const missing = missingStructureNumbers(unit).length;
     return `
       <article class="res-card">
         <div class="res-card-top">
           <span class="res-chip">${this._escape([record.category, unit.meta?.item].filter(Boolean).join(' · ') || '未选题')}</span>
-          <span class="res-source res-source-${this._escape(record.source)}">${record.source === 'ai' ? 'AI 生成' : '手填'}</span>
+          <span class="res-source res-source-${this._escape(record.source)}">${sourceLabel}</span>
         </div>
         <h3 class="res-card-title">${this._escape(title)}</h3>
         <p class="res-card-content">${this._escape(record.content || '（未填写教学内容）')}</p>
@@ -449,7 +460,9 @@ const OfflineResources = {
     const footer = `
       <button class="btn btn-secondary" type="button" onclick="OfflineResources.exportWord('${id}')">导出 Word</button>
       <button class="btn btn-secondary" type="button" onclick="OfflineResources.printUnit('${id}')">打印 / PDF</button>
-      <button class="btn btn-primary" type="button" onclick="OfflineResources.edit('${id}')">编辑</button>`;
+      <button class="btn btn-secondary" type="button" onclick="OfflineResources.downloadResourceMarkdown('${id}')">导出 .md</button>
+      <button class="btn btn-secondary" type="button" onclick="OfflineResources.edit('${id}')">按格编辑</button>
+      <button class="btn btn-primary" type="button" onclick="OfflineResources.openWorkbench('${id}')">全屏手填</button>`;
     showModal(
       `查看 · ${this._escape(unit.unitTitle || record.content || '未命名大单元')}`,
       this.readonlyHTML(record),
@@ -477,15 +490,9 @@ const OfflineResources = {
   exportWord(id) {
     const record = this.get(id);
     if (!record) return showToast('资源不存在', 'error');
-    const html = buildUnitExportHTML(normalizeUnit(record.modules_json));
-    const name = normalizeUnit(record.modules_json).unitTitle || record.content || '离线资源';
-    const blob = new Blob(['\ufeff', html], { type: 'application/msword;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `${String(name).replace(/[\\/:*?"<>|]/g, '_')}.doc`;
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    const unit = normalizeUnit(record.modules_json);
+    const name = unit.unitTitle || record.content || '离线资源';
+    return this.downloadFile(`${name}.doc`, `\ufeff${buildUnitExportHTML(unit)}`, 'application/msword;charset=utf-8');
   },
 
   printUnit(id) {
@@ -524,7 +531,257 @@ const OfflineResources = {
     document.querySelectorAll('.modal-overlay').forEach(overlay => overlay.remove());
   },
 
-  /* ---------------- 手动添加 ---------------- */
+  /* ---------------- 文件下载（模板 / Markdown / Word 共用） ---------------- */
+
+  /**
+   * 把一段文本存成文件下载下来。
+   * 以前 Word 导出那套「Blob → createObjectURL → a.click → revoke」是内联复制的，
+   * 现在模板下载 / Markdown 导出都要用，抽成一个地方，避免再复制第三份。
+   */
+  downloadFile(filename, content, mime = 'text/plain;charset=utf-8') {
+    try {
+      const blob = new Blob([content], { type: mime });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = String(filename).replace(/[\\/:*?"<>|]/g, '_');
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      return true;
+    } catch (error) {
+      console.warn('[离线资源库] 下载文件失败', error);
+      if (typeof showToast === 'function') showToast('下载失败，请检查浏览器下载权限', 'error');
+      return false;
+    }
+  },
+
+  /** 下载一份空白填写模板（11 个模块标题 + 18 行课时表格都已写死） */
+  downloadTemplate() {
+    if (typeof buildUnitTemplate !== 'function') return showToast('模板组件还没加载，请刷新页面', 'error');
+    const markdown = buildUnitTemplate(null, { title: '' });
+    const ok = this.downloadFile(unitTemplateFileName({}), markdown, 'text/markdown;charset=utf-8');
+    if (ok) showToast('模板已下载：填好后回到这里上传');
+    return ok;
+  },
+
+  /** 把某条资源（或工作台里的草稿）导回成 Markdown，方便在编辑器里继续改 */
+  downloadUnitMarkdown(unit) {
+    if (typeof buildUnitTemplate !== 'function') return showToast('模板组件还没加载，请刷新页面', 'error');
+    const data = normalizeUnit(unit);
+    const ok = this.downloadFile(unitTemplateFileName(data), buildUnitTemplate(data), 'text/markdown;charset=utf-8');
+    if (ok) showToast('已导出 Markdown');
+    return ok;
+  },
+
+  downloadResourceMarkdown(id) {
+    const record = this.get(id);
+    if (!record) return showToast('资源不存在', 'error');
+    return this.downloadUnitMarkdown(this.unitFromRecord(record));
+  },
+
+  /* ---------------- 上传大单元文件（纯离线解析，不碰 AI） ---------------- */
+
+  /** 管理页上的「上传区域」：拖拽 / 点选 + 下载模板的入口 */
+  importPanelHTML() {
+    return `
+      <section class="sports-meet-card res-import">
+        <div class="res-import-head">
+          <div>
+            <h2>上传大单元文件</h2>
+            <p>把按模板填好的 <b>.md / .txt</b> 拖进来（或直接点开选择），系统按标题切成 11 个模块、把 18 行课时表逐格落库；<b>.json</b> 也认。<b>全程不调用 AI。</b></p>
+          </div>
+          <button class="btn btn-secondary" type="button" onclick="OfflineResources.downloadTemplate()">⬇ 下载大单元模板</button>
+        </div>
+        <label class="res-drop" id="resDrop"
+          ondragover="event.preventDefault();OfflineResources.onDragOver(true)"
+          ondragleave="OfflineResources.onDragOver(false)"
+          ondrop="OfflineResources.onDrop(event)">
+          <input id="resFile" type="file" multiple
+            accept=".md,.txt,.json,.markdown,text/markdown,text/plain,application/json"
+            onchange="OfflineResources.onPickFiles(this)">
+          <span class="res-drop-icon">📄</span>
+          <b>点击选择文件</b>
+          <span class="res-note">或把文件拖到这个框里（可以一次拖多个）</span>
+        </label>
+        <p id="resImportNote" class="res-note">课时表的每一格都会被分别存起来：维度 / 运动能力 / 健康行为 / 体育品德 / 教学内容 / 组织教学与方法。</p>
+      </section>`;
+  },
+
+  onDragOver(active) {
+    const drop = document.getElementById('resDrop');
+    if (drop && drop.classList) drop.classList.toggle('is-active', Boolean(active));
+  },
+
+  onDrop(event) {
+    if (!event) return;
+    event.preventDefault();
+    this.onDragOver(false);
+    const files = Array.from(event.dataTransfer?.files || []);
+    if (files.length) this.importFiles(files);
+  },
+
+  onPickFiles(input) {
+    const files = Array.from(input?.files || []);
+    if (input) input.value = '';            // 清空，否则同一个文件第二次选中不触发 change
+    if (files.length) this.importFiles(files);
+  },
+
+  async importFiles(files) {
+    for (const file of files) {
+      // 一份一份处理：每份都要单独出解析报告，不能让后来的弹窗顶掉前面还没保存的结果
+      // eslint-disable-next-line no-await-in-loop
+      const payload = await this.readImportFile(file);
+      if (!payload) continue;             // 格式不认识 / 读不出来，已经给过提示了
+      if (this._import) {                 // 上一份的报告老师还没看完 → 先排队
+        this._queue.push(payload);
+        continue;
+      }
+      this.importText(payload.text, payload.filename);
+    }
+  },
+
+  async importFile(file) {
+    const payload = await this.readImportFile(file);
+    if (payload) this.importText(payload.text, payload.filename);
+  },
+
+  /** 校验扩展名并读出文本，失败时已经给了 toast */
+  async readImportFile(file) {
+    const name = String(file?.name || '上传的文件');
+    if (!/\.(md|txt|json|markdown)$/i.test(name)) {
+      showToast(`「${name}」不是支持的格式，请上传 .md / .txt / .json`, 'error');
+      return null;
+    }
+    try {
+      const text = await this.readFileText(file);
+      return { text, filename: name };
+    } catch (error) {
+      console.warn('[离线资源库] 读取文件失败', error);
+      showToast(`「${name}」读不出来，换个文件试试`, 'error');
+      return null;
+    }
+  },
+
+  /** 老师处理完当前这份之后，接着弹队列里的下一份 */
+  drainImportQueue() {
+    const next = this._queue.shift();
+    if (!next) return false;
+    this.importText(next.text, next.filename);
+    return true;
+  },
+
+  /** 点了「回去改模板」/「知道了」：这份先放下，继续下一份 */
+  dismissImport() {
+    this._import = null;
+    this.closeModals();
+    return this.drainImportQueue();
+  },
+
+  /** 读文件文本：优先用 Blob.text()，老浏览器退回 FileReader */
+  readFileText(file) {
+    if (file && typeof file.text === 'function') return file.text();
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result ?? ''));
+      reader.onerror = () => reject(reader.error || new Error('读取失败'));
+      reader.readAsText(file);
+    });
+  },
+
+  /**
+   * 解析一份文本并入库。
+   *   · 彻底读不懂（空文件 / 没有任何模块标题 / JSON 坏了）→ 弹窗报错并给出【重新下载模板】
+   *   · 能读但有缺失 → 先给报告弹窗（未找到【学情分析】模块，请检查模板），老师确认后才入库
+   *   · 一切正常 → 直接入库并刷新卡片
+   */
+  importText(text, filename = '') {
+    if (typeof parseUnitTemplate !== 'function') {
+      showToast('模板解析组件还没加载，请刷新页面', 'error');
+      return null;
+    }
+    const report = parseUnitTemplate(text);
+    this._import = { report, filename };
+
+    if (report.blocking) {
+      this.showImportFailure(report, filename);
+      return report;
+    }
+    if (report.problems.length) {
+      this.showImportReport(report, filename);
+      return report;
+    }
+    return this.commitImport(report, filename);
+  },
+
+  showImportFailure(report, filename) {
+    const body = `
+      <div class="res-report">
+        <p class="res-report-bad">没能读出来：${this._escape(filename)}</p>
+        <ul class="res-report-list">${report.errors.map(message => `<li>${this._escape(message)}</li>`).join('')}</ul>
+        <p class="res-tip">最省事的办法：<b>先下载模板</b>，在模板里把内容填好，再上传 —— 标题行与表格格式都是写死的，不会再认不出来。</p>
+      </div>`;
+    showModal('文件无法解析', body, `
+      <button class="btn btn-secondary" type="button" onclick="OfflineResources.downloadTemplate()">⬇ 下载模板</button>
+      <button class="btn btn-primary" type="button" onclick="OfflineResources.dismissImport()">知道了</button>`);
+  },
+
+  /** 解析报告：缺了哪个模块、课时表填了几行、结构图挂了几个 —— 全部摊开给老师看 */
+  showImportReport(report, filename) {
+    const found = report.found.length
+      ? report.found.map(id => `<span class="res-chip">${this._escape(unitModuleTitle(id))}</span>`).join('')
+      : '<span class="res-note">一个都没认出来</span>';
+    const problems = report.problems.map(problem => `
+      <li class="res-report-item res-report-${problem.level === 'error' ? 'bad' : 'warn'}">
+        ${problem.level === 'error' ? '✖' : '⚠'} ${this._escape(problem.message)}
+      </li>`).join('');
+    const extraWarnings = report.warnings.length
+      ? `<ul class="res-report-list res-report-sub">${report.warnings.slice(0, 6)
+        .map(message => `<li>${this._escape(message)}</li>`).join('')}</ul>`
+      : '';
+    const body = `
+      <div class="res-report">
+        <p class="res-report-file">${this._escape(filename)}</p>
+        <dl class="res-report-stat">
+          <dt>识别模块</dt><dd>${report.found.length} / ${UNIT_TEMPLATE_MODULES.length}</dd>
+          <dt>课时表</dt><dd>${report.lessonRows} / 18 行</dd>
+          <dt>结构图</dt><dd>${report.structureNodes} 个课次</dd>
+        </dl>
+        <div class="res-report-chips">${found}</div>
+        <ul class="res-report-list">${problems}</ul>
+        ${extraWarnings}
+        <p class="res-tip">缺失的模块导入后可以在资源卡的【全屏手填】里补写，也可以现在回去改模板。</p>
+      </div>`;
+    showModal('解析报告', body, `
+      <button class="btn btn-ghost" type="button" onclick="OfflineResources.dismissImport()">回去改模板</button>
+      <button class="btn btn-primary" type="button" onclick="OfflineResources.confirmImport()">仍然保存入库</button>`);
+  },
+
+  confirmImport() {
+    const payload = this._import;
+    if (!payload) return showToast('没有待导入的文件', 'error');
+    return this.commitImport(payload.report, payload.filename);
+  },
+
+  /** 真正落库：模块 Quote 成记录 → 生成卡片 */
+  commitImport(report, filename = '') {
+    const unit = normalizeUnit(report.unit);
+    if (!String(unit.unitTitle || '').trim()) {
+      unit.unitTitle = String(filename).replace(/\.[^.]+$/, '').trim() || '导入的大单元';
+    }
+    unit.meta = { ...unit.meta, unitTitle: unit.unitTitle, source: 'import' };
+    const result = this.saveUnit(unit, { source: 'import' });
+    if (!result.ok) return showToast('导入失败，请重试', 'error');
+    this._import = null;
+    this.closeModals();
+    this.renderCards();
+    showToast(`已导入「${unit.unitTitle}」`);
+    this.drainImportQueue();               // 拖了多份文件时，接着处理下一份
+    return result;
+  },
+
+  /* ---------------- 手动添加（保留的程序化入口，页面按钮已改为全屏工作台） ---------------- */
 
   openCreateDialog() {
     const categories = typeof UNIT_CATALOG !== 'undefined' ? UNIT_CATALOG : [];
@@ -607,8 +864,8 @@ const OfflineResources = {
       : (topic ? `将围绕「${this._escape(topic)}」建立空白大单元。` : '');
   },
 
-  /** 按表单选题建一条空白资源（不经过 AI） */
-  createBlank({ goto = true } = {}) {
+  /** 读「选题表单」三个下拉 + 单元名，造一份（空的）大单元 —— 全屏工作台与旧的 createBlank 共用 */
+  unitFromCreateForm() {
     const categoryId = document.getElementById('resCreateCategory')?.value || '';
     const itemId = document.getElementById('resCreateItem')?.value || '';
     const levelId = document.getElementById('resCreateLevel')?.value || '';
@@ -629,6 +886,12 @@ const OfflineResources = {
       topic, topicPending: Boolean(topic && isUnitTopicPending(topic)),
       source: 'manual',
     };
+    return unit;
+  },
+
+  /** 按表单选题建一条空白资源（不经过 AI） */
+  createBlank({ goto = true } = {}) {
+    const unit = this.unitFromCreateForm();
     const result = this.saveUnit(unit, { source: 'manual' });
     if (!result.ok) return showToast('创建失败，请重试', 'error');
     this.closeModals();
@@ -639,6 +902,311 @@ const OfflineResources = {
     }
     window.location.href = `unit-design.html?resource=${encodeURIComponent(result.record.id)}`;
     return result.record;
+  },
+
+  /* ---------------- 全屏手填工作台 ---------------- */
+
+  /**
+   * 打开全屏工作台：左边 11 个模块目录，右边一个巨大的文本框。
+   * 点哪个模块就在哪个模块里填写 —— 全程离线，保存直接落库，不调用任何 AI 接口。
+   * @param {string} recordId 传资源 id 就是编辑已有资源；不传就是新建
+   */
+  openWorkbench(recordId = '') {
+    if (typeof unitFieldToText !== 'function') return showToast('模板组件还没加载，请刷新页面', 'error');
+    const record = recordId ? this.get(recordId) : null;
+    if (recordId && !record) return showToast('资源不存在或已被删除', 'error');
+    const base = record ? this.unitFromRecord(record) : this.unitFromCreateForm();
+    if (!record) base.unitTitle = '';          // 新建时别预填「未命名大单元」，输入框里已有占位提示
+    this._wb = {
+      unit: normalizeUnit(base),
+      active: UNIT_TEMPLATE_META,
+      recordId: record ? record.id : '',
+      dirty: false,
+      tip: '',
+    };
+    const title = record
+      ? `手填 · ${record.modules_json?.unitTitle || record.content || '未命名大单元'}`
+      : '手填大单元 · 离线工作台';
+    const footer = `
+      <button class="btn btn-ghost" type="button" onclick="OfflineResources.wbExport()">⬇ 导出为 .md</button>
+      <span class="res-toolbar-space"></span>
+      <button class="btn btn-secondary" type="button" onclick="OfflineResources.wbCancel()">取消</button>
+      <button class="btn btn-primary" type="button" onclick="OfflineResources.wbSave()">保存到离线资源库</button>`;
+    showModal(title, this.workbenchHTML(), footer, 'res-fullscreen');
+    this.wbGo(UNIT_TEMPLATE_META);
+    return this._wb;
+  },
+
+  workbenchHTML() {
+    const items = [{ id: UNIT_TEMPLATE_META, label: '基本信息', index: 0 }]
+      .concat(UNIT_MODULES.map((module, index) => ({ id: module.id, label: module.title, index: index + 1 })));
+    return `
+      <div class="res-wb">
+        <aside class="res-wb-nav">
+          <p class="res-wb-nav-title">大单元模块（共 11 个）</p>
+          <div class="res-wb-nav-list" id="resWbNav">
+            ${items.map(item => `
+              <button type="button" class="res-wb-nav-item" data-res-mod="${this._escape(item.id)}"
+                onclick="OfflineResources.wbGo('${this._escape(item.id)}')">
+                <span class="res-wb-nav-index">${item.index ? `${item.index}` : '·'}</span>
+                <span class="res-wb-nav-label">${this._escape(item.label)}</span>
+                <em class="res-wb-nav-dot" data-res-dot="${this._escape(item.id)}"></em>
+              </button>`).join('')}
+          </div>
+          <p class="res-wb-nav-foot">保存后卡片会出现在资源库里，可继续查看 / 导出 Word / 打印。</p>
+        </aside>
+        <div class="res-wb-main">
+          <section class="res-wb-pane" id="resWbMeta">${this.workbenchMetaHTML()}</section>
+          <section class="res-wb-pane" id="resWbEditorPane" hidden>
+            <header class="res-wb-head">
+              <b id="resWbTitle">—</b>
+              <span id="resWbHint" class="res-note"></span>
+            </header>
+            <textarea id="resWbEditor" class="res-wb-text" spellcheck="false"
+              oninput="OfflineResources.wbTouch()"></textarea>
+            <p id="resWbTip" class="res-note"></p>
+          </section>
+        </div>
+      </div>`;
+  },
+
+  /** 基本信息那一屏：单元名 + 教材大类 / 细项 / 水平 / 教学内容 */
+  workbenchMetaHTML() {
+    const categories = typeof UNIT_CATALOG !== 'undefined' ? UNIT_CATALOG : [];
+    const levels = typeof UNIT_LEVELS !== 'undefined' ? UNIT_LEVELS : [];
+    const meta = this._wb ? this._wb.unit.meta : {};
+    return `
+      <header class="res-wb-head"><b>基本信息</b><span class="res-note">选题只影响卡片上的标签与后续检索，随时可以改</span></header>
+      <div class="res-form res-wb-form">
+        <label class="res-form-field">
+          <span>单元名称</span>
+          <input id="resCreateTitle" class="form-control" type="text" placeholder="例如：水平三篮球大单元（18 课时）"
+            value="${this._escape(this._wb ? this._wb.unit.unitTitle : '')}">
+        </label>
+        <label class="res-form-field">
+          <span>教材大类 / 细项</span>
+          <div class="res-form-row">
+            <select id="resCreateCategory" class="form-control" onchange="OfflineResources.onCreateCategoryChange()">
+              <option value="">请选择教材大类</option>
+              ${categories.map(item => `<option value="${item.id}"${meta.categoryId === item.id ? ' selected' : ''}>${this._escape(item.label)}</option>`).join('')}
+            </select>
+            <select id="resCreateItem" class="form-control" onchange="OfflineResources.onCreateTopicRefresh()">
+              <option value="">请选择细项</option>
+              ${(categories.find(item => item.id === meta.categoryId)?.items || []).map(entry => `<option value="${entry.id}"${meta.itemId === entry.id ? ' selected' : ''}>${this._escape(entry.label)}</option>`).join('')}
+            </select>
+          </div>
+        </label>
+        <label class="res-form-field">
+          <span>水平</span>
+          <select id="resCreateLevel" class="form-control" onchange="OfflineResources.onCreateTopicRefresh()">
+            ${levels.map(level => `<option value="${level.id}"${meta.levelId === level.id ? ' selected' : ''}>${this._escape(level.label)}</option>`).join('')}
+          </select>
+          <p id="resCreateLevelNote" class="res-note"></p>
+        </label>
+        <label class="res-form-field">
+          <span>教学内容</span>
+          <select id="resCreateTopic" class="form-control" onchange="OfflineResources.onCreateTopicChange()"></select>
+          <p id="resCreateTopicNote" class="res-note"></p>
+        </label>
+        <p class="res-tip">这里填好后，点左边的「1 教学目标」开始逐模块写内容；
+          课时表那一屏是一张 Markdown 表格，和【下载大单元模板】里的表格格式完全一样。</p>
+      </div>`;
+  },
+
+  /** 切换模块：先把当前文本框的内容写回，再把新模块的文本铺进文本框 */
+  wbGo(moduleId) {
+    const wb = this._wb;
+    if (!wb) return;
+    if (wb.active && wb.active !== moduleId && wb.active !== UNIT_TEMPLATE_META) {
+      const text = document.getElementById('resWbEditor')?.value ?? '';
+      const applied = unitFieldFromText(wb.unit, wb.active, text);
+      wb.unit = applied.unit;
+      wb.tip = applied.warnings.filter(Boolean).join('　');
+    }
+    if (wb.active === UNIT_TEMPLATE_META && moduleId !== UNIT_TEMPLATE_META) this.wbReadMetaForm();
+    wb.active = moduleId;
+    wb.dirty = true;
+    this.wbRender();
+  },
+
+  wbTouch() {
+    if (this._wb) this._wb.dirty = true;
+  },
+
+  /** 把文本框之外的 DOM 刷新一遍（标题 / 提示 / 目录高亮 / 填没填的小圆点） */
+  wbRender() {
+    const wb = this._wb;
+    if (!wb) return;
+    const isMeta = wb.active === UNIT_TEMPLATE_META;
+    const metaPane = document.getElementById('resWbMeta');
+    const editorPane = document.getElementById('resWbEditorPane');
+    if (metaPane) metaPane.hidden = !isMeta;
+    if (editorPane) editorPane.hidden = isMeta;
+    if (isMeta) {
+      this.onCreateTopicRefresh();
+      this.wbEnsureTopicOption();           // 历史资源里的教学内容可能不在当前下拉里，补一个选项别把它挤掉
+      this.wbRefreshDots();
+      this.wbSetNote(document.getElementById('resWbTip'), '');
+      return;
+    }
+    const module = (typeof UNIT_MODULES !== 'undefined' ? UNIT_MODULES : []).find(entry => entry.id === wb.active);
+    const index = (typeof UNIT_MODULES !== 'undefined' ? UNIT_MODULES : []).findIndex(entry => entry.id === wb.active);
+    this.wbSetNote(document.getElementById('resWbTitle'), `${index + 1} · ${unitModuleTitle(wb.active)}`);
+    this.wbSetNote(document.getElementById('resWbHint'), module?.hint || '');
+    const editor = document.getElementById('resWbEditor');
+    if (editor) {
+      editor.value = unitFieldToText(wb.unit, wb.active);
+      editor.placeholder = this.wbPlaceholder(wb.active);
+    }
+    this.wbSetNote(document.getElementById('resWbTip'), wb.tip || this.wbTip(wb.active));
+    wb.tip = '';
+    this.wbRefreshDots();
+  },
+
+  /**
+   * 已保存的教学内容可能不在当前下拉里（例如 [待确认] 条目或字典改版前的说法），
+   * 这时给它补一个 option，否则下拉会悄悄选中第一项、把老师原来的选题冲掉。
+   */
+  wbEnsureTopicOption() {
+    const select = document.getElementById('resCreateTopic');
+    const wb = this._wb;
+    if (!select || !wb) return;
+    const topic = String(wb.unit.meta?.topic || '').trim();
+    if (!topic) return;
+    const exists = Array.from(select.options || []).some(option => option.value === topic);
+    if (exists) {
+      select.value = topic;
+      return;
+    }
+    const option = document.createElement('option');
+    option.value = topic;
+    option.textContent = topic;
+    if (typeof select.appendChild === 'function') select.appendChild(option);
+    select.value = topic;
+  },
+
+  wbSetNote(node, text) {
+    if (!node) return;
+    if (typeof text === 'string' && /[<>|｜]/.test(text)) node.innerHTML = text;
+    else node.textContent = String(text ?? '');
+  },
+
+  /** 目录上的小圆点：写过内容的模块标 ✓ */
+  wbRefreshDots() {
+    const nav = document.getElementById('resWbNav');
+    const wb = this._wb;
+    if (!nav || !wb || typeof nav.querySelectorAll !== 'function') return;
+    nav.querySelectorAll('[data-res-mod]').forEach(button => {
+      const id = button.dataset?.resMod;
+      const dot = nav.querySelector(`[data-res-dot="${id}"]`);
+      const filled = id === UNIT_TEMPLATE_META
+        ? Boolean(String(wb.unit.unitTitle || '').trim() || wb.unit.meta?.topic)
+        : unitModuleCompleted(wb.unit, id);
+      if (dot) dot.textContent = filled ? '✓' : '·';
+      if (dot && dot.classList) dot.classList.toggle('is-filled', filled);
+      if (button.classList) {
+        button.classList.toggle('is-active', id === wb.active);
+        button.classList.toggle('is-filled', filled);
+      }
+    });
+  },
+
+  wbPlaceholder(moduleId) {
+    if (moduleId === 'lessons') {
+      return '| 课时 | 维度 | 运动能力 | 健康行为 | 体育品德 | 教学内容 | 组织教学与方法 |\n| 1 | 基本技术 | …… | …… | …… | …… | …… |';
+    }
+    if (moduleId === 'structure') return '- 基本技术：第3课次：原地运球；第4课次：行进间运球';
+    return '在这里直接写，写多长都行';
+  },
+
+  /** 每个模块文本框下方的常驻提示（把"该怎么写"讲清楚） */
+  wbTip(moduleId) {
+    switch (moduleId) {
+      case 'objectives': return '一行一项，冒号后面写内容（运动能力 / 健康行为 / 体育品德）。';
+      case 'lessons': return '一行一个课时，共 18 行；用 | 分隔，表头那一行别删。维度可以写：基础知识 / 基本技术 / 战术 / 体能 / 比赛 / 规则 / 观赏。';
+      case 'structure': return '一行一个分支，冒号后面写「第N课次：名称」，多个之间用中文分号隔开。';
+      case 'keyDifficulties': return '四个重难点各一行。';
+      case 'evaluation': return '过程性 / 终结性 / 学练赛评一体化 各一行。';
+      default: return '直接写正文即可，段落格式会原样保存。';
+    }
+  },
+
+  /** 读基本信息表单 → unit.meta */
+  wbReadMetaForm() {
+    const wb = this._wb;
+    if (!wb) return;
+    const unit = wb.unit;
+    const title = document.getElementById('resCreateTitle')?.value?.trim() || '';
+    if (title) unit.unitTitle = title;
+    const categoryId = document.getElementById('resCreateCategory')?.value || '';
+    const itemId = document.getElementById('resCreateItem')?.value || '';
+    const levelId = document.getElementById('resCreateLevel')?.value || '';
+    const topic = document.getElementById('resCreateTopic')?.value || '';
+    const catalog = (typeof UNIT_CATALOG !== 'undefined' ? UNIT_CATALOG : []);
+    const category = catalog.find(item => item.id === categoryId);
+    const item = category?.items.find(entry => entry.id === itemId);
+    const level = (typeof UNIT_LEVELS !== 'undefined' ? UNIT_LEVELS : []).find(entry => entry.id === levelId);
+    const meta = unit.meta || {};
+    if (category) meta.category = category.label;
+    if (item) meta.item = item.label;
+    if (level) meta.level = level.label;
+    if (topic) meta.topic = topic;
+    meta.unitTitle = unit.unitTitle || meta.unitTitle || '';
+    if (typeof unitSyncMetaIds === 'function') unitSyncMetaIds(meta);
+    unit.meta = meta;
+    return unit;
+  },
+
+  /** 表格 / 分项写着写着就忘了保存 —— 导出成 md 存到电脑上，也是给同事传阅的介质 */
+  wbExport() {
+    const wb = this._wb;
+    if (!wb) return false;
+    const unit = this.wbCurrentUnit();
+    return this.downloadUnitMarkdown(unit);
+  },
+
+  /** 当前草稿（把编辑框里还没写回的内容先收进来） */
+  wbCurrentUnit() {
+    const wb = this._wb;
+    if (!wb) return normalizeUnit({});
+    if (wb.active === UNIT_TEMPLATE_META) this.wbReadMetaForm();
+    else wb.unit = unitFieldFromText(wb.unit, wb.active, document.getElementById('resWbEditor')?.value ?? '').unit;
+    return normalizeUnit(wb.unit);
+  },
+
+  wbSave() {
+    const wb = this._wb;
+    if (!wb) return null;
+    const unit = this.wbCurrentUnit();
+    const filled = unitModuleCompleted(unit, 'lessons')
+      || unitModuleCompleted(unit, 'objectives')
+      || String(unit.textbookAnalysis || '').trim()
+      || String(unit.studentAnalysis || '').trim()
+      || String(unit.teachingContent || '').trim()
+      || String(unit.unitTitle || '').trim();
+    if (!filled) return showToast('还没写内容，先在右边框里填点东西吧', 'error');
+    if (!String(unit.unitTitle || '').trim()) {
+      unit.unitTitle = [unit.meta.category, unit.meta.item, unit.meta.level].filter(Boolean).join(' ') || '未命名大单元';
+    }
+    unit.meta = { ...unit.meta, unitTitle: unit.unitTitle, source: 'manual' };
+    const result = this.saveUnit(unit, { source: 'manual', id: wb.recordId || undefined });
+    if (!result.ok) return showToast('保存失败，请重试', 'error');
+    const created = result.created;
+    this._wb = null;
+    this.closeModals();
+    this.renderCards();
+    showToast(created ? `已保存「${unit.unitTitle}」` : `已更新「${unit.unitTitle}」`);
+    return result;
+  },
+
+  wbCancel() {
+    const wb = this._wb;
+    if (wb && wb.dirty && typeof window !== 'undefined' && typeof window.confirm === 'function') {
+      if (!window.confirm('还没保存，确定关闭吗？已填写的内容会丢失。')) return false;
+    }
+    this._wb = null;
+    this.closeModals();
+    return true;
   },
 
   /* ---------------- 只读详情（查看弹窗 / 打印共用） ---------------- */

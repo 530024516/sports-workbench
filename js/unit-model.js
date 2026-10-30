@@ -8,7 +8,7 @@
  *   如果两边各写一份数据结构，加第 12 个模块时必然有一边漏改。
  *   所以：模型（形状 + 归一化 + 导出）放这里，两个页面都只读这一份。
  *
- * 结构：11 个模块 + 18 课时计划表 + 结构图四分支（详见 UNIT_MODULES）。
+ * 结构：11 个模块 + 18 课时计划表 + 结构图（分支 = 七大维度，详见 UNIT_STRUCTURE_BRANCHES）。
  * 所有写 AI 结果 / 读资源库数据的地方，都必须先过 normalizeUnit() 兜底整形。
  */
 
@@ -21,21 +21,35 @@ const UNIT_MODULES = [
   { id: 'studentAnalysis', title: '学情分析', hint: '结合所选水平的认知与身体发展特点' },
   { id: 'teachingContent', title: '主要教学内容', hint: '知识、技术、战术、体能、比赛' },
   { id: 'keyDifficulties', title: '教学重难点', hint: '学生学习 / 学习内容 / 教学组织 / 教学方法' },
-  { id: 'structure', title: '大单元设计结构图', hint: '四主干分支挂载 18 个课时' },
-  { id: 'lessons', title: '18 课时计划表', hint: '每行含三维目标、内容、组织教法' },
+  { id: 'structure', title: '大单元设计结构图', hint: '按七大维度分支挂载 18 个课时' },
+  { id: 'lessons', title: '18 课时计划表', hint: '每行含维度、三维目标、内容、组织教法' },
   { id: 'assessment', title: '考核与作业', hint: '依据课标学业质量要求' },
   { id: 'evaluation', title: '学习评价', hint: '过程性 + 终结性 + 学练赛评一体化' },
   { id: 'reflection', title: '教学反思', hint: '课后填写框架模板' },
   { id: 'resources', title: '教学资源', hint: '图文 / 视频 / 器材清单' },
 ];
 
-/** 模块 6 的四个主干分支 */
+/**
+ * 模块 6 结构图的分支 —— 与教学内容的「七大维度」一一对应，18 个课时按维度挂载。
+ * 分支 id 与字典维度 id 的对照见 dim 字段：
+ *   战术维度的分支 id 沿用历史值 tactics（老师已保存的大单元里就是这个键，不能改），
+ *   字典里同一维度的 id 是 tactic，normalizeUnit() 会把两者都收进来。
+ */
 const UNIT_STRUCTURE_BRANCHES = [
-  { id: 'basic', label: '基础知识' },
-  { id: 'technique', label: '基本技术' },
-  { id: 'tactics', label: '技战术运用' },
-  { id: 'fitness', label: '专项体能' },
+  { id: 'basic', label: '基础知识', dim: 'basic' },
+  { id: 'technique', label: '基本技术', dim: 'technique' },
+  { id: 'tactics', label: '技战术运用', dim: 'tactic' },
+  { id: 'fitness', label: '专项体能', dim: 'fitness' },
+  { id: 'match', label: '比赛与展示', dim: 'match' },
+  { id: 'rule', label: '规则与裁判', dim: 'rule' },
+  { id: 'watch', label: '观赏与评价', dim: 'watch' },
 ];
+
+/** 维度 id → 结构图分支 id（战术：tactic → tactics） */
+function structureBranchOfDimension(dimensionId) {
+  const branch = UNIT_STRUCTURE_BRANCHES.find(entry => entry.dim === dimensionId);
+  return branch ? branch.id : '';
+}
 
 function escapeUnitHTML(value) {
   return String(value ?? '').replace(/[&<>"']/g, char => ({
@@ -48,6 +62,8 @@ function createEmptyUnit() {
     meta: {
       unitTitle: '', category: '', categoryId: '', item: '', itemId: '',
       level: '', levelId: '', topic: '', topicPending: false, generatedAt: '',
+      // 本选题（细项 + 水平）实际涉及哪些维度 —— 决定结构图显示哪些分支、AI 按哪些维度分配课时
+      dimensions: [],
     },
     unitTitle: '',
     objectives: { ability: '', health: '', character: '' },
@@ -55,9 +71,12 @@ function createEmptyUnit() {
     studentAnalysis: '',
     teachingContent: '',
     keyDifficulties: { learning: '', content: '', organization: '', method: '' },
-    structure: { basic: [], technique: [], tactics: [], fitness: [] },
+    structure: Object.fromEntries(UNIT_STRUCTURE_BRANCHES.map(branch => [branch.id, []])),
     lessons: Array.from({ length: UNIT_LESSON_COUNT }, (_, index) => ({
       no: index + 1,
+      // dimension：本课次属于七大维度中的哪一个（basic/technique/tactic/fitness/match/rule/watch），
+      // 由 AI 按「细项 + 水平的教学内容清单」填写，用于校验 18 课时是否真的覆盖了各个维度
+      dimension: '',
       objectives: { ability: '', health: '', character: '' },
       content: '',
       method: '',
@@ -69,30 +88,42 @@ function createEmptyUnit() {
   };
 }
 
-/** 兜底补齐：保证 lessons 恰好 18 条、structure 四个分支都是数组、objectives/evaluation 是对象 */
+/**
+ * 兜底补齐：保证 lessons 恰好 18 条、structure 七个维度分支都是数组、objectives/evaluation 是对象。
+ * 结构图分支兼容两种键名：历史键 tactics 与字典维度键 tactic（AI 可能按维度名回写）。
+ */
 function normalizeUnit(data) {
   const base = createEmptyUnit();
   const source = data && typeof data === 'object' && !Array.isArray(data) ? data : {};
   const lessons = Array.isArray(source.lessons) ? source.lessons : [];
+  const rawStructure = (source.structure && typeof source.structure === 'object') ? source.structure : {};
+  const structure = {};
+  UNIT_STRUCTURE_BRANCHES.forEach(branch => {
+    // 同一维度可能被写成 tactics（历史）或 tactic（维度 id），两边的数据都要收
+    structure[branch.id] = normalizeStructureBranch(
+      rawStructure[branch.id] && rawStructure[branch.id].length
+        ? rawStructure[branch.id]
+        : rawStructure[branch.dim],
+    );
+  });
+  const dimensions = Array.isArray(source.meta?.dimensions)
+    ? source.meta.dimensions.map(entry => String(entry || '')).filter(Boolean)
+    : (Array.isArray(source.dimensions) ? source.dimensions.map(entry => String(entry || '')).filter(Boolean) : []);
   return {
     ...base,
     ...source,
     unitTitle: typeof source.unitTitle === 'string'
       ? source.unitTitle : (typeof source.meta?.unitTitle === 'string' ? source.meta.unitTitle : ''),
-    meta: { ...base.meta, ...(source.meta || {}) },
+    meta: { ...base.meta, ...(source.meta || {}), dimensions },
     objectives: { ...base.objectives, ...(source.objectives || {}) },
     keyDifficulties: { ...base.keyDifficulties, ...(source.keyDifficulties || {}) },
     evaluation: { ...base.evaluation, ...(source.evaluation || {}) },
-    structure: {
-      basic: normalizeStructureBranch(source.structure?.basic),
-      technique: normalizeStructureBranch(source.structure?.technique),
-      tactics: normalizeStructureBranch(source.structure?.tactics),
-      fitness: normalizeStructureBranch(source.structure?.fitness),
-    },
+    structure,
     lessons: base.lessons.map((lesson, index) => {
       const item = lessons[index] || {};
       return {
         no: index + 1,
+        dimension: typeof item.dimension === 'string' ? item.dimension.trim() : '',
         objectives: { ...lesson.objectives, ...(item.objectives || {}) },
         content: typeof item.content === 'string' ? item.content : '',
         method: typeof item.method === 'string' ? item.method : '',
@@ -149,25 +180,34 @@ function missingStructureNumbers(unit) {
 /**
  * 结构图缺课时时按序号兜底补齐（按课时表的标题）。
  * 纯函数：返回新对象，不改动传入的 unit。
- * 归属分支规则：1–2 基础知识，3–9 基本技术，10–15 技战术运用，16–18 专项体能。
+ * 归属分支：优先用该课时自己标注的 dimension（AI 按教学内容清单填的维度）；
+ *          没标注时退回序号规则 —— 1–2 基础知识，3–9 基本技术，10–15 技战术运用，16–18 专项体能。
  */
 function autoFillStructure(unit) {
   const data = normalizeUnit(unit);
   const missing = missingStructureNumbers(data);
   if (!missing.length) return data;
-  const structure = {
-    basic: [...data.structure.basic],
-    technique: [...data.structure.technique],
-    tactics: [...data.structure.tactics],
-    fitness: [...data.structure.fitness],
-  };
+  const structure = {};
+  UNIT_STRUCTURE_BRANCHES.forEach(branch => { structure[branch.id] = [...data.structure[branch.id]]; });
   missing.forEach(no => {
     const lesson = data.lessons[no - 1];
     const title = `第${no}课次：${String(lesson?.content || '').split(/[\n，,。;；]/)[0].slice(0, 18) || '待补充'}`.trim();
-    const branch = no <= 2 ? 'basic' : no <= 9 ? 'technique' : no <= 15 ? 'tactics' : 'fitness';
+    const byDimension = structureBranchOfDimension(String(lesson?.dimension || ''));
+    const branch = byDimension || (no <= 2 ? 'basic' : no <= 9 ? 'technique' : no <= 15 ? 'tactics' : 'fitness');
     structure[branch].push({ no, title });
   });
   return { ...data, structure };
+}
+
+/** 18 个课时各自落在哪个维度上（用于校验"是否真的覆盖了各个维度"），返回 维度 → 课次号数组 */
+function unitDimensionCoverage(unit) {
+  const data = normalizeUnit(unit);
+  const coverage = {};
+  data.lessons.forEach(lesson => {
+    const dimension = String(lesson.dimension || '').trim() || '未标注';
+    (coverage[dimension] = coverage[dimension] || []).push(lesson.no);
+  });
+  return coverage;
 }
 
 function unitGetPath(unit, path) {
@@ -195,13 +235,18 @@ function unitExportSection(title, bodyHTML) {
 /** 导出 / 打印用的完整 HTML（两个页面共用同一份排版） */
 function buildUnitExportHTML(unit) {
   const d = normalizeUnit(unit);
+  const dimensionLabelOf = id => (UNIT_STRUCTURE_BRANCHES.find(branch => branch.dim === id) || {}).label || '';
   const lessonRows = d.lessons.map(lesson => `<tr>
     <td>第 ${lesson.no} 课</td>
+    <td>${escapeUnitHTML(dimensionLabelOf(lesson.dimension) || '—')}</td>
     <td>运动能力：${escapeUnitHTML(lesson.objectives.ability)}<br>健康行为：${escapeUnitHTML(lesson.objectives.health)}<br>体育品德：${escapeUnitHTML(lesson.objectives.character)}</td>
     <td>${escapeUnitHTML(lesson.content)}</td>
     <td>${escapeUnitHTML(lesson.method)}</td></tr>`).join('');
-  const branchList = UNIT_STRUCTURE_BRANCHES.map(branch => `<p><b>${branch.label}：</b>`
-    + (d.structure[branch.id].map(node => `${node.no}. ${escapeUnitHTML(node.title)}`).join('；') || '—') + '</p>').join('');
+  // 只导出本单元实际用到的维度分支（空的分支不占版面）
+  const branchList = UNIT_STRUCTURE_BRANCHES
+    .filter(branch => d.structure[branch.id].length)
+    .map(branch => `<p><b>${branch.label}：</b>`
+      + (d.structure[branch.id].map(node => `${node.no}. ${escapeUnitHTML(node.title)}`).join('；') || '—') + '</p>').join('');
 
   return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
     <title>${escapeUnitHTML(d.unitTitle || '大单元设计')}</title>
@@ -221,7 +266,7 @@ function buildUnitExportHTML(unit) {
     ${unitExportSection('四、主要教学内容', escapeUnitHTML(d.teachingContent))}
     ${unitExportSection('五、教学重难点', `<b>学生学习的重难点：</b>${escapeUnitHTML(d.keyDifficulties.learning)}<br><b>学习内容的重难点：</b>${escapeUnitHTML(d.keyDifficulties.content)}<br><b>教学组织的重难点：</b>${escapeUnitHTML(d.keyDifficulties.organization)}<br><b>教学方法的重难点：</b>${escapeUnitHTML(d.keyDifficulties.method)}`)}
     ${unitExportSection('六、大单元设计结构图', branchList)}
-    ${'<h2 class="page-break">七、18 课时计划表</h2><table><thead><tr><th>课时</th><th>学习目标（三维）</th><th>教学内容</th><th>组织教学与方法</th></tr></thead><tbody>' + lessonRows + '</tbody></table>'}
+    ${'<h2 class="page-break">七、18 课时计划表</h2><table><thead><tr><th>课时</th><th>维度</th><th>学习目标（三维）</th><th>教学内容</th><th>组织教学与方法</th></tr></thead><tbody>' + lessonRows + '</tbody></table>'}
     ${unitExportSection('八、考核与作业', escapeUnitHTML(d.assessment))}
     ${unitExportSection('九、学习评价', `<b>过程性评价：</b>${escapeUnitHTML(d.evaluation.process)}<br><b>终结性评价：</b>${escapeUnitHTML(d.evaluation.summative)}<br><b>学练赛评一体化：</b>${escapeUnitHTML(d.evaluation.integration)}`)}
     ${unitExportSection('十、教学反思', escapeUnitHTML(d.reflection))}
@@ -242,6 +287,8 @@ if (typeof window !== 'undefined') {
   window.missingStructureNumbers = missingStructureNumbers;
   window.structureNodeCount = structureNodeCount;
   window.autoFillStructure = autoFillStructure;
+  window.structureBranchOfDimension = structureBranchOfDimension;
+  window.unitDimensionCoverage = unitDimensionCoverage;
   window.unitGetPath = unitGetPath;
   window.unitSetPath = unitSetPath;
   window.unitSummaryLine = unitSummaryLine;
@@ -253,6 +300,7 @@ if (typeof module !== 'undefined' && module.exports) {
     UNIT_LESSON_COUNT, UNIT_MODULES, UNIT_STRUCTURE_BRANCHES, escapeUnitHTML,
     createEmptyUnit, normalizeUnit, normalizeStructureBranch, unitHasContent,
     unitModuleCompleted, missingStructureNumbers, structureNodeCount, autoFillStructure,
+    structureBranchOfDimension, unitDimensionCoverage,
     unitGetPath, unitSetPath, unitSummaryLine, buildUnitExportHTML,
   };
 }

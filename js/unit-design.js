@@ -19,6 +19,8 @@ Layout.init('unit-design', '大单元设计', '大单元设计');
 const UNIT_STORAGE_KEY = 'pe_big_unit_design_v1';
 /** 单独生成课时表时每批几个课时（批越小越不容易撞上模型的输出上限，与后端的分批逻辑一致） */
 const UNIT_LESSON_CHUNK = 6;
+/** 一键生成时 18 课时的固定分批：3 批并发，每批 6 个课时（一次请求 18 个课时必被截断） */
+const UNIT_LESSON_BATCHES = [[1, 6], [7, 12], [13, 18]];
 
 /** 旧版数据（分步生成那套）迁移到新结构，避免老师以前的内容白丢 */
 function migrateLegacyUnit(saved) {
@@ -194,9 +196,14 @@ function refreshUnitTopics(options = {}) {
   const levelId = unitSelect('ud2Level').value;
   const topicSelect = unitSelect('ud2Topic');
   const topics = itemId && levelId ? listUnitTopics(itemId, levelId) : [];
+  const groups = itemId && levelId ? unitTopicGroups(itemId, levelId) : [];
   const previous = options.silent ? (unitData.meta.topic || '') : topicSelect.value;
+  const optionOf = topic => `<option value="${escapeUnitHTML(topic)}">${escapeUnitHTML(topic)}</option>`;
   topicSelect.innerHTML = topics.length
-    ? topics.map(topic => `<option value="${escapeUnitHTML(topic)}">${escapeUnitHTML(topic)}</option>`).join('')
+    ? (groups.length                      // 球类水平二至四按「七大维度」分组显示
+      ? groups.map(group => `<optgroup label="${escapeUnitHTML(group.label)}">`
+        + group.topics.map(optionOf).join('') + '</optgroup>').join('')
+      : topics.map(optionOf).join(''))
     : '<option value="">请先选择「教材细项」与「水平」</option>';
   topicSelect.disabled = !topics.length;
   if (topics.length) {
@@ -356,6 +363,14 @@ function toggleAllUnitModules() {
 
 /* ---------------- 模块 6：结构图 ---------------- */
 
+/** 结构图只显示"本选题涉及的维度"或"已挂了课时的分支"，避免七个空分支占满版面 */
+function unitVisibleBranches() {
+  const dimensions = Array.isArray(unitData.meta?.dimensions) ? unitData.meta.dimensions : [];
+  const visible = UNIT_STRUCTURE_BRANCHES.filter(branch => dimensions.includes(branch.dim)
+    || unitData.structure?.[branch.id]?.length);
+  return visible.length ? visible : UNIT_STRUCTURE_BRANCHES;
+}
+
 function renderUnitStructure() {
   const missing = missingStructureNumbers(unitData);
   const total = structureNodeCount(unitData);
@@ -371,7 +386,7 @@ function renderUnitStructure() {
       <div class="ud2-tree">
         <div class="ud2-tree-root">${escapeUnitHTML(unitData.unitTitle || '大单元')}</div>
         <div class="ud2-tree-branches">
-          ${UNIT_STRUCTURE_BRANCHES.map(branch => `
+          ${unitVisibleBranches().map(branch => `
             <div class="ud2-tree-branch">
               <div class="ud2-tree-branch-title">${escapeUnitHTML(branch.label)}</div>
               <div class="ud2-tree-nodes">
@@ -390,7 +405,7 @@ function renderUnitStructure() {
     </div>`;
 }
 
-/** 课时表已生成但结构图不完整时，按序号把缺的课时补进四个分支（补齐规则在 unit-model.js） */
+/** 课时表已生成但结构图不完整时，按序号把缺的课时补进对应维度分支（补齐规则在 unit-model.js） */
 function autoFixStructure() {
   const missing = missingStructureNumbers(unitData);
   if (!missing.length) return;
@@ -402,6 +417,33 @@ function autoFixStructure() {
 
 /* ---------------- 模块 7：18 课时计划表 ---------------- */
 
+/**
+ * 18 课时的维度分布提示：一眼看出是否真的按多维结构生成、还缺哪个维度的课时。
+ * 例如：维度分布：基本技术 8 · 战术 3 · 体能 2 · 比赛 2 · 规则 1 · 基础知识 1（缺 观赏）
+ */
+function unitDimensionCoverageHint() {
+  if (typeof unitDimensionCoverage !== 'function') return '';
+  const coverage = unitDimensionCoverage(unitData);
+  const labelOf = id => (window.UNIT_DIMENSIONS || []).find(dimension => dimension.id === id)?.label || id;
+  const parts = Object.keys(coverage)
+    .filter(id => id && id !== '未标注')
+    .sort((a, b) => coverage[b].length - coverage[a].length)
+    .map(id => `${labelOf(id)} ${coverage[id].length}`);
+  if (coverage['未标注']) parts.push(`未标注 ${coverage['未标注'].length}`);
+  if (!parts.length) return '';
+  const expected = Array.isArray(unitData.meta?.dimensions) ? unitData.meta.dimensions : [];
+  const missing = expected.filter(id => !coverage[id]?.length).map(labelOf);
+  return `<span class="ud2-toolbar-hint">维度分布：${escapeUnitHTML(parts.join(' · '))}`
+    + `${missing.length ? `（缺 ${escapeUnitHTML(missing.join('、'))} 的课时）` : ''}</span>`;
+}
+
+/** 课时表「维度」列的选项（七大维度；字典没加载时退化为空，页面仍可用） */
+function unitDimensionOptions(selected = '') {
+  const list = Array.isArray(window.UNIT_DIMENSIONS) ? window.UNIT_DIMENSIONS : [];
+  return list.map(dimension => `<option value="${escapeUnitHTML(dimension.id)}"`
+    + `${dimension.id === selected ? ' selected' : ''}>${escapeUnitHTML(dimension.label)}</option>`).join('');
+}
+
 function renderUnitLessons() {
   const missing = unitMissingLessonNumbers();
   return `
@@ -410,12 +452,14 @@ function renderUnitLessons() {
         ${missing.length ? `第 ${missing.join('、')} 课时还没内容` : '✓ 18 个课时都已填写'}
       </span>
       <span class="ud2-toolbar-hint">课时多、容易被 AI 输出上限截断；缺课时时按批次单独生成即可。</span>
+      ${unitDimensionCoverageHint()}
       <button class="btn btn-secondary" type="button" onclick="generateLessonTableOnly()">单独生成课时表</button>
     </div>
     <div class="ud2-table-wrap">
       <table class="data-table ud2-lesson-table">
         <thead><tr>
           <th style="width:64px">课时</th>
+          <th style="width:96px">维度</th>
           <th style="width:26%">学习目标（三维）</th>
           <th style="width:32%">教学内容</th>
           <th>组织教学与方法</th>
@@ -425,6 +469,13 @@ function renderUnitLessons() {
           ${unitData.lessons.map((lesson, index) => `
             <tr>
               <th scope="row">第 ${index + 1} 课</th>
+              <td>
+                <select class="form-control" data-unit-path="lessons.${index}.dimension"
+                  aria-label="第 ${index + 1} 课所属维度">
+                  <option value="">—</option>
+                  ${unitDimensionOptions(lesson.dimension)}
+                </select>
+              </td>
               <td>
                 <label class="ud2-mini-field"><span>运动能力</span>
                   <textarea class="form-control" rows="2" data-unit-path="lessons.${index}.objectives.ability"
@@ -507,7 +558,7 @@ function setUnitGeneratingState(active) {
 /** 阶段的显示名（进度条文案用） */
 const UNIT_STAGE_LABELS = {
   analysis: '第 1/2 步 · 模块 1–6（分析与结构图）',
-  tail: '第 2/2 步 · 模块 7–11（课时表与评价）',
+  tail: '第 2/2 步 · 课时表 3 批并行（1–6 / 7–12 / 13–18）',
   lessons: '课时表分批生成',
   closing: '收尾 · 模块 8–11',
 };
@@ -538,12 +589,16 @@ function unitTailMissing() {
     .filter(id => !unitModuleCompleted(unitData, id));
 }
 
-/** 课时表里还没有内容的课次号 */
+/**
+ * 课时表里还没写完整的课次号。
+ * 判据是"内容"与"三维目标"都得有 —— 被截断的半截课时常常只剩目标没有内容，
+ * 那种课时对老师没用，必须算缺失、重新生成（否则模块 7 里会留一行空的教学内容）。
+ */
 function unitMissingLessonNumbers() {
   return unitData.lessons
-    .filter(lesson => !unitHasContent(
-      lesson.content, lesson.method,
-      lesson.objectives.ability, lesson.objectives.health, lesson.objectives.character,
+    .filter(lesson => !(
+      unitHasContent(lesson.content)
+      && unitHasContent(lesson.objectives.ability, lesson.objectives.health, lesson.objectives.character)
     ))
     .map(lesson => lesson.no);
 }
@@ -574,8 +629,26 @@ function unitStageContext() {
     objectives: unitData.objectives,
     teachingContent: unitData.teachingContent,
     keyDifficulties: unitData.keyDifficulties,
+    // 「细项 + 水平」对应的具体教学内容清单：让 18 课时落到具体项目，而不是泛泛写"田径""球类"
+    topicList: unitSelectionTopicList(),
+    // 本选题涉及的维度：后端据此确认课时表要覆盖哪些维度（旧客户端没带时用得上）
+    dimensions: unitSelectionDimensions(),
     lessonTitles,
   };
+}
+
+/** 当前选题（细项 + 水平）对应的具体教学内容清单（带维度前缀，喂给 AI 时维度也要告诉它） */
+function unitSelectionTopicList() {
+  const meta = unitData.meta || {};
+  if (typeof listUnitTopics !== 'function') return [];
+  const found = typeof findUnitCatalogItem === 'function'
+    ? findUnitCatalogItem(meta.itemId || unitSelect('ud2Item').value)
+    : null;
+  const itemId = (found?.item?.id) || meta.itemId || unitSelect('ud2Item').value;
+  const levelId = meta.levelId || unitSelect('ud2Level').value;
+  return typeof unitTopicListWithDimension === 'function'
+    ? unitTopicListWithDimension(itemId, levelId)
+    : listUnitTopics(itemId, levelId);
 }
 
 function unitSelectionMeta(selection) {
@@ -584,7 +657,17 @@ function unitSelectionMeta(selection) {
     itemId: selection.itemId, item: selection.itemLabel,
     levelId: selection.levelId, level: selection.levelLabel,
     topic: selection.topic, topicPending: isUnitTopicPending(selection.topic),
+    // 本选题涉及哪些维度 —— 结构图据此显示分支，也便于事后核对 18 课时是否覆盖了各维度
+    dimensions: unitSelectionDimensions(selection),
   } : {};
+}
+
+/** 当前选题（细项 + 水平）实际涉及的维度 id 列表（七大维度的子集） */
+function unitSelectionDimensions(selection = currentUnitSelection()) {
+  if (typeof unitTopicGroups !== 'function') return [];
+  const groups = unitTopicGroups(selection.itemId || unitSelect('ud2Item').value,
+    selection.levelId || unitSelect('ud2Level').value);
+  return groups.map(group => group.id);
 }
 
 /**
@@ -606,6 +689,8 @@ function mergeUnitStage(parsed, selection, stage) {
         if (item.objectives && typeof item.objectives === 'object') {
           target.objectives = { ...target.objectives, ...item.objectives };
         }
+        // dimension：本课次属于哪个维度（七大维度键），用于校验 18 课时是否覆盖各维度
+        if (typeof item.dimension === 'string' && item.dimension) target.dimension = item.dimension.trim();
         if (typeof item.content === 'string' && item.content) target.content = item.content;
         if (typeof item.method === 'string' && item.method) target.method = item.method;
       });
@@ -627,8 +712,8 @@ function mergeUnitStage(parsed, selection, stage) {
   unitExpanded.add('structure');
 }
 
-/** 请求某一个阶段，并读取它的流式结果 */
-async function requestUnitStage(stage, selection, context = null, extra = {}) {
+/** 请求某一个阶段，并读取它的流式结果（options.label 用于并发生成时区分进度条文案） */
+async function requestUnitStage(stage, selection, context = null, extra = {}, options = {}) {
   let response;
   try {
     response = await fetch('/api/ai', {
@@ -642,6 +727,10 @@ async function requestUnitStage(stage, selection, context = null, extra = {}) {
         level: selection.levelLabel,
         topic: selection.topic,
         topicPending: isUnitTopicPending(selection.topic),
+        // 让后端按「细项 + 水平」拿到具体教学内容清单，18 课时才有抓手
+        itemId: selection.itemId,
+        levelId: selection.levelId,
+        topicList: unitSelectionTopicList(),
         ...(context ? { context } : {}),
         ...extra,
       }),
@@ -654,7 +743,8 @@ async function requestUnitStage(stage, selection, context = null, extra = {}) {
     try { result = await response.json(); } catch { /* 非 JSON 错误体 */ }
     throw new Error(result?.error || `AI 服务请求失败（HTTP ${response.status}）`);
   }
-  return readUnitJsonStream(response, charCount => updateUnitProgress(charCount, UNIT_STAGE_LABELS[stage] || '生成中'));
+  const label = options.label || UNIT_STAGE_LABELS[stage] || '生成中';
+  return readUnitJsonStream(response, charCount => updateUnitProgress(charCount, label));
 }
 
 function closeUnitModals() {
@@ -662,10 +752,12 @@ function closeUnitModals() {
 }
 
 /**
- * 一键生成 —— 分步拼接：
+ * 一键生成 —— 分步 + 分批拼接：
  *   阶段① 模块 1–6（分析 + 重难点 + 结构图）→ 立即渲染给老师看
- *   阶段② 带上阶段① 的精简上下文，只写模块 7–11（18 课时极度精简 + 收尾四模块）
- *   若阶段② 仍被截断（说明课时表本身就超标），弹窗引导点【单独生成课时表】分批补齐
+ *   阶段② 三批【并发】写课时表（第 1–6 / 7–12 / 13–18 课次）+ 一个请求写模块 8–11 收尾四项
+ *         18 课时一次性请求必然被模型输出上限截断，拆成 3 批后每批只写 6 个课时；
+ *         每批的上下文只带本批次涉及的维度，输入 token 也让给了输出。
+ *   三批合并后仍缺课次 → 弹窗引导点【补全】单独生成那几个课次
  */
 async function generateWholeUnit() {
   if (unitGenerating) return;
@@ -693,11 +785,44 @@ async function generateWholeUnit() {
     saveUnitData({ silent: true });
     renderUnitModules();                       // 先显示第一阶段内容（老师可以先看着改）
 
-    /* ---- 阶段 ②：模块 7–11 ---- */
-    updateUnitProgress(0, UNIT_STAGE_LABELS.tail, '18 课时已强制精简');
-    showUnitStatus('✓ 第 1/2 步完成。第 2/2 步：正在生成模块 7–11（18 课时计划表、考核与作业、学习评价、教学反思、教学资源）…', 'info');
-    const stage2 = await requestUnitStage('tail', selection, unitStageContext());
-    mergeUnitStage(stage2.data || recoverPartialUnitJSON(stage2.content) || {}, selection, 'tail');
+    /* ---- 阶段 ②：18 课时分 3 批并发 + 模块 8–11 收尾四项并发 ---- */
+    updateUnitProgress(0, UNIT_STAGE_LABELS.tail, '课时表分 3 批并行生成，每批 6 个课时');
+    showUnitStatus('✓ 第 1/2 步完成。第 2/2 步：18 课时表分 3 批并行生成（第 1–6 / 7–12 / 13–18 课次），同时生成模块 8–11…', 'info');
+    const context = unitStageContext();
+    const jobs = [
+      { stage: 'tail', label: '模块 8–11', run: () => requestUnitStage('tail', selection, context, {}, { label: '模块 8–11 收尾四项' }) },
+      ...UNIT_LESSON_BATCHES.map(([from, to]) => ({
+        stage: 'lessons',
+        label: `第 ${from}–${to} 课次`,
+        run: () => requestUnitStage('lessons', selection, context, { from, to }, { label: `课时表 ${from}–${to} 课次` }),
+      })),
+    ];
+    // 4 个请求并发；单个失败不影响其它批次（已生成的内容都不会丢）
+    const settled = await Promise.all(jobs.map(job => job.run().then(
+      result => ({ job, result }),
+      error => ({ job, error }),
+    )));
+    const failures = [];
+    settled.forEach(({ job, result, error }) => {
+      if (error) {
+        failures.push(`${job.label}：${error instanceof Error ? error.message : String(error)}`);
+        return;
+      }
+      const parsed = result.data || recoverPartialUnitJSON(result.content);
+      if (parsed && typeof parsed === 'object') mergeUnitStage(parsed, selection, job.stage);
+      else failures.push(`${job.label}：输出被截断且无法恢复`);
+    });
+
+    // 收尾四项没写出来（tail 请求失败）时，用更小的 closing 请求再兜一次
+    if (unitTailMissing().length) {
+      showUnitStatus('模块 8–11 还没拿到，正在用更小的请求单独补齐…', 'info');
+      try {
+        const closing = await requestUnitStage('closing', selection, unitStageContext(), {}, { label: '模块 8–11' });
+        mergeUnitStage(closing.data || recoverPartialUnitJSON(closing.content) || {}, selection, 'closing');
+      } catch (error) {
+        failures.push(`模块 8–11 兜底：${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
 
     // 结构图节点没写全时，按课时表标题兜底补齐（不动老师的 canvas，只给默认归属）
     const missingStructure = missingStructureNumbers(unitData);
@@ -709,15 +834,16 @@ async function generateWholeUnit() {
     const missingLessons = unitMissingLessonNumbers();
     const missingTail = unitTailMissing();
     if (missingLessons.length) {
-      const received = stage2.content ? stage2.content.length : 0;
       showUnitStatus(
-        `第 2 阶段在第 ${missingLessons[0]} 课时附近被截断${received ? `（已抢救 ${received} 字）` : ''}：`
-        + `还缺第 ${missingLessons.join('、')} 课时${missingTail.length ? `，以及模块 ${missingTailLabel(missingTail)}` : ''}。`
-        + '请点【单独生成课时表】分批补齐 —— 已生成的内容都在，不会被覆盖。',
+        `第 ${missingLessons.join('、')} 课次缺失${failures.length ? `（${failures.join('；')}）` : ''}：`
+        + '请点击【补全】按钮单独生成该课次 —— 已生成的课时都在，不会被覆盖。',
         'warning',
       );
       showUnitTruncatedDialog(missingLessons, missingTail);
-      showToast('课时表未生成完整，需分批补齐', 'error');
+      showToast('课时表未生成完整，需单独补全', 'error');
+    } else if (failures.length) {
+      showUnitStatus(`✓ 18 课时齐全，但${failures.join('；')}。`, 'warning');
+      showToast('生成完成，但有部分内容需要人工检查', 'error');
     } else if (missingTail.length) {
       showUnitStatus(`✓ 18 课时齐全，但模块 ${missingTailLabel(missingTail)} 还缺内容，可在相应面板手工补写。`, 'warning');
       showToast('生成完成，但有部分内容需要人工检查', 'error');
@@ -739,23 +865,24 @@ function missingTailLabel(missingTail) {
   return missingTail.map(id => titles[id] || id).join('、');
 }
 
-/** 阶段② 被截断时的引导弹窗：给出【单独生成课时表】出口 */
+/** 仍有课次缺失时的弹窗：明确告诉老师缺哪几课次，并给出【补全】按钮 */
 function showUnitTruncatedDialog(missingLessons, missingTail) {
   const batches = unitMissingRanges(missingLessons);
   const missingLabel = missingTail.length ? `，以及模块 ${missingTailLabel(missingTail)}` : '';
   const body = `
     <div class="ud2-placeholder">
       <div class="ud2-placeholder-icon">✂️</div>
-      <h3>18课时表过长导致截断</h3>
-      <p>模型的<b>单次输出有上限</b>：一次写完 18 个课时会被截断，这是模型侧限制，不是网络问题。</p>
-      <p>当前还缺 <b>${missingLessons.length}</b> 个课时${missingLabel}；已经生成的内容<b>都还在</b>，不会被覆盖。</p>
+      <h3>第 ${missingLessons.join('、')} 课次缺失</h3>
+      <p>${missingLessons.map(no => `第 ${no} 课次`).join('、')}没有生成出来${missingLabel}。</p>
+      <p>模型的<b>单次输出有上限</b>：18 个课时已经拆成 3 批（1–6 / 7–12 / 13–18）并行生成，个别批次仍可能被截断 —— 这是模型侧限制，不是网络问题。</p>
+      <p>已经生成的课时<b>都还在</b>，点【补全】只会补缺失的那几个，不会覆盖。</p>
       <hr style="margin:14px 0;border:none;border-top:1px solid var(--border, #e2e8f0)">
-      <p>请点击【单独生成课时表】：系统会按 <b>${batches.length} 小批</b>${batches.length
-        ? `（${batches.map(batch => batch.length === 1 ? `第${batch[0]}课` : `第${batch[0]}–${batch[batch.length - 1]}课`).join('、')}）` : ''}
-         重新请求，每批改少量就不会被截断${missingTail.length ? '，顺带补齐收尾模块' : ''}。</p>
+      <p>请点击【补全】：系统会按 <b>${batches.length} 小批</b>${batches.length
+        ? `（${batches.map(batch => (batch.length === 1 ? `第${batch[0]}课` : `第${batch[0]}–${batch[batch.length - 1]}课`)).join('、')}）` : ''}
+         重新请求，每批只有几个课时，不会再被截断${missingTail.length ? '，顺带补齐收尾模块' : ''}。</p>
     </div>`;
-  showModal('需要分批生成课时表', body, `
-    <button class="btn btn-primary" type="button" onclick="generateLessonTableOnly()">单独生成课时表</button>
+  showModal('第 ' + missingLessons.join('、') + ' 课次缺失，请点击【补全】按钮单独生成该课次', body, `
+    <button class="btn btn-primary" type="button" onclick="generateLessonTableOnly()">补全</button>
     <button class="btn btn-ghost" type="button" onclick="closeModal()">稍后自己补</button>`);
 }
 
@@ -791,7 +918,8 @@ async function generateLessonTableOnly() {
       const to = batch[batch.length - 1];
       updateUnitProgress(0, `课时表第 ${index + 1}/${batches.length} 批（第 ${from}–${to} 课次）`, '每批 6 个课时，不会截断');
       showUnitStatus(`正在生成第 ${from}–${to} 课次（第 ${index + 1}/${batches.length} 批）…`, 'info');
-      const result = await requestUnitStage('lessons', selection, unitStageContext(), { from, to });
+      const result = await requestUnitStage('lessons', selection, unitStageContext(), { from, to },
+        { label: `课时表 ${from}–${to} 课次` });
       mergeUnitStage(result.data || recoverPartialUnitJSON(result.content) || {}, selection, 'lessons');
       saveUnitData({ silent: true });
       renderUnitModules();
@@ -799,7 +927,7 @@ async function generateLessonTableOnly() {
     if (unitTailMissing().length) {
       updateUnitProgress(0, UNIT_STAGE_LABELS.closing, '四个收尾模块');
       showUnitStatus('课时表已补齐，正在生成模块 8–11（考核与作业、学习评价、教学反思、教学资源）…', 'info');
-      const closing = await requestUnitStage('closing', selection, unitStageContext());
+      const closing = await requestUnitStage('closing', selection, unitStageContext(), {}, { label: '模块 8–11' });
       mergeUnitStage(closing.data || recoverPartialUnitJSON(closing.content) || {}, selection, 'closing');
     }
     if (missingStructureNumbers(unitData).length) unitData = autoFillStructure(unitData);
@@ -808,7 +936,7 @@ async function generateLessonTableOnly() {
 
     const remain = unitMissingLessonNumbers();
     if (remain.length) {
-      showUnitStatus(`仍然缺第 ${remain.join('、')} 课时（每批都很小了仍被截断），建议在模块 7 手工补写这几个课时。`, 'warning');
+      showUnitStatus(`第 ${remain.join('、')} 课次缺失，请再次点击模块 7 的【单独生成课时表】补全（每批只剩一两个课时）；仍不行就在模块 7 手工补写。`, 'warning');
       showToast('仍有课时未生成完整', 'error');
     } else {
       showUnitStatus('✓ 课时表已分批补齐并保存，请按教学实际微调每节课的内容与组织教法。', 'success');
@@ -896,12 +1024,33 @@ async function readUnitJsonStream(response, onDelta) {
   try {
     return { data: JSON.parse(content), content, truncated, warning };
   } catch {
+    // 被截断的半截 JSON：回退到最后一个安全截断点强制闭合，能救回多少算多少
+    const repaired = recoverPartialUnitJSON(content);
+    if (repaired && typeof repaired === 'object') {
+      return {
+        data: repaired,
+        content,
+        truncated: true,
+        warning: warning || '输出被模型截断，已自动修复 JSON 并保留已生成的部分。',
+      };
+    }
     return { data: null, content, truncated: true, warning: warning || '内容解析失败或已被截断。' };
   }
 }
 
-/** JSON 被截断时尽力抢救：补齐未闭合的括号 / 引号 */
+/**
+ * JSON 被截断时尽力抢救（实现在 js/json-repair.js）：
+ * 回退到最后一个"安全截断点"丢掉那半截字段，再按括号栈补闭合符 —— 比单纯补括号强得多。
+ * 脚本没加载时退回最朴素的补括号写法，保证页面不白屏。
+ */
 function recoverPartialUnitJSON(content) {
+  if (typeof repairTruncatedJSON === 'function') {
+    try {
+      return repairTruncatedJSON(content);
+    } catch {
+      return null;
+    }
+  }
   const source = String(content || '').trim();
   if (!source) return null;
   const stack = [];

@@ -2536,6 +2536,7 @@
 }
 .res-source { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: #eef2ff; color: #4338ca; font-weight: 600; }
 .res-source-manual { background: #ecfdf5; color: #047857; }
+.res-source-import { background: #fff7ed; color: #b45309; }
 .res-card-title { margin: 0; font-size: 16px; line-height: 1.4; }
 .res-card-content { margin: 0; font-size: 13px; color: var(--text-secondary, #64748b); }
 .res-card-meta {
@@ -2595,6 +2596,160 @@
 .res-ro-tree { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
 @media (max-width: 640px) { .res-ro-tree { grid-template-columns: 1fr; } }
 .res-ro-branch ol { margin: 4px 0 0; padding-left: 18px; font-size: 12px; line-height: 1.6; }
+/* ---------- 离线资源库：上传大单元文件 ---------- */
+.res-import { padding: 16px 18px; margin-bottom: 14px; }
+.res-import-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.res-import-head h2 { margin: 0 0 4px; font-size: 16px; }
+.res-import-head p { margin: 0; font-size: 13px; color: var(--text-secondary, #64748b); max-width: 720px; line-height: 1.6; }
+.res-drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 22px 16px;
+  border: 2px dashed var(--border, #cbd5e1);
+  border-radius: 12px;
+  background: #f8fafc;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color .2s, background .2s;
+}
+.res-drop:hover, .res-drop.is-active {
+  border-color: var(--primary, #2563eb);
+  background: #eff6ff;
+}
+.res-drop input[type="file"] { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.res-drop-icon { font-size: 24px; line-height: 1; }
+.res-drop:focus-within { outline: 2px solid var(--primary, #2563eb); outline-offset: 2px; }
+
+/* ---------- 离线资源库：解析报告 ---------- */
+.res-report-file { margin: 0 0 8px; font-size: 13px; font-weight: 700; }
+.res-report-stat {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #f8fafc;
+  text-align: center;
+}
+.res-report-stat dt { font-size: 11px; color: var(--text-tertiary, #94a3b8); }
+.res-report-stat dd { margin: 2px 0 0; font-size: 16px; font-weight: 700; }
+.res-report-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.res-report-list { margin: 0; padding-left: 20px; font-size: 13px; line-height: 1.8; }
+.res-report-sub { margin-top: 8px; color: var(--text-secondary, #64748b); font-size: 12px; }
+.res-report-item { line-height: 1.7; }
+.res-report-bad { color: #b91c1c; font-weight: 600; }
+.res-report-warn { color: #b45309; }
+
+/* ---------- 离线资源库：全屏手填工作台 ---------- */
+.modal-overlay.res-fullscreen { align-items: stretch; justify-content: stretch; }
+.modal-overlay.res-fullscreen .modal {
+  width: 100%;
+  max-width: none;
+  height: 100vh;
+  max-height: 100vh;
+  margin: 0;
+  border-radius: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.modal-overlay.res-fullscreen .modal-header { flex: 0 0 auto; }
+.modal-overlay.res-fullscreen .modal-body { flex: 1 1 auto; overflow: hidden; padding: 0; }
+.modal-overlay.res-fullscreen .modal-footer { flex: 0 0 auto; }
+.modal-overlay.res-fullscreen .res-toolbar-space { flex: 1 1 auto; }
+
+.res-wb { display: flex; height: 100%; min-height: 0; }
+.res-wb-nav {
+  flex: 0 0 240px;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border, #e2e8f0);
+  background: #f8fafc;
+  padding: 14px 10px;
+  overflow-y: auto;
+}
+.res-wb-nav-title { margin: 0 0 8px; font-size: 11px; font-weight: 700; letter-spacing: 1px; color: var(--text-tertiary, #94a3b8); }
+.res-wb-nav-list { display: flex; flex-direction: column; gap: 2px; }
+.res-wb-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text-primary, #1e293b);
+}
+.res-wb-nav-item:hover { background: var(--bg-hover, #eef2f7); }
+.res-wb-nav-item.is-active { background: var(--primary, #2563eb); color: #fff; }
+.res-wb-nav-item.is-active .res-wb-nav-index { background: rgba(255, 255, 255, .22); color: #fff; }
+.res-wb-nav-index {
+  flex: 0 0 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: var(--bg-hover, #e2e8f0);
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary, #64748b);
+}
+.res-wb-nav-label { flex: 1 1 auto; }
+.res-wb-nav-dot { font-size: 12px; color: var(--text-tertiary, #94a3b8); font-style: normal; }
+.res-wb-nav-dot.is-filled { color: #15803d; font-weight: 700; }
+.res-wb-nav-item.is-active .res-wb-nav-dot.is-filled { color: #bbf7d0; }
+.res-wb-nav-foot { margin: auto 4px 0; font-size: 11px; color: var(--text-tertiary, #94a3b8); line-height: 1.6; }
+
+.res-wb-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+.res-wb-pane { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; padding: 16px 20px; overflow-y: auto; }
+.res-wb-pane[hidden] { display: none; }
+.res-wb-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+.res-wb-head b { font-size: 15px; }
+.res-wb-form { max-width: 720px; }
+.res-wb-text {
+  flex: 1 1 auto;
+  min-height: 320px;
+  width: 100%;
+  padding: 14px 16px;
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 10px;
+  font-family: "SFMono-Regular", Consolas, "Microsoft YaHei", monospace;
+  font-size: 13px;
+  line-height: 1.8;
+  resize: none;
+  white-space: pre;
+  overflow: auto;
+}
+.res-wb-text:focus { outline: 2px solid var(--primary, #2563eb); outline-offset: -1px; border-color: var(--primary, #2563eb); }
+
+@media (max-width: 860px) {
+  .res-wb { flex-direction: column; }
+  .res-wb-nav {
+    flex: 0 0 auto;
+    max-height: 30vh;
+    border-right: none;
+    border-bottom: 1px solid var(--border, #e2e8f0);
+  }
+  .res-wb-nav-list { flex-direction: row; overflow-x: auto; }
+  .res-wb-nav-item { white-space: nowrap; }
+  .res-wb-nav-foot { display: none; }
+}
+
 .res-ro-table-wrap { overflow-x: auto; }
 .res-ro-table { font-size: 12px; }
 .res-ro-table th, .res-ro-table td { padding: 5px 8px; vertical-align: top; }
