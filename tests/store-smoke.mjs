@@ -69,7 +69,7 @@ class FakeStorageEvent extends CustomEvent {
  *        决定 /api/data 的返回值；返回 pending 可以让请求永远挂着（用来验「不等云端」）
  */
 function createStore(options = {}) {
-  const { seed = {}, cloud = () => ({ mode: 'supabase', data: {} }) } = options;
+  const { seed = {}, cloud = () => ({ mode: 'supabase', data: {} }), post = null } = options;
   const storage = makeStorage(seed);
   const calls = [];
   const events = [];
@@ -104,9 +104,17 @@ function createStore(options = {}) {
     const method = (init.method || 'GET').toUpperCase();
     const body = init.body ? JSON.parse(init.body) : null;
     calls.push({ url, method, body });
-    if (method === 'POST') return { ok: true, status: 200, json: async () => ({ mode: 'supabase', ok: true, report: [] }) };
+    if (method === 'POST') {
+      // post 钩子可以返回一个自定义响应（用来模拟 502 / 主键冲突）
+      if (typeof post === 'function') {
+        const custom = await post({ url, method, body });
+        if (custom) return custom;
+      }
+      return { ok: true, status: 200, json: async () => ({ mode: 'supabase', ok: true, report: [] }) };
+    }
     const payload = await cloud({ url, method, body });
     if (!payload) return new Promise(() => {});          // 故意挂着：模拟「云端很慢」
+    if (typeof payload === 'object' && 'ok' in payload) return payload;   // 直接给一个响应（模拟 4xx/5xx）
     return { ok: true, status: 200, json: async () => payload };
   };
 
@@ -409,6 +417,117 @@ await test('⑭ forceRecover 之后可以手动把数据推回云端修好被污
   await env.pump();
   assert(env.postsToCloud().some(call => env.athletesIn(call.body?.value) === ATHLETE_COUNT),
     'pushLocalToCloud() 必须把 216 条推回云端');
+});
+
+/* ---------- 体测数据这场灾难的专项防线 ---------- */
+
+const FITNESS_KEY = 'pe_fitness_records';
+const FITNESS_ROWS = [
+  { id: 'F1', studentId: 's1', value: 7.2 },
+  { id: 'F2', studentId: 's2', value: 8.1 },
+  { id: 'F3', studentId: 's3', value: 6.5 },
+];
+
+await test('⑮ 云端接口 5xx：本地体测数据必须原样保留，一个字都不能改', async () => {
+  const env = createStore({
+    seed: { [FITNESS_KEY]: FITNESS_ROWS },
+    cloud: () => ({ ok: false, status: 502, json: async () => ({ error: '读写 Supabase 失败' }) }),
+  });
+  await env.Store.start();
+  await env.pump();
+  const value = env.Store.read(FITNESS_KEY, []);
+  equal(value.length, 3, '云端 502 时本地体测数据必须完整保留');
+  equal(JSON.stringify(value), JSON.stringify(FITNESS_ROWS), '内容不能被改动');
+  equal(JSON.parse(env.storage.getItem(FITNESS_KEY)).length, 3, 'localStorage 镜像也不能被洗掉');
+});
+
+await test('⑯ 云端返回空数组 + 本地有体测数据 → 拒绝覆盖，并把本地这份反推回云端', async () => {
+  const env = createStore({
+    seed: { [FITNESS_KEY]: FITNESS_ROWS },
+    cloud: () => ({ mode: 'supabase', data: { [FITNESS_KEY]: [] } }),
+  });
+  await env.Store.start();
+  await env.pump();
+  equal(env.Store.read(FITNESS_KEY, []).length, 3, '云端空数组不许覆盖本地体测数据');
+  equal(JSON.parse(env.storage.getItem(FITNESS_KEY)).length, 3, 'localStorage 镜像也要保住');
+  assert(env.calls.some(call => call.method === 'POST' && call.body?.key === FITNESS_KEY
+    && call.body.value?.length === 3), '必须把本地这份反推回云端，把被洗空的表修回来');
+});
+
+await test('⑰ 连续写云端失败 3 次 → 熔断：停止重试 + 红色错误，数据仍在本机', async () => {
+  const env = createStore({
+    seed: { [FITNESS_KEY]: FITNESS_ROWS },
+    cloud: () => ({ mode: 'supabase', data: { [FITNESS_KEY]: FITNESS_ROWS } }),
+    post: () => ({ ok: false, status: 502, json: async () => ({ error: 'duplicate key value violates unique constraint "fitness_records_pkey"' }) }),
+  });
+  await env.Store.start();
+  await env.pump();
+  env.Store.write(FITNESS_KEY, [...FITNESS_ROWS, { id: 'F4', studentId: 's4', value: 9.0 }]);
+  await env.pump();
+  // 反复同步：每一次补推都会再失败一次
+  for (let round = 0; round < 4; round += 1) {
+    await env.Store.sync();
+    await env.pump();
+  }
+  const failed = env.Store.getFailedWrites();
+  equal(failed.length, 1, '失败的键要被熔断（出队、不再重试）');
+  equal(failed[0].key, FITNESS_KEY, '熔断的是体测数据这个键');
+  assert(failed[0].attempts >= 3, `至少失败 3 次才熔断（实际 ${failed[0].attempts}）`);
+  assert(env.logs.some(line => line.includes('数据同步失败，可能是数据结构冲突')),
+    '必须打印红色错误「数据同步失败，可能是数据结构冲突」');
+  equal(env.Store.read(FITNESS_KEY, []).length, 4, '熔断后本地数据一条都不能少');
+  // 熔断后不再重试：再同步几次，POST 次数不再增长
+  const postsBefore = env.calls.filter(call => call.method === 'POST').length;
+  for (let round = 0; round < 3; round += 1) {
+    await env.Store.sync();
+    await env.pump();
+  }
+  const postsAfter = env.calls.filter(call => call.method === 'POST').length;
+  equal(postsAfter, postsBefore, '熔断后不得继续重试（否则就是无限重试死循环）');
+});
+
+await test('⑱ 熔断之后：云端再返回空数据，本地依然原封不动', async () => {
+  const env = createStore({
+    seed: { [FITNESS_KEY]: FITNESS_ROWS },
+    cloud: () => ({ mode: 'supabase', data: { [FITNESS_KEY]: [] } }),
+    post: () => ({ ok: false, status: 502, json: async () => ({ error: 'boom' }) }),
+  });
+  await env.Store.start();
+  await env.pump();
+  env.Store.write(FITNESS_KEY, [...FITNESS_ROWS, { id: 'F9' }]);
+  await env.pump();
+  for (let round = 0; round < 4; round += 1) {
+    await env.Store.sync();
+    await env.pump();
+  }
+  equal(env.Store.getFailedWrites().length, 1, '已熔断');
+  equal(env.Store.read(FITNESS_KEY, []).length, 4, '熔断的键绝不能被云端空数据覆盖');
+  equal(JSON.parse(env.storage.getItem(FITNESS_KEY)).length, 4, 'localStorage 也不能被洗空');
+});
+
+await test('⑲ 本地本来就是空 → 空快照绝不能推上云端（推上去就把表洗成 0 条）', async () => {
+  const env = createStore({ seed: {}, cloud: () => ({ mode: 'supabase', data: {} }) });
+  await env.Store.start();
+  await env.pump();
+  env.Store.write(FITNESS_KEY, []);
+  await env.pump();
+  const emptyPush = env.calls.find(call => call.method === 'POST' && call.body?.key === FITNESS_KEY
+    && Array.isArray(call.body.value) && call.body.value.length === 0);
+  assert(!emptyPush, '空数组不能被推上云端');
+});
+
+await test('⑳ 用户亲手清空 → 允许写空，并带上 clear 标记（服务端据此才允许删表）', async () => {
+  const env = createStore({
+    seed: { [FITNESS_KEY]: FITNESS_ROWS },
+    cloud: () => ({ mode: 'supabase', data: { [FITNESS_KEY]: FITNESS_ROWS } }),
+  });
+  await env.Store.start();
+  await env.pump();
+  env.Store.write(FITNESS_KEY, []);
+  await env.pump();
+  const clearPush = env.calls.find(call => call.method === 'POST' && call.body?.key === FITNESS_KEY);
+  assert(clearPush, '清空要真的推到云端');
+  equal(clearPush.body.clear, true, '清空必须带 clear=true 标记');
 });
 
 const failed = results.filter(result => !result.ok);

@@ -91,6 +91,13 @@ const PENDING_FRESH_MS = 30000;
 const UNCONFIRMED_TTL_MS = 5 * 60 * 1000;
 // 重要表单（报名保存等）的写入：云端确认前的重试次数
 const CRITICAL_WRITE_ATTEMPTS = 2;
+
+/**
+ * ⛔ 同一个键连续写云端失败多少次就熔断（停止重试）。
+ * 3 次足够区分"网络抖一下"和"表结构冲突 / 主键冲突"这类硬错误 ——
+ * 后者再重试一百次也一样失败，只会把请求队列刷满。
+ */
+const MAX_PERSIST_ATTEMPTS = 3;
 // 重要表单云端确认失败后的后台续传节奏（毫秒）
 const CRITICAL_RETRY_DELAYS = [1500, 5000, 15000, 30000];
 /**
@@ -149,6 +156,9 @@ const Store = {
   _localWrites: new Set(),
   // 重要表单云端写失败后的续传定时器：key → timer
   _criticalTimers: new Map(),
+  // 被熔断的键（连续写云端失败超过 MAX_PERSIST_ATTEMPTS 次）：key → { attempts, lastError, at, value }
+  // 这些键【不再重试】，但依然受保护：云端的空数据 / 旧数据都覆盖不到它们。
+  _failedWrites: new Map(),
   _loadingNode: null,
   _slowHintTimer: null,
   _backedUp: false,
@@ -362,8 +372,11 @@ const Store = {
       this._refreshLocksFromStorage();
       // ② 丢掉过期的失败写入，避免它们随后被补推、把本地旧数据反向覆盖到云端
       this._dropStalePending();
-      // ③ 云端覆盖：有锁的键一律跳过
-      const changed = this._applyCloud(payload.data);
+      // ③ 云端覆盖：有锁的键一律跳过；读取失败的键也一律跳过
+      const failedKeys = Array.isArray(payload.errors)
+        ? payload.errors.map(item => item?.key).filter(Boolean)
+        : [];
+      const changed = this._applyCloud(payload.data, { failedKeys });
       /* 回写本地镜像：只写「这次真正变了」的键 + 云端已删除（缓存为 null）的键。
          ⚠️ 不再全量回写：多个 iframe 共享同一份 localStorage，一个缓存还是旧值的兄弟
             iframe 全量回写，会把报名页刚落盘的新数据盖成旧数据（用户一刷新就"数据没了"）。 */
@@ -509,10 +522,12 @@ const Store = {
    * 用户保存完立刻刷新 → 新页面同步拿回云端旧数据 → 把刚保存的数据直接冲掉。
    * 所以 write() 在推送前就打标记，成功才清除。
    */
-  _applyCloud(data) {
+  _applyCloud(data, options = {}) {
     const changed = [];
     const protectedKeys = [];
     const report = { protected: protectedKeys, refused: [], healed: [] };
+    // 云端读取失败的键：那一格根本不是"云端没有"，而是"没读到" → 一律不许覆盖本地
+    const failedKeys = new Set(Array.isArray(options.failedKeys) ? options.failedKeys : []);
     this._lastSyncReport = report;
     // ⏸ 暂停期间：一个键都不许改（forceRecover 恢复出来的数据谁也别碰）
     if (this._cloudPaused) {
@@ -527,6 +542,21 @@ const Store = {
       const pending = this._pendingWrites.get(key);
       if (pending && (pending.critical || Date.now() - pending.at <= UNCONFIRMED_TTL_MS)) {
         protectedKeys.push(key);
+        return;
+      }
+      /* ⛔ 已被熔断的键（连续写云端失败 3 次）：本地这份是【唯一可信的一份】，
+         云端无论返回什么都覆盖不了它 —— 否则"云端写不进去 + 云端读出来是空"
+         就会把本地仅有的数据也一起洗掉（数据彻底消失）。 */
+      if (this._failedWrites.has(key)) {
+        protectedKeys.push(key);
+        console.warn(`[Store] ⛔ ${key} 之前写云端失败已熔断，本地数据保留不动（云端不覆盖）`);
+        return;
+      }
+      /* ⛔ 云端这一格【读取失败】（表结构异常 / 权限问题）→ 它不是"云端没有数据"，
+         而是"没读出来"。这种情况下一律保留本地，并提示具体是哪张表。 */
+      if (failedKeys.has(key)) {
+        protectedKeys.push(key);
+        console.warn(`[Store] ⛔ 云端读取 ${key} 失败，本地数据保留不动（绝不用读取失败的结果覆盖本地）`);
         return;
       }
       const next = data[key] === undefined ? null : data[key];
@@ -555,6 +585,24 @@ const Store = {
         // 云端带回非空数据 → 顺手刷新备份，保证备份永远是最新那一份
         if (this._isMeetKey(key) && this._countOf(next) > 0) this._updateBackup(key, next, {});
         return;
+      }
+      /* 🛑 底线规则（对【所有】键生效，不只是运动会数据）：
+         云端这一份是空的，而本地有真实数据 → 绝对拒绝覆盖。
+         以前这条只对 pe_sports_meet_* 生效，于是"体测数据上传失败 → 云端表被洗空 →
+         刷新时云端返回空数组 → 本地被覆盖成空"这条链畅通无阻 —— 这就是那次数据全没的现场。
+         现在只要云端是空的，本地有数据就一律保住本地，并把本地这份反推回云端修好它。
+         唯一例外：用户在界面上【亲手清空】且还没确认（pending.clear === true），那时空值是要生效的。 */
+      const cloudEmpty = this._isEmptyValue(next);
+      const localHasData = !this._isEmptyValue(current);
+      if (cloudEmpty && localHasData) {
+        const clearIntent = pending?.clear === true;
+        if (!clearIntent) {
+          console.warn(`[Store] ⛔ 云端 ${key} 返回空数据，本地有 ${this._sizeOf(current)} → 拒绝覆盖本地，`
+            + '并把本地这份反推回云端（云端那份多半是写入失败被洗空了）');
+          report.refused.push(key);
+          this._pushBackToCloud(key, current);
+          return;
+        }
       }
       // 云端这条是空的、本地却有数据 —— 只有「本会话亲手写过」的键才保本地：
       // 这种情况多半是自己的写入还没落库 / 云端读取打了个空，静默清空 = 用户眼里的"数据消失了"。
@@ -813,10 +861,13 @@ const Store = {
    */
   write(key, value, options = {}) {
     const before = this._isMeetKey(key) ? this.cache.get(key) : undefined;
+    const previousValue = this._isMeetKey(key) ? before : this._readLocalValue(key);
     const merged = this._mergeMeetData(key, value, options);   // ⛔ 空覆盖在这里抛异常
     this._traceEmptyWrite(key, before, merged, 'write()');      // 🚨 看门狗：谁把主数据写成 0 条
     this.cache.set(key, merged);
     this._localWrites.add(key);
+    // 用户又改了 → 之前熔断的状态作废，重新给一次机会
+    this._failedWrites.delete(key);
     if (this._isMeetKey(key)) {
       console.log(`[Store] 写入键：${key}，写入前报名数据：${this._countOf(before)}条，写入后报名数据：${this._countOf(merged)}条`);
     }
@@ -830,9 +881,23 @@ const Store = {
     // 云端可用才需要"未确认保护"（纯本地模式没有云端数据来覆盖）；
     // 重要表单走 writeCritical，它自己会打 critical 标记，不受这里影响
     if (this.cloudState !== 'off') {
-      // 只有"调用方声明这是用户亲手要清空"时，才允许把空数据推给云端
-      const allowEmpty = options.force === true || options.allowEmpty === true;
-      this._markUnconfirmed(key, merged, { clear: allowEmpty && !this._hasContent(key, merged) });
+      /* 清空意图的判定（对所有键统一）：
+         · 调用方显式声明 force / allowEmpty → 就是在界面上亲手清空；
+         · 否则看"本地从有变无" —— 从有变无也是用户主动删的；
+         · 本来就是空的 → 不是清空，是【某个页面的内存快照是空的】，
+           这种空数组绝不能推到云端（推上去就把云端洗成 0 条 —— 数据丢失链条的一环）。 */
+      const explicitClear = options.force === true || options.allowEmpty === true;
+      const wasEmpty = !this._hasContent(key, previousValue);
+      const nowEmpty = !this._hasContent(key, merged);
+      const clearIntent = explicitClear || (!wasEmpty && nowEmpty);
+      const allowEmpty = explicitClear || clearIntent;
+      if (nowEmpty && wasEmpty && !explicitClear) {
+        console.warn(`[Store] ⛔ ${key} 本地本来就是空的，已拦下这次云端推送`
+          + '（空快照推上去会把云端洗成 0 条）');
+        this._markUnconfirmed(key, merged, { clear: false });
+        return merged;
+      }
+      this._markUnconfirmed(key, merged, { clear: clearIntent && nowEmpty });
       this._persistSafely(key, merged, { allowEmpty });
     }
     return merged;
@@ -1144,6 +1209,12 @@ const Store = {
       const entry = this._pendingWrites.get(key) || { value, at: Date.now(), attempts: 0 };
       entry.attempts = (entry.attempts || 0) + 1;
       entry.lastError = error?.message || String(error);
+      // ⛔ 连续失败超过上限 → 熔断（和 _flushPending 同一把尺子）：
+      //    不再重试、不再排队，但本地数据与保护锁都留着，云端覆盖不到它。
+      if (entry.attempts >= MAX_PERSIST_ATTEMPTS) {
+        this._markPersistFailed(key, entry, error);
+        return;
+      }
       this._pendingWrites.set(key, entry);
       this._writeLock(key, entry);
       this._onPersistError(key, error);
@@ -1243,6 +1314,14 @@ const Store = {
         attempts: info?.attempts || 0,
         label: info?.label || '',
       });
+      /* 之前被熔断的键（failed 标记）：不要再自动补推（会变成无限重试），
+         但【必须继续保护】本地这份 —— 云端的空数据绝不能覆盖它。 */
+      if (info?.failed) {
+        this._failedWrites.set(key, { attempts: info?.attempts || 0, lastError: '上次写入云端失败已熔断', at: info?.at || Date.now(), value });
+        this._pendingWrites.delete(key);
+        console.warn(`[Store] ⛔ ${key} 上次写入云端失败已熔断，本地数据继续保留，刷新后不再自动重试（需要时执行 Store.retryFailedKeys()）`);
+        return;
+      }
       console.warn(`[Store] ⛔ 检测到「${key}」上次写入云端未确认（${Math.round((Date.now() - (info?.at || Date.now())) / 1000)} 秒前），本地数据已上锁保护，云端不得覆盖，将自动补推`);
       // 只有云端还连着才排续传，避免"根本没配云端"时每次开页面都空转重试
       if (this.cloudState !== 'off') this._scheduleCriticalRetry(key);
@@ -1266,6 +1345,11 @@ const Store = {
         if (value === undefined || value === null) continue;
         // 同上：运动会数据为空时不上锁，别让空数据的锁挡住自愈通道
         if (this._isMeetKey(key) && !this._hasContent(key, value) && info?.clear !== true) continue;
+        // 被熔断的键：只保护、不重排队（否则刷新后又变成无限重试）
+        if (info?.failed) {
+          this._failedWrites.set(key, { attempts: info?.attempts || 0, lastError: '写入云端失败已熔断', at: info?.at || Date.now(), value });
+          continue;
+        }
         this._pendingWrites.set(key, {
           value,
           at: info?.at || Date.now(),
@@ -1345,7 +1429,9 @@ const Store = {
     await this._fetchJSON('/api/data', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key, value }),
+      // clear=true：服务端据此判断"这是用户亲手清空"，才允许把该表清空；
+      // 不带这个标记的空数组，服务端一行都不会删（防止把云端洗成 0 条）
+      body: JSON.stringify({ key, value, clear: options.allowEmpty === true }),
     });
     return true;
   },
@@ -1353,6 +1439,14 @@ const Store = {
   /**
    * 补推之前失败的写入。只补推"新鲜"的那部分——
    * 过期的已经在 _dropStalePending 里丢掉，绝不会把本地旧数据推上去覆盖云端
+   *
+   * ⛔ 熔断：同一个键连续失败超过 MAX_PERSIST_ATTEMPTS 次（默认 3 次），
+   *    就把它从队列里摘掉、停止重试，并打印红色错误。
+   *    以前这里是"失败了就留着，下一轮同步接着推" —— 碰上 502（表结构冲突 / 字段类型不对）
+   *    就是无限重试：每一轮都往服务端打一次 POST，把请求队列和日志刷满，
+   *    老师看到的现象就是"上传完数据后页面一直在转，什么也传不上去"。
+   *    现在：3 次失败就熔断，数据完整留在本地并保持上锁（云端覆盖不到它），
+   *    老师可以用 Store.retryFailedKeys() 手动重来，或修好表结构后刷新页面再试。
    */
   async _flushPending() {
     if (!this._pendingWrites.size) return;
@@ -1365,12 +1459,86 @@ const Store = {
       } catch (error) {
         entry.attempts = (entry.attempts || 0) + 1;
         entry.lastError = error?.message || String(error);
+        // 连续失败超过上限 → 熔断：出队、不再重试，但【保留本地数据与保护锁】
+        if (entry.attempts >= MAX_PERSIST_ATTEMPTS) {
+          this._markPersistFailed(key, entry, error);
+          continue;
+        }
         this._writeLock(key, entry);
         console.warn(`[Store] 补推 ${key} 仍未成功（第 ${entry.attempts} 次），数据保留在本地`, error);
         // 重要表单：继续排后台续传，绝不因为补推失败就丢
         if (entry.critical) this._scheduleCriticalRetry(key);
       }
     }
+  },
+
+  /**
+   * 熔断一个反复写不上去的键：
+   *   ① 从待写队列摘掉（停止重试）
+   *   ② 在保护锁上打 failed 标记（刷新后也不再自动重试，但要继续保护本地数据不被云端覆盖）
+   *   ③ 打印红色错误，把恢复办法一起告诉老师
+   */
+  _markPersistFailed(key, entry, error) {
+    const message = error?.message || String(error);
+    this._failedWrites.set(key, {
+      attempts: entry.attempts || 0,
+      lastError: message,
+      at: Date.now(),
+      value: entry.value,
+    });
+    // 出队（不再重试），但不调 _clearUnconfirmed —— 保护锁必须留着，
+    // 否则云端那份空数据会立刻覆盖掉本地这份真实数据
+    this._pendingWrites.delete(key);
+    const timer = this._criticalTimers.get(key);
+    if (timer) { clearTimeout(timer); this._criticalTimers.delete(key); }
+    // 锁上打标记：刷新后 _restoreUnconfirmed 会看到 failed，跳过自动补推（但仍然保护本地）
+    try {
+      const raw = localStorage.getItem(this._lockKeyOf(key));
+      const info = raw ? JSON.parse(raw) : {};
+      localStorage.setItem(this._lockKeyOf(key), JSON.stringify({
+        ...info, at: info.at || Date.now(), failed: true, attempts: entry.attempts || 0,
+      }));
+    } catch (error) { /* 忽略：打标记失败不影响熔断本身 */ }
+    console.error(
+      `[Store] ⛔ 数据同步失败，可能是数据结构冲突：${key} 连续 ${entry.attempts} 次写入云端失败，已停止重试。`
+      + ` 数据完整保留在本机，云端不会覆盖它。`
+      + ` 最后一次错误：${message}`
+      + ` —— 修复办法：检查 Supabase 表结构（主键 id 是否为 text、是否有重复行）后，`
+      + ` 在控制台执行 Store.retryFailedKeys() 重推，或直接刷新页面重试。`,
+    );
+    if (typeof window !== 'undefined' && typeof window.showToast === 'function') {
+      window.showToast(`${key} 同步失败（可能是数据结构冲突），已停止重试；数据仍在本机，修复表结构后重试即可`, 'error');
+    }
+  },
+
+  /**
+   * 手动重推被熔断的键（控制台：Store.retryFailedKeys()）
+   * 先把本地数据重新放进待写队列，再立刻补推一次。
+   */
+  async retryFailedKeys() {
+    const keys = [...this._failedWrites.keys()];
+    if (!keys.length) {
+      console.log('[Store] 没有被熔断的键');
+      return { ok: true, count: 0 };
+    }
+    keys.forEach(key => {
+      const failed = this._failedWrites.get(key);
+      this._failedWrites.delete(key);
+      const value = failed?.value ?? this._readLocalValue(key);
+      if (value === undefined || value === null) return;
+      this._markUnconfirmed(key, value, { clear: Boolean(failed?.clear) });
+      this._pendingWrites.get(key).attempts = 0;     // 重新计数
+    });
+    await this._flushPending();
+    console.log(`[Store] 已重推 ${keys.length} 个被熔断的键`);
+    return { ok: true, count: keys.length };
+  },
+
+  /** 被熔断的键清单（控制台排查用） */
+  getFailedWrites() {
+    return [...this._failedWrites.entries()].map(([key, info]) => ({
+      key, attempts: info.attempts, lastError: info.lastError, at: info.at,
+    }));
   },
 
   /**
@@ -1819,4 +1987,8 @@ if (typeof window !== 'undefined') {
   window.resumeCloud = () => Store.resumeCloud();
   window.pushLocalToCloud = () => Store.pushLocalToCloud();
   window.peekBackup = () => Store.peekBackup();
+  /* 熔断后的手动重推：Store.retryFailedKeys() / window.retryFailedKeys()
+     —— 修好表结构（主键冲突 / 字段类型）之后，把被熔断的键重新推一次 */
+  window.retryFailedKeys = () => Store.retryFailedKeys();
+  window.getFailedWrites = () => Store.getFailedWrites();
 }

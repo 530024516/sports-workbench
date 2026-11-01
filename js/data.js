@@ -86,6 +86,25 @@ function getFitnessScoreThresholds(testType, gender) {
 
 const WEEK_MODE_KEY = 'pe_week_mode';
 
+/**
+ * 体测记录的全局唯一 id 生成器。
+ *
+ * ⚠️ 以前是 `F${Date.now()}` —— "批量导入"是在 for 循环里连续调用 addFitnessRecord()，
+ *    几十条记录落在同一毫秒里，id 会【完全相同】。
+ *    服务端一条 INSERT 里出现两行同 id → Postgres 整条语句拒绝：
+ *    "duplicate key value violates unique constraint fitness_records_pkey" → 502；
+ *    而服务端在那之前已经 DELETE 过整张表 → 表被清空 → 云端 0 条 → 刷新后本地也被洗掉。
+ *    这就是那次数据丢失的源头。现在改成"时间戳 + 序号 + 随机尾巴"，同一毫秒内也不会撞。
+ */
+let fitnessRecordSeq = 0;
+function newFitnessRecordId() {
+  fitnessRecordSeq = (fitnessRecordSeq + 1) % 100000;
+  const stamp = Date.now().toString(36);
+  const seq = fitnessRecordSeq.toString(36).padStart(3, '0');
+  const salt = Math.random().toString(36).slice(2, 6);
+  return `F${stamp}${seq}${salt}`;
+}
+
 const DB = {
   // ===== 存储键 =====
   KEYS: {
@@ -235,14 +254,25 @@ const DB = {
   },
 
   saveFitnessRecords(list) {
-    this.set(this.KEYS.FITNESS_RECORDS, list);
+    // 同 id 只保留最后一条：旧数据里可能已经存在重复 id（老生成器撞车留下的），
+    // 不清掉的话每次写云端都会撞主键（duplicate key），整批数据都写不进去
+    const seen = new Map();
+    (Array.isArray(list) ? list : []).forEach(record => {
+      const id = String(record?.id ?? '');
+      if (!id) return;
+      seen.set(id, record);
+    });
+    this.set(this.KEYS.FITNESS_RECORDS, [...seen.values()]);
   },
 
   addFitnessRecord(record) {
     const list = this.getFitnessRecords();
-    record.id = record.id || `F${Date.now()}`;
+    record.id = record.id || newFitnessRecordId();
     record.createdAt = record.createdAt || new Date().toISOString();
-    list.push(record);
+    // 同 id 的旧记录顶掉（防止历史数据里已经存在的重复 id 一直留着）
+    const at = list.findIndex(r => r.id === record.id);
+    if (at >= 0) list[at] = record;
+    else list.push(record);
     this.saveFitnessRecords(list);
     return record;
   },
