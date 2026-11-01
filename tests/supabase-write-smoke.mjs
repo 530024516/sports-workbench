@@ -19,7 +19,7 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const { writeCollectionRows, dedupeRowsById, chunkList } = require(path.join(ROOT, 'lib/supabase.js'));
+const { writeCollectionRows, dedupeRowsById, chunkList, writeData, writeMany } = require(path.join(ROOT, 'lib/supabase.js'));
 
 /* ------------------------------ 断言器 ------------------------------ */
 
@@ -78,16 +78,24 @@ function makeFakeSupabase(initial = {}, options = {}) {
           payload.forEach(row => rows.set(row.id, row));
           return Promise.resolve({ data: null, error: null });
         },
-        delete() { calls.push({ type: 'delete', table: name }); pending = { op: 'delete', filters: [] }; return api; },
+        delete() {
+          const call = { type: 'delete', table: name, ids: null };
+          calls.push(call);
+          pending = { op: 'delete', filters: [], call };
+          return api;
+        },
         in(column, values) { pending.filters.push({ column, values }); return api; },
         neq(column, value) { pending.filters.push({ column, value }); return api; },
         then(onOk, onErr) {
           let result = { data: null, error: null };
           if (pending.op === 'select') {
-            result = { data: [...rows.values()].map(row => ({ id: row.id })), error: null };
+            result = { data: [...rows.values()].map(row => ({ id: row.id, updated_at: row.updated_at })), error: null };
           } else if (pending.op === 'delete') {
             const filter = pending.filters.find(item => item.values);
-            if (filter) filter.values.forEach(id => rows.delete(id));
+            if (filter) {
+              filter.values.forEach(id => rows.delete(id));
+              if (pending.call) pending.call.ids = [...filter.values];
+            }
             result = { data: null, error: null };
           }
           return Promise.resolve(result).then(onOk, onErr);
@@ -180,6 +188,120 @@ await test('⑦ 删除分批：一次删几百行也不会把 URL 撑爆', async
   const { client, rowsOf } = makeFakeSupabase({ fitness_records: rows });
   await writeCollectionRows(client, 'fitness_records', [{ id: 'F-new' }], {});
   equal(rowsOf('fitness_records').size, 1, '120 条旧行全部清掉，只剩新的那条');
+});
+
+/* ---------- 「云端被手机端反向清空」这场灾难的专项防线 ---------- */
+
+await test('⑧ 空载荷（空数组）+ 没有 clearIntent → 直接 400 拒绝，一个字都不许写', async () => {
+  const { client, calls, rowsOf } = makeFakeSupabase({ lesson_plans: [{ id: 'L1' }] });
+  let error = null;
+  try {
+    await writeData('pe_lesson_plans', [], { client });
+  } catch (thrown) {
+    error = thrown;
+  }
+  assert(error, '必须抛错（前端据此判定这次没写进去）');
+  equal(error.status, 400, '必须是 400 —— 不能是 5xx，否则前端会当成"暂时失败"无限重试');
+  equal(error.code, 'EMPTY_PAYLOAD_REFUSED', '错误码要能被识别');
+  equal(rowsOf('lesson_plans').size, 1, '云端的数据一根都不能少');
+  equal(calls.length, 0, '连一次 upsert / delete 都不许发');
+});
+
+await test('⑨ clearIntent=true（用户亲手清空）→ 才允许把表清空', async () => {
+  const { client, rowsOf } = makeFakeSupabase({ lesson_plans: [{ id: 'L1' }, { id: 'L2' }] });
+  await writeData('pe_lesson_plans', [], { client, clear: true });
+  equal(rowsOf('lesson_plans').size, 0, '用户亲手清空才允许删光');
+});
+
+await test('⑩ 单例键写 null 且没有 clearIntent → 同样 400 拒绝（不许删行）', async () => {
+  const { client, calls, rowsOf } = makeFakeSupabase({ app_settings: [{ id: 'pe_week_mode' }] });
+  let error = null;
+  try {
+    await writeData('pe_week_mode', null, { client });
+  } catch (thrown) {
+    error = thrown;
+  }
+  assert(error, '必须拒绝');
+  equal(error.status, 400, '必须是 400');
+  equal(rowsOf('app_settings').size, 1, '那一行不能被删');
+  equal(calls.filter(call => call.type === 'delete').length, 0, '不许发出删除');
+});
+
+await test('⑪ 并发保护：别人在我之后写的行（updated_at 更新）不会被我的旧快照删掉', async () => {
+  const older = new Date(Date.now() - 60000).toISOString();
+  const newer = new Date(Date.now() + 60000).toISOString();     // 比服务端本次写入还新
+  const { client, rowsOf } = makeFakeSupabase({
+    lesson_plans: [
+      { id: 'L-old', updated_at: older },   // 比我这次写入更旧 → 该删
+      { id: 'L-new', updated_at: newer },   // 别人刚写的 → 一个都不许删
+    ],
+  });
+  await writeData('pe_lesson_plans', [{ id: 'L-mine', data: {} }], { client });
+  const ids = [...rowsOf('lesson_plans').keys()];
+  assert(ids.includes('L-mine'), '我这条必须写进去');
+  assert(ids.includes('L-new'), '别人在我之后写的行必须留下（绝不能被旧快照当成"该删的旧行"）');
+  assert(!ids.includes('L-old'), '比我旧、又不在我快照里的行应该被删掉（整表替换语义）');
+});
+
+await test('⑫ 删除永远按【id 列表】执行，绝不出现整表 DELETE', async () => {
+  const { client, calls } = makeFakeSupabase({
+    lesson_plans: [{ id: 'L1' }, { id: 'L2' }, { id: 'L3' }],
+  });
+  await writeData('pe_lesson_plans', [{ id: 'L1', data: {} }], { client });
+  const deletes = calls.filter(call => call.type === 'delete');
+  equal(deletes.length, 1, '应该只有一次删除');
+  assert(Array.isArray(deletes[0].ids) && deletes[0].ids.length === 2,
+    '删除必须带上明确的 id 列表（没有 id 列表 = 整表 DELETE，一律禁止）');
+  assert(!deletes[0].ids.includes('L1'), '保留下来的行不能被删');
+});
+
+await test('⑬ 批量迁移：空的那一项标记为 skipped-empty（不算失败），云端一个字节都不动', async () => {
+  const { client, rowsOf } = makeFakeSupabase({ lesson_plans: [{ id: 'L1' }] });
+  const report = await writeMany({ pe_lesson_plans: [], pe_students: [{ id: 'S1' }] }, { client });
+  const empty = report.find(item => item.key === 'pe_lesson_plans');
+  equal(empty.status, 'skipped-empty', '空的那一项要标记为跳过，而不是报错');
+  equal(rowsOf('lesson_plans').size, 1, '云端的教案一根都不能少');
+  equal(rowsOf('students').size, 1, '有数据的键照常写入');
+});
+
+await test('⑭ 接口层：空载荷写入返回 400（不是 5xx —— 否则前端会无限重试刷屏）', async () => {
+  process.env.SUPABASE_URL = process.env.SUPABASE_URL || 'https://example.supabase.co';
+  process.env.SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'test-anon-key';
+  const { handleDataRequest } = require(path.join(ROOT, 'lib/data-api.js'));
+  const req = {
+    method: 'POST',
+    url: '/api/data',
+    body: { key: 'pe_lesson_plans', value: [] },
+    on() {},
+  };
+  let status = 0;
+  let payload = null;
+  const res = {
+    headersSent: false,
+    writableEnded: false,
+    writeHead(code) { status = code; },
+    end(body) { payload = body ? JSON.parse(body) : null; this.writableEnded = true; },
+  };
+  await handleDataRequest(req, res);
+  equal(status, 400, '接口必须返回 400');
+  equal(payload.code, 'EMPTY_PAYLOAD_REFUSED', '要带可识别的错误码');
+  assert(payload.hint, '要给出修复办法的提示');
+});
+
+await test('⑮ snapshotAt 并发保护：另一台设备在我这份快照【之后】写的行，一个都不许删', async () => {
+  const snapshotAt = new Date(Date.now() - 60000).toISOString();        // 我的快照是 1 分钟前
+  const afterSnapshot = new Date(Date.now() - 30000).toISOString();    // 对方在我快照之后写的
+  const { client, rowsOf } = makeFakeSupabase({
+    lesson_plans: [
+      { id: 'L-old', updated_at: new Date(Date.now() - 120000).toISOString() }, // 我快照之前就有的旧行 → 该删
+      { id: 'L-new', updated_at: afterSnapshot },                              // 我快照之后对方写的 → 必须留下
+    ],
+  });
+  await writeData('pe_lesson_plans', [{ id: 'L-mine', data: {} }], { client, snapshotAt });
+  const ids = [...rowsOf('lesson_plans').keys()];
+  assert(ids.includes('L-new'), '对方在我快照之后写的行必须留下（两端同时在线不能互相抹掉）');
+  assert(!ids.includes('L-old'), '我快照之前就存在的旧行应该被删掉');
+  assert(ids.includes('L-mine'), '我这条必须写进去');
 });
 
 const failed = results.filter(result => !result.ok);

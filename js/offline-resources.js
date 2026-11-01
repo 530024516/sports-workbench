@@ -90,7 +90,9 @@ const OfflineResources = {
   writeList(list) {
     const rows = Array.isArray(list) ? list : [];
     if (typeof Store !== 'undefined' && typeof Store.write === 'function') {
-      Store.write(RESOURCES_KEY, rows, { label: '离线资源库' });
+      // 列表被删光 = 用户亲手清空 → 带上 clearIntent，云端那张表才会真的空掉；
+      // 否则（页面初始化时的空快照）一律不推，绝不把云端洗成 0 条。
+      Store.write(RESOURCES_KEY, rows, { label: '离线资源库', clearIntent: rows.length === 0 });
       return true;
     }
     try {

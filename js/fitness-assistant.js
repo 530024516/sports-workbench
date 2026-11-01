@@ -175,7 +175,9 @@ function loadFitnessLogs() {
 }
 
 function persistFitnessLogs(logs) {
-  Store.write(FITNESS_LOG_KEY, logs);
+  // 删光 = 用户亲手清空 → 带 clearIntent；否则空快照绝不上云
+  const empty = !logs || Object.keys(logs).length === 0;
+  Store.write(FITNESS_LOG_KEY, logs, { clearIntent: empty });
   return true;
 }
 

@@ -428,6 +428,15 @@ const FITNESS_ROWS = [
   { id: 'F3', studentId: 's3', value: 6.5 },
 ];
 
+/* ---------- 「云端教案被反向清空」这场灾难的专项防线 ---------- */
+
+const LESSON_KEY = 'pe_lesson_plans';
+const LESSON_ROWS = [
+  { id: 'L1', title: '水平四·篮球行进间投篮', content: '第 1 课时' },
+  { id: 'L2', title: '水平四·蹲踞式起跑', content: '第 2 课时' },
+];
+const LOCK_PREFIX = 'pe_store_unconfirmed_v1::';
+
 await test('⑮ 云端接口 5xx：本地体测数据必须原样保留，一个字都不能改', async () => {
   const env = createStore({
     seed: { [FITNESS_KEY]: FITNESS_ROWS },
@@ -516,7 +525,10 @@ await test('⑲ 本地本来就是空 → 空快照绝不能推上云端（推�
   assert(!emptyPush, '空数组不能被推上云端');
 });
 
-await test('⑳ 用户亲手清空 → 允许写空，并带上 clear 标记（服务端据此才允许删表）', async () => {
+await test('⑳ 用户亲手清空 → 必须【显式声明】clearIntent 才推空，并带上 clear 标记', async () => {
+  // ① 没有清空声明的"从有变无" → 一律不推云端
+  //    （这正是「手机端刷新 → 云端教案凭空消失」的元凶：页面初始化把空快照写回去，
+  //      旧逻辑把它当成"用户主动清空"，带着 clear=true 推上云端）
   const env = createStore({
     seed: { [FITNESS_KEY]: FITNESS_ROWS },
     cloud: () => ({ mode: 'supabase', data: { [FITNESS_KEY]: FITNESS_ROWS } }),
@@ -525,9 +537,106 @@ await test('⑳ 用户亲手清空 → 允许写空，并带上 clear 标记（�
   await env.pump();
   env.Store.write(FITNESS_KEY, []);
   await env.pump();
-  const clearPush = env.calls.find(call => call.method === 'POST' && call.body?.key === FITNESS_KEY);
-  assert(clearPush, '清空要真的推到云端');
+  const silentPush = env.calls.find(call => call.method === 'POST' && call.body?.key === FITNESS_KEY);
+  assert(!silentPush, '没有清空声明时，绝不能把空数据推上云端');
+
+  // ② 显式声明 clearIntent → 才允许推空，并带 clear / clearIntent 标记
+  const env2 = createStore({
+    seed: { [FITNESS_KEY]: FITNESS_ROWS },
+    cloud: () => ({ mode: 'supabase', data: { [FITNESS_KEY]: FITNESS_ROWS } }),
+  });
+  await env2.Store.start();
+  await env2.pump();
+  env2.Store.write(FITNESS_KEY, [], { clearIntent: true });
+  await env2.pump();
+  const clearPush = env2.calls.find(call => call.method === 'POST' && call.body?.key === FITNESS_KEY);
+  assert(clearPush, '用户亲手清空要真的推到云端');
   equal(clearPush.body.clear, true, '清空必须带 clear=true 标记');
+  equal(clearPush.body.clearIntent, true, '清空必须带 clearIntent=true 标记');
+  assert(clearPush.body.snapshotAt, '推送必须带上本地快照时间（两端同时在线时的并发保护依据）');
+});
+
+/* ---------- 「云端教案被手机端反向清空」这场灾难的专项防线 ---------- */
+
+await test('㉓ 手机端：本地是空的 + 盘上留着一把"空值锁" → 云端的教案必须能落地并重绘', async () => {
+  const env = createStore({
+    seed: {
+      [LESSON_KEY]: [],
+      // 旧版留下的保护锁：护的是一份空数据（页面初始化时写回的空快照）
+      [`${LOCK_PREFIX}${LESSON_KEY}`]: JSON.stringify({ at: Date.now(), critical: false, clear: false, attempts: 0 }),
+    },
+    cloud: () => ({ mode: 'supabase', data: { [LESSON_KEY]: LESSON_ROWS } }),
+  });
+  await env.Store.start();
+  await env.pump();
+  const local = env.Store.read(LESSON_KEY, []);
+  equal(local.length, LESSON_ROWS.length, '本地必须拿到云端的教案（空值锁不能把它挡在门外）');
+  assert(env.events.some(detail => Array.isArray(detail?.changed) && detail.changed.includes(LESSON_KEY)),
+    '必须派发 store:sync 事件让页面重绘');
+  assert(env.storage.getItem(`${LOCK_PREFIX}${LESSON_KEY}`) === null, '空值锁必须被作废（它护不住任何东西）');
+});
+
+await test('㉔ 云端有有效数据 + 本地是空的 → 强制用云端覆盖本地，且绝不把空推回云端', async () => {
+  const env = createStore({
+    seed: { [LESSON_KEY]: [] },
+    cloud: () => ({ mode: 'supabase', data: { [LESSON_KEY]: LESSON_ROWS } }),
+  });
+  await env.Store.start();
+  await env.pump();
+  equal(env.Store.read(LESSON_KEY, []).length, LESSON_ROWS.length, '云端有数据时，本地空缓存必须被覆盖');
+  const emptyPush = env.calls.find(call => call.method === 'POST'
+    && call.body?.key === LESSON_KEY && Array.isArray(call.body?.value) && call.body.value.length === 0);
+  assert(!emptyPush, '绝不允许把空数组推回云端（这就是云端被反向清空的元凶）');
+});
+
+await test('㉕ 刷新后：盘上的空值锁被作废，且不会被当成"待补推"把空推回云端', async () => {
+  const env = createStore({
+    seed: {
+      [LESSON_KEY]: [],
+      [`${LOCK_PREFIX}${LESSON_KEY}`]: JSON.stringify({ at: Date.now(), critical: false, clear: false, attempts: 0 }),
+    },
+    cloud: () => ({ mode: 'supabase', data: { [LESSON_KEY]: LESSON_ROWS } }),
+  });
+  await env.Store.start();
+  await env.pump();
+  const emptyPush = env.calls.find(call => call.method === 'POST'
+    && call.body?.key === LESSON_KEY && Array.isArray(call.body?.value) && call.body.value.length === 0);
+  assert(!emptyPush, '陈旧的空值锁不得被补推成一次"把云端清空"的 POST');
+  equal(env.Store.getPendingWrites().filter(item => item.key === LESSON_KEY).length, 0,
+    '空值锁不得留在待写队列里');
+});
+
+await test('㉖ restoreCloudData()：把本地缓存里的数据推回云端（云端被洗空后的抢救脚本）', async () => {
+  const env = createStore({
+    seed: { [LESSON_KEY]: LESSON_ROWS },
+    cloud: () => ({ mode: 'supabase', data: { [LESSON_KEY]: [] } }),
+  });
+  await env.Store.start();
+  await env.pump();
+  const before = env.calls.length;
+  const report = await env.Store.restoreCloudData([LESSON_KEY]);
+  const done = report.find(item => item.key === LESSON_KEY && item.status === 'ok');
+  assert(done, '应该成功把本地数据推回云端');
+  const push = env.calls.slice(before).find(call => call.method === 'POST' && call.body?.key === LESSON_KEY);
+  assert(push, '必须真的发出 POST');
+  equal(push.body.value.length, LESSON_ROWS.length, '推回云端的条数要对');
+  equal(push.body.clear, false, '抢救动作绝不能带清空标记');
+  equal(push.body.clearIntent, false, '抢救动作绝不能带清空意图');
+});
+
+await test('㉗ 抢救脚本只用"更全"的那份覆盖云端（云端更全时不动它）', async () => {
+  const env = createStore({
+    seed: { [LESSON_KEY]: LESSON_ROWS.slice(0, 1) },   // 本地只有 1 条
+    cloud: () => ({ mode: 'supabase', data: { [LESSON_KEY]: LESSON_ROWS } }), // 云端有 2 条
+  });
+  await env.Store.start();
+  await env.pump();
+  const before = env.calls.length;
+  const report = await env.Store.restoreCloudData([LESSON_KEY]);
+  const item = report.find(entry => entry.key === LESSON_KEY);
+  equal(item.status, 'skipped', '云端更全时不该用本地那份去覆盖');
+  const push = env.calls.slice(before).find(call => call.method === 'POST' && call.body?.key === LESSON_KEY);
+  assert(!push, '不该发出任何覆盖云端的 POST');
 });
 
 const failed = results.filter(result => !result.ok);

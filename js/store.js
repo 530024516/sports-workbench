@@ -535,11 +535,25 @@ const Store = {
       return changed;
     }
     STORE_KEYS.forEach(key => {
+      const current = this.cache.get(key);
+      /* ⛔ 空值锁作废：
+         这把锁护的是一份【空】数据（多半是页面初始化时把空快照写回了共享存储）。
+         它有两大害处：
+           ① 它让之后的每次同步都跳过这个键 → 手机端明明能从云端拉到教案，却一直显示空的；
+           ② 它被当成"待补推的写入" → 把空数据推回云端 → 反向把云端洗成 0 条。
+         现在直接作废它，让云端的有效数据落地。 */
+      let pending = this._pendingWrites.get(key);
+      // 用"盘上的真实镜像"来判断这份数据是不是空的（缓存没灌时也能看准）
+      if (pending && this._isEmptyValue(this._readLocalValue(key)) && pending.clear !== true) {
+        this._pendingWrites.delete(key);
+        try { localStorage.removeItem(this._lockKeyOf(key)); } catch (error) { /* 忽略 */ }
+        pending = undefined;
+        console.warn(`[Store] ⛔ ${key} 的保护锁护的是一份空数据，已作废（云端有效数据可以落地了）`);
+      }
       // 保护未确认的本地写入（正在推送 / 推送失败待补推）：
       // critical 永久保护，普通写入在 UNCONFIRMED_TTL_MS 内保护；
       // 过期的已在 _dropStalePending 里清掉，必须让云端覆盖，否则旧缓存永远赖着不走
       // 有锁 = 本地这份数据还没被云端确认 → 直接跳过，云端说什么都不许覆盖
-      const pending = this._pendingWrites.get(key);
       if (pending && (pending.critical || Date.now() - pending.at <= UNCONFIRMED_TTL_MS)) {
         protectedKeys.push(key);
         return;
@@ -560,7 +574,16 @@ const Store = {
         return;
       }
       const next = data[key] === undefined ? null : data[key];
-      const current = this.cache.get(key);
+      const cloudEmpty = this._isEmptyValue(next);
+      const localHasData = !this._isEmptyValue(current);
+      /* ✅ 云端返回了【有效数据】而本地是空的 → 强制用云端数据覆盖本地，并触发重绘。
+         这条是"手机端刷新后必须能看到电脑端刚生成的教案"的保证：
+         以前手机端握着一把"空值锁"，云端的数据被挡在门外 → 页面一直空白，
+         老师看到的现象就是"云端明明有数据，手机上却看不到"。
+         反过来，手机端也绝不会用自己那份空缓存去覆盖云端（见下面的底线规则）。 */
+      if (!cloudEmpty && !localHasData) {
+        console.log(`[Store] ✅ 云端 ${key} 有 ${this._sizeOf(next)}，本地是空的 → 强制用云端数据覆盖本地并重绘`);
+      }
       /* ⛔ 云端空数据防污染 —— 必须放在「无差异」早退【之前】。
          否则"云端 0 条 + 本地也 0 条"会被判定成无差异直接 return，
          备份永远没机会救场（日志里那句"本次无差异"就是这么绕过防线的）。
@@ -592,8 +615,6 @@ const Store = {
          刷新时云端返回空数组 → 本地被覆盖成空"这条链畅通无阻 —— 这就是那次数据全没的现场。
          现在只要云端是空的，本地有数据就一律保住本地，并把本地这份反推回云端修好它。
          唯一例外：用户在界面上【亲手清空】且还没确认（pending.clear === true），那时空值是要生效的。 */
-      const cloudEmpty = this._isEmptyValue(next);
-      const localHasData = !this._isEmptyValue(current);
       if (cloudEmpty && localHasData) {
         const clearIntent = pending?.clear === true;
         if (!clearIntent) {
@@ -854,9 +875,9 @@ const Store = {
    * 避免赛程页拿自己那份过期的内存快照整体写回、把报名数据冲掉。
    *
    * @param {*} value
-   * @param {{push?: boolean, allowEmpty?: boolean, force?: boolean}} options
+   * @param {{push?: boolean, allowEmpty?: boolean, force?: boolean, clearIntent?: boolean}} options
    *        push=false 时只落本地（由 writeCritical 自己 await 推送）
-   *        allowEmpty / force=true 表示"用户在界面上明确要清空"，才允许把报名数据写空
+   *        allowEmpty / force / clearIntent=true 表示"用户在界面上明确要清空"，才允许把数据写空到云端
    *        （否则 athletes / registrations 从有到无会【抛异常终止写入】）
    */
   write(key, value, options = {}) {
@@ -881,24 +902,31 @@ const Store = {
     // 云端可用才需要"未确认保护"（纯本地模式没有云端数据来覆盖）；
     // 重要表单走 writeCritical，它自己会打 critical 标记，不受这里影响
     if (this.cloudState !== 'off') {
-      /* 清空意图的判定（对所有键统一）：
-         · 调用方显式声明 force / allowEmpty → 就是在界面上亲手清空；
-         · 否则看"本地从有变无" —— 从有变无也是用户主动删的；
-         · 本来就是空的 → 不是清空，是【某个页面的内存快照是空的】，
-           这种空数组绝不能推到云端（推上去就把云端洗成 0 条 —— 数据丢失链条的一环）。 */
-      const explicitClear = options.force === true || options.allowEmpty === true;
+      /* ⛔ 清空意图【只认显式声明】：force / allowEmpty / clearIntent
+         以前的推断是"本地从有变无 ⇒ 算用户主动清空" ——
+         那正是这次「手机端刷新 → 云端教案凭空消失」的第二把刀：
+         手机端本地缓存是旧的（非空），页面初始化时写回了一份空数组，
+         于是被当成"用户在界面上清空了教案" → 带 clear:true 推上云端 → 云端被清空。
+         现在：清空必须由调用方显式声明；"从有变无"只更新本地，绝不往云端发清空请求。
+         （删掉某一条记录依然能生效：payload 变小 → 服务端按 id 删掉那一条旧行。） */
+      const explicitClear = options.force === true || options.allowEmpty === true || options.clearIntent === true;
       const wasEmpty = !this._hasContent(key, previousValue);
       const nowEmpty = !this._hasContent(key, merged);
-      const clearIntent = explicitClear || (!wasEmpty && nowEmpty);
-      const allowEmpty = explicitClear || clearIntent;
-      if (nowEmpty && wasEmpty && !explicitClear) {
-        console.warn(`[Store] ⛔ ${key} 本地本来就是空的，已拦下这次云端推送`
-          + '（空快照推上去会把云端洗成 0 条）');
-        this._markUnconfirmed(key, merged, { clear: false });
+      if (nowEmpty && !explicitClear) {
+        console.warn(`[Store] ⛔ ${key} 本地这份是空的，已拦下这次云端推送`
+          + '（空数据推上去会把云端洗成 0 条）。'
+          + (wasEmpty
+            ? '本地本来就是空的。'
+            : '本地原本有数据、现在变空了，但没有任何明确的清空声明 —— 一律不推云端。')
+          + '若确实要清空，请在界面上点删除并传 { clearIntent: true }。');
+        // ⛔ 关键：空值【不】上锁。上锁会让每次同步都跳过这个键 →
+        //    手机端明明能从云端拉到教案，却一直显示空的（还会被当成待补推把空推回云端）。
+        this._pendingWrites.delete(key);
+        try { localStorage.removeItem(this._lockKeyOf(key)); } catch (error) { /* 忽略 */ }
         return merged;
       }
-      this._markUnconfirmed(key, merged, { clear: clearIntent && nowEmpty });
-      this._persistSafely(key, merged, { allowEmpty });
+      this._markUnconfirmed(key, merged, { clear: explicitClear && nowEmpty });
+      this._persistSafely(key, merged, { allowEmpty: explicitClear });
     }
     return merged;
   },
@@ -1300,9 +1328,11 @@ const Store = {
         try { localStorage.removeItem(lockKey); } catch (error) { /* 忽略 */ }
         return;   // 本地都没这份数据，没什么可保护的
       }
-      /* ⚠️ 运动会数据本身是空的就不要上锁：锁会让它之后的每次云端同步都跳过这个键，
-         连"云端 0 条 → 从备份恢复"这条自愈路径都进不去 —— 这正是报名页读不出备份的成因之一。 */
-      if (this._isMeetKey(key) && !this._hasContent(key, value)) {
+      /* ⛔ 本地这份是空的 → 这把锁护不住任何东西，反而会坏事：
+         ① 它会让之后的每次云端同步都跳过这个键 → 手机端明明能从云端拉到教案，却一直显示空的；
+         ② 它还会被当成"待补推的写入" → 把空数据推回云端 → 反向把云端洗成 0 条。
+         所以空值的锁直接作废（除非它明确带着 clear:true —— 那是用户亲手清空，要保留）。 */
+      if (!this._hasContent(key, value) && info?.clear !== true) {
         try { localStorage.removeItem(lockKey); } catch (error) { /* 忽略 */ }
         return;
       }
@@ -1343,8 +1373,8 @@ const Store = {
         try { info = JSON.parse(localStorage.getItem(lockKey) || '{}'); } catch (error) { info = {}; }
         const value = this._readLocalValue(key);
         if (value === undefined || value === null) continue;
-        // 同上：运动会数据为空时不上锁，别让空数据的锁挡住自愈通道
-        if (this._isMeetKey(key) && !this._hasContent(key, value) && info?.clear !== true) continue;
+        // 同上：本地这份为空时不上锁（空锁会挡住云端数据落地，还会被当成待补推把空推回云端）
+        if (!this._hasContent(key, value) && info?.clear !== true) continue;
         // 被熔断的键：只保护、不重排队（否则刷新后又变成无限重试）
         if (info?.failed) {
           this._failedWrites.set(key, { attempts: info?.attempts || 0, lastError: '写入云端失败已熔断', at: info?.at || Date.now(), value });
@@ -1408,17 +1438,24 @@ const Store = {
   /**
    * 推送到云端的唯一出口。
    * ⛔ 云端之所以会被洗成 0 条，绝大多数是"某个页面内存里恰好是空快照，又把它整体写回去了"。
-   *    所以这里设一道闸门：本机这份运动会数据是空的，一律不许推，也不许反复重试。
-   *    唯一例外 options.allowEmpty —— 用户在界面上亲手点的清空 / 删除（writeCritical force）。
+   *    所以这里设一道闸门：本机这份数据是空的，一律不许推，也不许反复重试。
+   *    ⚠️ 这道闸门对【所有键】生效（不只是运动会数据）——
+   *       「手机端刷新 → 云端教案凭空消失」就是因为 lesson_plans 漏了这道闸门。
+   *    唯一例外 options.allowEmpty —— 用户在界面上亲手点的清空 / 删除（clearIntent / force）。
    */
   async _persist(key, value, options = {}) {
     // ⏸ 暂停期间不往云端推任何东西（强行恢复后想推，请先 window.resumeCloud()）
     if (this._cloudPaused) return false;
-    if (this._isMeetKey(key) && !this._hasContent(key, value) && options.allowEmpty !== true) {
+    /* ⛔ 空值闸门（所有键统一）：
+       本机这份是空的 → 绝不发 POST。原因有三：
+         ① 云端一旦被写成空数组，那份真实数据就再也回不来了；
+         ② 服务端现在也会 400 拒绝空载荷（双保险）；
+         ③ 手机端拿着空缓存刷新时，正好是最容易"把空推回云端"的时刻。 */
+    if (!this._hasContent(key, value) && options.allowEmpty !== true) {
       const pending = this._pendingWrites.get(key);
       if (!pending || pending.clear !== true) {
         console.warn(`[Store] ⛔ 本机 ${key} 是空的，已拦下这次云端推送`
-          + '（要在云端清空请走界面上的「清空数据」，否则一次误写就会把云端 216 条洗成 0 条）');
+          + '（要在云端清空请走界面上的删除操作并带 clearIntent，否则一次误写就会把云端洗成 0 条）');
         this._clearUnconfirmed(key);      // 连同已放飞的重试一起作废，别让它无限续传
         const timer = this._criticalTimers.get(key);
         if (timer) { clearTimeout(timer); this._criticalTimers.delete(key); }
@@ -1426,12 +1463,24 @@ const Store = {
       return false;
     }
     // 写入同样带超时：网络挂起时不会一直 pending，失败会进入待写队列
+    // snapshotAt：这份本地快照是什么时候生成的 —— 服务端据此判断"哪些行比我新"，
+    // 两端同时在线时，另一台设备在我快照之后写进去的行一个都不会被删。
+    const rawAt = options.at ?? this._pendingWrites.get(key)?.at;
+    const snapshotAt = typeof rawAt === 'number'
+      ? new Date(rawAt).toISOString()
+      : (rawAt || new Date().toISOString());
     await this._fetchJSON('/api/data', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      // clear=true：服务端据此判断"这是用户亲手清空"，才允许把该表清空；
-      // 不带这个标记的空数组，服务端一行都不会删（防止把云端洗成 0 条）
-      body: JSON.stringify({ key, value, clear: options.allowEmpty === true }),
+      // clear / clearIntent=true：服务端据此判断"这是用户亲手清空"，才允许把该表清空；
+      // 不带这个标记的空数组，服务端一律 400 拒绝（防止把云端洗成 0 条）
+      body: JSON.stringify({
+        key,
+        value,
+        clear: options.allowEmpty === true,
+        clearIntent: options.allowEmpty === true,
+        snapshotAt,
+      }),
     });
     return true;
   },
@@ -1930,6 +1979,94 @@ const Store = {
     return { ok: pushed.length > 0, pushed };
   },
 
+  /**
+   * 通用数据量（条数）：数组看长度，单例看最大的数组字段，字符串算 1 条。
+   * 用来判断"本地这份比云端多不多"——只有本地更全时才值得推回云端。
+   */
+  _dataSize(value, key = '') {
+    if (value === null || value === undefined) return 0;
+    if (Array.isArray(value)) return value.length;
+    if (this._isPlainObject(value)) {
+      if (key && this._isMeetKey(key)) return this._countOf(value);
+      let max = 0;
+      Object.values(value).forEach(item => {
+        if (Array.isArray(item)) max = Math.max(max, item.length);
+      });
+      return max || Object.keys(value).length;
+    }
+    return String(value).trim() ? 1 : 0;
+  },
+
+  /**
+   * 🛟 抢救脚本：把本地缓存 / 本地备份里的数据推回云端
+   *
+   * 适用场景：「手机端刷新后云端的教案凭空消失」——云端表被洗成 0 条，
+   *          但这台电脑上还留着那份数据（localStorage 镜像 / 时光机备份）。
+   *
+   * 用法（浏览器控制台）：
+   *   await restoreCloudData()                    // 全部键
+   *   await restoreCloudData(['pe_lesson_plans'])  // 只救一个键
+   *   await restoreCloudData(['pe_lesson_plans'], { force: true })  // 云端条目更多也照样覆盖
+   *
+   * ⛔ 铁律：只用"本地更全"的那份去覆盖云端，绝不用更少的覆盖更多的；
+   *    推送走 upsert（按 id 覆盖），不会把云端其它表清空。
+   */
+  async restoreCloudData(keys = STORE_KEYS, options = {}) {
+    const report = [];
+    const wanted = Array.isArray(keys) && keys.length ? keys : STORE_KEYS;
+    const force = options.force === true;
+
+    // 先看看云端现在有什么（避免用更少的数据覆盖更多的数据）
+    let cloudData = {};
+    try {
+      const payload = await this._fetchJSON('/api/data', { headers: { Accept: 'application/json' } });
+      cloudData = payload?.data || {};
+    } catch (error) {
+      console.warn('[Store] ⚠ 读取云端现状失败，将直接用本地数据修复云端', error);
+    }
+
+    for (const key of wanted) {
+      const candidates = [];
+      const local = this._readLocalValue(key);
+      if (local !== undefined && local !== null) {
+        candidates.push({ source: '本地缓存', value: local });
+      }
+      const slot = this._readBackupSlot(key);
+      if (slot && slot.data !== undefined && slot.data !== null) {
+        const savedAt = slot.savedAt ? new Date(slot.savedAt).toLocaleString('zh-CN') : '未知时间';
+        candidates.push({ source: `本地备份（${savedAt}）`, value: slot.data });
+      }
+      // 选数据量最多的那份
+      const best = candidates
+        .filter(item => this._hasContent(key, item.value))
+        .sort((a, b) => this._dataSize(b.value, key) - this._dataSize(a.value, key))[0];
+      if (!best) {
+        report.push({ key, status: 'skipped', reason: '本地缓存与备份里都没有可恢复的数据' });
+        continue;
+      }
+      const cloudCount = this._dataSize(cloudData[key], key);
+      const localCount = this._dataSize(best.value, key);
+      if (!force && cloudCount >= localCount && cloudCount > 0) {
+        report.push({ key, status: 'skipped', reason: `云端已有 ${cloudCount} 条，不比本地少，不覆盖` });
+        continue;
+      }
+      try {
+        // ⛔ 永远不带清空意图：这是"把数据补回去"，绝不是"清空云端"
+        await this._persist(key, best.value, { allowEmpty: false });
+        report.push({
+          key, status: 'ok', source: best.source, count: localCount, cloudBefore: cloudCount,
+        });
+        console.log(`[Store] 🛟 ${key}：已把${best.source}的 ${localCount} 条推回云端`);
+      } catch (error) {
+        report.push({ key, status: 'error', message: error?.message || String(error) });
+      }
+    }
+    console.log('[Store] 🛟 云端数据恢复报告：', report);
+    const ok = report.filter(item => item.status === 'ok').length;
+    if (ok) this._dispatchSync(report.filter(item => item.status === 'ok').map(item => item.key), { restored: true });
+    return report;
+  },
+
   /** 迁移工具：把 localStorage 里的旧数据一次性写入云端 */
   async importFromLocalStorage(keys = STORE_KEYS) {
     const values = {};
@@ -1991,4 +2128,8 @@ if (typeof window !== 'undefined') {
      —— 修好表结构（主键冲突 / 字段类型）之后，把被熔断的键重新推一次 */
   window.retryFailedKeys = () => Store.retryFailedKeys();
   window.getFailedWrites = () => Store.getFailedWrites();
+  /* 🛟 云端数据抢救：window.restoreCloudData()
+       —— 把本地缓存 / 时光机备份里的数据推回云端（云端被洗成 0 条时用）
+       用法：await restoreCloudData()  /  await restoreCloudData(['pe_lesson_plans']) */
+  window.restoreCloudData = (keys, options) => Store.restoreCloudData(keys, options || {});
 }

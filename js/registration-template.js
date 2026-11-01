@@ -124,7 +124,8 @@ function customEventGenderGroups(event) {
 
 function saveCustomMeetEvents(events) {
   const list = (events || []).map(normalizeCustomMeetEvent).filter(event => event.name);
-  Store.write(CUSTOM_EVENTS_KEY, list);
+  // 删光 = 用户亲手清空 → 带 clearIntent；否则空快照绝不上云
+  Store.write(CUSTOM_EVENTS_KEY, list, { clearIntent: list.length === 0 });
   return list;
 }
 

@@ -411,8 +411,11 @@ function deleteSelectedStudents() {
   if (!confirmed) return;
   try {
     const selectedIds = new Set(students.map(student => student.id));
-    DB.saveStudents(DB.getStudents().filter(student => !selectedIds.has(student.id)));
-    DB.saveFitnessRecords(DB.getFitnessRecords().filter(record => !selectedIds.has(record.studentId)));
+    // 用户亲手批量删除 → 删到一条不剩时明确带上清空意图（否则云端那份会一直留着）
+    const remainingStudents = DB.getStudents().filter(student => !selectedIds.has(student.id));
+    const remainingRecords = DB.getFitnessRecords().filter(record => !selectedIds.has(record.studentId));
+    DB.saveStudents(remainingStudents, { clearIntent: remainingStudents.length === 0 });
+    DB.saveFitnessRecords(remainingRecords, { clearIntent: remainingRecords.length === 0 });
     selectedStudentIds.clear();
     populateStudentClassFilter();
     renderTable();

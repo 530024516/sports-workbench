@@ -189,8 +189,16 @@ const DB = {
     }
   },
 
-  set(key, data) {
-    Store.write(key, data);
+  /**
+   * 写一份数据。
+   * @param {string} key
+   * @param {*} data
+   * @param {{clearIntent?: boolean}} options
+   *        clearIntent=true 只在"用户亲手把这一项删光"时传 —— 这是唯一允许把云端那张表清空的凭据。
+   *        页面初始化 / 内存快照为空时【不要】传，否则云端会被洗成 0 条。
+   */
+  set(key, data, options = {}) {
+    Store.write(key, data, options);
   },
 
   // ===== 学生管理 =====
@@ -198,7 +206,7 @@ const DB = {
     return this.get(this.KEYS.STUDENTS);
   },
 
-  saveStudents(list) {
+  saveStudents(list, options = {}) {
     const ids = new Set();
     list.forEach(student => {
       const id = String(student.id ?? '').trim();
@@ -206,7 +214,7 @@ const DB = {
       if (ids.has(id)) throw new Error(`学号 ${id} 重复，未保存学生名单`);
       ids.add(id);
     });
-    this.set(this.KEYS.STUDENTS, list);
+    this.set(this.KEYS.STUDENTS, list, options);
   },
 
   addStudent(student) {
@@ -238,10 +246,11 @@ const DB = {
 
   deleteStudent(id) {
     const list = this.getStudents().filter(s => s.id !== id);
-    this.saveStudents(list);
+    // 删光了就明确告诉 Store"这是用户亲手清空"（否则云端那份会一直留着旧名单）
+    this.saveStudents(list, { clearIntent: list.length === 0 });
     // 同时删除该学生的体测记录
     const records = this.getFitnessRecords().filter(r => r.studentId !== id);
-    this.set(this.KEYS.FITNESS_RECORDS, records);
+    this.set(this.KEYS.FITNESS_RECORDS, records, { clearIntent: records.length === 0 });
   },
 
   getStudentById(id) {
@@ -253,7 +262,7 @@ const DB = {
     return this.get(this.KEYS.FITNESS_RECORDS);
   },
 
-  saveFitnessRecords(list) {
+  saveFitnessRecords(list, options = {}) {
     // 同 id 只保留最后一条：旧数据里可能已经存在重复 id（老生成器撞车留下的），
     // 不清掉的话每次写云端都会撞主键（duplicate key），整批数据都写不进去
     const seen = new Map();
@@ -262,7 +271,7 @@ const DB = {
       if (!id) return;
       seen.set(id, record);
     });
-    this.set(this.KEYS.FITNESS_RECORDS, [...seen.values()]);
+    this.set(this.KEYS.FITNESS_RECORDS, [...seen.values()], options);
   },
 
   addFitnessRecord(record) {
@@ -290,7 +299,7 @@ const DB = {
 
   deleteFitnessRecord(id) {
     const list = this.getFitnessRecords().filter(r => r.id !== id);
-    this.saveFitnessRecords(list);
+    this.saveFitnessRecords(list, { clearIntent: list.length === 0 });
   },
 
   getRecordsByStudent(studentId) {
@@ -306,8 +315,8 @@ const DB = {
     return this.get(this.KEYS.LESSON_PLANS);
   },
 
-  saveLessonPlans(list) {
-    this.set(this.KEYS.LESSON_PLANS, list);
+  saveLessonPlans(list, options = {}) {
+    this.set(this.KEYS.LESSON_PLANS, list, options);
   },
 
   addLessonPlan(plan) {
@@ -331,7 +340,8 @@ const DB = {
 
   deleteLessonPlan(id) {
     const list = this.getLessonPlans().filter(p => p.id !== id);
-    this.saveLessonPlans(list);
+    // 删到一条不剩 = 用户亲手清空 → 明确带上清空意图，云端那张表才会真的空掉
+    this.saveLessonPlans(list, { clearIntent: list.length === 0 });
   },
 
   // ===== 资源 =====
@@ -358,7 +368,7 @@ const DB = {
 
   deleteResource(id) {
     const list = this.getResources().filter(r => r.id !== id);
-    this.set(this.KEYS.RESOURCES, list);
+    this.set(this.KEYS.RESOURCES, list, { clearIntent: list.length === 0 });
   },
 
   // ===== 课程表 =====
@@ -390,8 +400,8 @@ const DB = {
     return this.get(this.KEYS.TODOS);
   },
 
-  saveTodos(list) {
-    this.set(this.KEYS.TODOS, list);
+  saveTodos(list, options = {}) {
+    this.set(this.KEYS.TODOS, list, options);
   },
 
   _migrateTodos() {
@@ -430,7 +440,8 @@ const DB = {
   },
 
   deleteTodo(id) {
-    this.saveTodos(this.getTodos().filter(t => t.id !== id));
+    const list = this.getTodos().filter(t => t.id !== id);
+    this.saveTodos(list, { clearIntent: list.length === 0 });
   },
 
   _now() {
