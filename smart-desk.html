@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>体育老师专属智慧工作台</title>
   <style>
     /* ==================== 设计令牌 ==================== */
@@ -669,6 +669,34 @@
     .quick-card .q-icon { font-size: 28px; margin-bottom: 6px; }
     .quick-card .q-label { font-size: 13px; font-weight: 600; }
     .quick-card .q-value { font-size: 11px; color: var(--text-tertiary); }
+
+    /* ==================== 手机端适配（< 768px） ==================== */
+    @media (max-width: 768px) {
+      .header { flex-wrap: wrap; gap: 8px; padding: 12px 10px; }
+      .header h1 { font-size: 18px; }
+      .main-grid { grid-template-columns: 1fr !important; padding: 10px; }
+      .stats-grid,
+      .quick-section { grid-template-columns: repeat(2, 1fr) !important; }
+
+      /* 触控友好：按钮 >= 40px、字号 >= 14px */
+      .btn { min-height: 40px; font-size: 14px; padding: 9px 16px; }
+      .quick-card { padding: 12px 8px; }
+
+      /* iOS 聚焦时不再自动放大整页 */
+      input, textarea, select { font-size: 16px !important; min-height: 40px; }
+
+      /* 弹窗不出屏幕边界 */
+      .modal-overlay { align-items: flex-end; padding: 0; }
+      .modal {
+        width: 95vw;
+        max-width: 95vw;
+        max-height: 90vh;
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
+        border-radius: 16px 16px 0 0;
+      }
+      .modal-header, .modal-body, .modal-footer { padding: 14px 16px; }
+    }
   </style>
 </head>
 <body>

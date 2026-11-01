@@ -676,6 +676,7 @@ function viewStudent(id) {
       ${trendCharts ? `<section class="student-growth-section"><h3>体测成长趋势</h3><p>按测试时间排序；50米跑和50米×8成绩越低越好，其余项目成绩越高通常代表表现越好。</p>${trendCharts}</section>` : ''}
       ${records.length > 0 ? `
       <h3 style="margin-bottom:12px;font-size:15px;">体测成绩记录</h3>
+      <div class="table-responsive">
       <table class="data-table">
         <thead><tr><th>项目</th><th>成绩</th><th>单项分 / 等级</th><th>日期</th></tr></thead>
         <tbody>
@@ -691,6 +692,7 @@ function viewStudent(id) {
           }).join('')}
         </tbody>
       </table>
+      </div>
     ` : '<p style="color:var(--text-tertiary);">暂无体测记录</p>'}
     ${s.guardian ? `<div style="margin-top:16px;padding:12px;background:var(--bg-hover);border-radius:var(--radius-sm);">
       <strong>监护人：</strong>${escapeStudentHTML(s.guardian)} ${s.phone ? ' · ' + escapeStudentHTML(s.phone) : ''}

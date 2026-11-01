@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>数据迁移 · 本地 → Supabase</title>
   <link rel="stylesheet" href="css/style.css">
   <style>
@@ -20,6 +20,18 @@
     .migrate-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 16px; }
     .migrate-log { margin: 12px 0 0; padding: 12px; background: var(--bg); border-radius: var(--radius-sm); font-size: 12px; line-height: 1.8; max-height: 260px; overflow: auto; white-space: pre-wrap; }
     code.inline { background: var(--bg); padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+
+    /* ---------- 手机端适配 ---------- */
+    @media (max-width: 768px) {
+      .migrate-page { padding: 16px 10px 48px; }
+      .migrate-page h1 { font-size: 20px; }
+      .migrate-card { padding: 14px; }
+      .migrate-actions { flex-direction: column; align-items: stretch; }
+      .migrate-actions .btn { width: 100%; justify-content: center; }
+      .migrate-table { min-width: 560px; }
+      .migrate-log { max-height: 200px; font-size: 11px; }
+      .migrate-status, .migrate-page .lead { font-size: 14px; }
+    }
   </style>
 </head>
 <body>
@@ -46,12 +58,14 @@
 
     <section class="migrate-card">
       <h2>2. 本机待迁移数据</h2>
-      <table class="migrate-table">
-        <thead>
-          <tr><th>本地存储键</th><th>目标数据表</th><th>条数</th><th>状态</th><th>操作</th></tr>
-        </thead>
-        <tbody id="migrateRows"></tbody>
-      </table>
+      <div class="table-responsive">
+        <table class="migrate-table">
+          <thead>
+            <tr><th>本地存储键</th><th>目标数据表</th><th>条数</th><th>状态</th><th>操作</th></tr>
+          </thead>
+          <tbody id="migrateRows"></tbody>
+        </table>
+      </div>
       <div class="migrate-actions">
         <label style="font-size:13px;display:flex;align-items:center;gap:6px;">
           <input type="checkbox" id="migrateForce">

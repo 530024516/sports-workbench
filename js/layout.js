@@ -66,7 +66,7 @@ const Layout = {
   sidebarHTML() {
     const settings = this.getDisplaySettings();
     return `
-    <aside class="sidebar">
+    <aside class="sidebar" id="appSidebar">
       <div class="sidebar-brand">
         <div class="logo">🏃</div>
         <span class="brand-text">${this.escapeHTML(settings.workspaceName)}</span>
@@ -112,6 +112,8 @@ const Layout = {
     return `
       <header class="topbar">
         <div class="topbar-left">
+          <button class="topbar-hamburger" type="button" id="mobileNavToggle"
+                  aria-label="打开导航菜单" aria-expanded="false" aria-controls="appSidebar">☰</button>
           <div>
             <div class="topbar-title">${title}</div>
             <div class="topbar-breadcrumb">
@@ -145,6 +147,7 @@ const Layout = {
     root.innerHTML = `
       <div class="app-layout">
         ${this.sidebarHTML()}
+        <div class="mobile-nav-backdrop" id="mobileNavBackdrop"></div>
         <div class="main-area">
           ${this.topbarHTML(title, breadcrumb)}
           <div class="page-content" id="page-content">
@@ -153,6 +156,8 @@ const Layout = {
         </div>
       </div>
     `;
+
+    this.bindMobileNav(root);
 
     this.applyDisplaySettings(root);
     window.addEventListener('storage', event => {
@@ -169,6 +174,41 @@ const Layout = {
         this.setNavigationGroupExpanded(group.dataset.navGroup, true);
       }
     }
+  },
+
+  /**
+   * 手机端汉堡菜单：侧边栏在窄屏下是"抽屉"（CSS 控制滑入滑出），
+   * 这里只负责开关状态与各种关闭时机。
+   * 桌面端点了也没用（抽屉按钮在 >768px 时不显示）。
+   */
+  bindMobileNav(root) {
+    const toggle = root.querySelector('#mobileNavToggle');
+    const backdrop = root.querySelector('#mobileNavBackdrop');
+    const sidebar = root.querySelector('.sidebar');
+    if (!toggle || !sidebar) return;
+
+    const setOpen = open => {
+      document.body.classList.toggle('mobile-nav-open', open);
+      toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+      toggle.textContent = open ? '✕' : '☰';
+    };
+
+    toggle.addEventListener('click', event => {
+      event.stopPropagation();
+      setOpen(!document.body.classList.contains('mobile-nav-open'));
+    });
+    if (backdrop) backdrop.addEventListener('click', () => setOpen(false));
+    // 点导航项后自动收起（手机上挡住了内容）
+    sidebar.querySelectorAll('.nav-item, .nav-subitem').forEach(item => {
+      item.addEventListener('click', () => setOpen(false));
+    });
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape') setOpen(false);
+    });
+    // 转屏 / 窗口变宽 → 自动收起抽屉
+    window.addEventListener('resize', () => {
+      if (window.innerWidth > 768) setOpen(false);
+    });
   },
 
   applyDisplaySettings(root = document) {

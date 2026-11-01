@@ -670,16 +670,42 @@ table.data-table tbody tr:last-child td {
 
 @media (max-width: 768px) {
   .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
-  .sidebar { width: 64px; }
-  .sidebar-brand .brand-text { display: none; }
-  .nav-item .nav-text { display: none; }
-  .nav-group-toggle { justify-content: center; padding-right: 0; padding-left: 0; }
-  .nav-group-toggle .nav-text,
-  .nav-group-chevron { display: none; }
+
+  /* ========== 侧边栏 → 抽屉式导航（汉堡菜单） ==========
+     手机上不再保留 64px 图标栏（那会把本就窄的屏幕再吃掉一截），
+     改成默认滑出屏幕外，点顶栏的 ☰ 才滑入。 */
+  .sidebar {
+    width: 268px;
+    max-width: 82vw;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+    z-index: 1200;
+    box-shadow: none;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  body.mobile-nav-open .sidebar {
+    transform: translateX(0);
+    box-shadow: 0 0 40px rgba(0, 0, 0, 0.35);
+  }
+
+  .mobile-nav-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    z-index: 1100;
+  }
+
+  body.mobile-nav-open .mobile-nav-backdrop { display: block; }
+
+  .main-area { margin-left: 0 !important; }
+
+  /* 抽屉里的文字要露出来（不再是 64px 图标栏） */
+  .nav-group-toggle { justify-content: flex-start; padding-right: 12px; padding-left: 12px; }
   .nav-submenu { padding-right: 0; padding-left: 0; }
-  .nav-subitem { justify-content: center; padding-right: 0; padding-left: 0; }
-  .sidebar-footer .user-info { display: none; }
-  .main-area { margin-left: 64px; }
+  .nav-subitem { justify-content: flex-start; padding-right: 12px; padding-left: 12px; }
 }
 
 /* 模态框 */
@@ -2332,4 +2358,275 @@ select.form-control {
 .fitness-detail-empty-tip {
   font-size: 13px;
   color: var(--text-tertiary);
+}
+
+/* =============================================================
+   移动端适配（手机 < 768px）
+   放在文件末尾：同优先级下"后写的生效"，
+   上面��桌面端样式一行都不用改，手机端就能被彻底接管。
+   ============================================================= */
+
+/* ---------- 汉堡菜单按钮（桌面端隐藏） ---------- */
+.topbar-hamburger {
+  display: none;
+  width: 40px;
+  height: 40px;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  font-size: 22px;
+  line-height: 1;
+  color: var(--text-primary);
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.topbar-hamburger:active {
+  background: var(--bg-hover);
+}
+
+/* 桌面端：抽屉遮罩永远不显示 */
+.mobile-nav-backdrop {
+  display: none;
+}
+
+/* ---------- 宽表容器：任何页面都能用的横向滚动壳 ---------- */
+.table-responsive {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  max-width: 100%;
+}
+
+@media (max-width: 768px) {
+  /* ========== ① 页面骨架 ========== */
+  .topbar {
+    padding: 0 8px;
+    gap: 8px;
+  }
+
+  .topbar-left {
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .topbar-title {
+    font-size: 16px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .topbar-hamburger { display: flex; }
+
+  .page-content {
+    padding: 10px;
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+
+  .page-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .page-header > div:last-child {
+    flex-direction: column;
+    align-items: stretch;
+    width: 100%;
+  }
+
+  .page-header .btn { width: 100%; }
+
+  /* ========== ② 多列网格 / 弹性行 → 强制单列纵向 ========== */
+  .grid-2,
+  .grid-3,
+  .grid-4 {
+    grid-template-columns: 1fr !important;
+  }
+
+  .form-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .form-row > * { width: 100%; }
+
+  .search-box { width: 100%; }
+
+  .card-header,
+  .card-body { padding: 14px; }
+
+  .card-title { font-size: 15px; }
+
+  .stat-card { padding: 14px; gap: 12px; }
+
+  .stat-card .stat-icon {
+    width: 44px;
+    height: 44px;
+    font-size: 22px;
+  }
+
+  .stat-card .stat-content h3 { font-size: 22px; }
+
+  .toolbar { flex-wrap: wrap; }
+
+  /* ========== ③ 宽表格：独立横向滚动，不压缩文字 ========== */
+  .table-wrapper,
+  .table-responsive,
+  .meet-table-wrap,
+  .result-table-wrap,
+  .ud2-table-wrap,
+  .res-ro-table-wrap,
+  .fitness-quick-entry-table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    max-width: 100%;
+    border-radius: var(--radius-sm);
+    /* 提示用户可以左右滑 */
+    background-image: linear-gradient(to left, rgba(0, 0, 0, 0.06), rgba(0, 0, 0, 0));
+    background-repeat: no-repeat;
+    background-attachment: local, scroll;
+    background-size: 24px 100%, 100% 100%;
+  }
+
+  /* 关键：给表格一个宽度下限 —— 手机上宁可横向滚动，也不要把字挤成竖排 */
+  table.data-table,
+  .meet-table,
+  .result-entry-table,
+  .result-ranking-table,
+  .result-scoreboard-table,
+  .ud2-lesson-table,
+  .res-ro-table,
+  .migrate-table {
+    min-width: 620px;
+  }
+
+  table.data-table thead th,
+  .meet-table thead th {
+    padding: 10px 12px;
+  }
+
+  table.data-table tbody td,
+  .meet-table tbody td {
+    padding: 10px 12px;
+  }
+
+  /* 表格里的小按钮也要点得中 */
+  table.data-table .btn,
+  .meet-table .btn {
+    min-height: 38px;
+  }
+
+  /* ========== ④ 按钮：触控友好（>= 40px / >= 14px） ========== */
+  .btn {
+    min-height: 40px;
+    font-size: 14px;
+    padding: 9px 16px;
+  }
+
+  .btn-sm {
+    min-height: 40px;
+    font-size: 14px;
+    padding: 9px 12px;
+  }
+
+  .btn-lg {
+    min-height: 44px;
+    font-size: 15px;
+  }
+
+  .topbar-btn {
+    width: 40px;
+    height: 40px;
+  }
+
+  .modal-close {
+    width: 40px;
+    height: 40px;
+  }
+
+  input[type="checkbox"],
+  input[type="radio"] {
+    width: 20px;
+    height: 20px;
+    min-height: 0;
+  }
+
+  /* ========== ⑤ 表单：iOS 聚焦时不再自动放大整页（字号必须 >= 16px） ========== */
+  input:not([type="checkbox"]):not([type="radio"]),
+  textarea,
+  select {
+    font-size: 16px !important;
+    min-height: 40px;
+  }
+
+  textarea {
+    min-height: 88px;
+    line-height: 1.5;
+  }
+
+  .form-control {
+    font-size: 16px !important;
+    min-height: 40px;
+  }
+
+  /* ========== ⑥ 弹窗：不超屏幕边界，内容内部可滑 ========== */
+  .modal-overlay {
+    align-items: flex-end;
+    padding: 0;
+  }
+
+  .modal {
+    width: 95vw;
+    max-width: 95vw;
+    max-height: 90vh;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    border-radius: 16px 16px 0 0;
+  }
+
+  .modal-header { padding: 14px 16px; }
+
+  .modal-body { padding: 16px; }
+
+  .modal-footer {
+    padding: 12px 16px;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .modal-footer .btn { flex: 1 1 45%; }
+
+  .modal-lg { max-width: 95vw; }
+
+  .toast {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+  }
+
+  /* ========== ⑦ 横向溢出兜底：任何元素都不许把整页撑宽 ========== */
+  .page-content,
+  .card,
+  .card-body {
+    max-width: 100%;
+    overflow-wrap: break-word;
+    word-break: break-word;
+  }
+
+  img,
+  svg,
+  canvas,
+  video {
+    max-width: 100%;
+  }
+
+  /* 隐藏元素优先 */
+  .topbar-date,
+  .topbar-breadcrumb {
+    display: none;
+  }
 }
