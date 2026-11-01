@@ -98,6 +98,14 @@ const CRITICAL_WRITE_ATTEMPTS = 2;
  * 后者再重试一百次也一样失败，只会把请求队列刷满。
  */
 const MAX_PERSIST_ATTEMPTS = 3;
+/**
+ * 「清空指令」的有效期（毫秒）。
+ * ⛔ 为什么必须有：清空意图会被写进保护锁留在 localStorage 里。
+ *    没有有效期的话，手机上几个月前的一次删除留下的"清空锁"，
+ *    会在某一次刷新时突然生效 → 把云端当天的教案删光。
+ *    现在超过这个时间就算过期，绝不再执行。
+ */
+const CLEAR_LOCK_TTL_MS = 10 * 60 * 1000;
 // 重要表单云端确认失败后的后台续传节奏（毫秒）
 const CRITICAL_RETRY_DELAYS = [1500, 5000, 15000, 30000];
 /**
@@ -159,6 +167,9 @@ const Store = {
   // 被熔断的键（连续写云端失败超过 MAX_PERSIST_ATTEMPTS 次）：key → { attempts, lastError, at, value }
   // 这些键【不再重试】，但依然受保护：云端的空数据 / 旧数据都覆盖不到它们。
   _failedWrites: new Map(),
+  // ⛔ 纯拉取模式（pullCloudOnly）：为 true 时【一个 POST 都不发】，
+  //    只允许把云端数据拉到本地。这是手机端"只读同步"的保险丝。
+  _readOnlyPull: false,
   _loadingNode: null,
   _slowHintTimer: null,
   _backedUp: false,
@@ -528,6 +539,8 @@ const Store = {
     const report = { protected: protectedKeys, refused: [], healed: [] };
     // 云端读取失败的键：那一格根本不是"云端没有"，而是"没读到" → 一律不许覆盖本地
     const failedKeys = new Set(Array.isArray(options.failedKeys) ? options.failedKeys : []);
+    // force=true：强制以云端为准（手机端"手动拉取"用）—— 无视本地未确认锁
+    const force = options.force === true;
     this._lastSyncReport = report;
     // ⏸ 暂停期间：一个键都不许改（forceRecover 恢复出来的数据谁也别碰）
     if (this._cloudPaused) {
@@ -550,6 +563,17 @@ const Store = {
         pending = undefined;
         console.warn(`[Store] ⛔ ${key} 的保护锁护的是一份空数据，已作废（云端有效数据可以落地了）`);
       }
+      /* ⛔ 强制模式（手机端"手动拉取云端"）：云端有数据而本地是空的，
+         就【必须】用云端的覆盖本地 —— 哪怕本地还挂着一把未确认锁。
+         这条是"手机端刷新后必须能看到电脑端刚生成的教案"的最后保证：
+         以前手机端握着一把锁（护着空数据或旧数据），云端的数据被挡在门外 → 页面一直空白，
+         老师看到的现象就是"云端明明有数据，手机上却看不到"。 */
+      if (force && pending) {
+        this._pendingWrites.delete(key);
+        try { localStorage.removeItem(this._lockKeyOf(key)); } catch (error) { /* 忽略 */ }
+        pending = undefined;
+        console.warn(`[Store] ⛔ ${key} 强制拉取模式：本地未确认锁已忽略，以云端为准`);
+      }
       // 保护未确认的本地写入（正在推送 / 推送失败待补推）：
       // critical 永久保护，普通写入在 UNCONFIRMED_TTL_MS 内保护；
       // 过期的已在 _dropStalePending 里清掉，必须让云端覆盖，否则旧缓存永远赖着不走
@@ -561,7 +585,7 @@ const Store = {
       /* ⛔ 已被熔断的键（连续写云端失败 3 次）：本地这份是【唯一可信的一份】，
          云端无论返回什么都覆盖不了它 —— 否则"云端写不进去 + 云端读出来是空"
          就会把本地仅有的数据也一起洗掉（数据彻底消失）。 */
-      if (this._failedWrites.has(key)) {
+      if (this._failedWrites.has(key) && !force) {
         protectedKeys.push(key);
         console.warn(`[Store] ⛔ ${key} 之前写云端失败已熔断，本地数据保留不动（云端不覆盖）`);
         return;
@@ -666,6 +690,7 @@ const Store = {
    * 上锁 + 立即重试，保证推送期间云端旧（空）数据也别想再覆盖本地。
    */
   _pushBackToCloud(key, value) {
+    if (this._readOnlyPull) return;                // ⛔ 纯拉取模式：绝不向云端发送任何修改
     if (this._cloudPaused) return;                 // ⏸ 暂停期间不上锁、不推送
     if (this.cloudState === 'off') return;         // 明确没配云端 / 服务端 503，不做无谓重试
     if (this._pendingWrites.has(key)) return;      // 已经有写入在飞/待推，不重复排队
@@ -925,10 +950,73 @@ const Store = {
         try { localStorage.removeItem(this._lockKeyOf(key)); } catch (error) { /* 忽略 */ }
         return merged;
       }
-      this._markUnconfirmed(key, merged, { clear: explicitClear && nowEmpty });
-      this._persistSafely(key, merged, { allowEmpty: explicitClear });
+      this._markUnconfirmed(key, merged, {
+        clear: explicitClear && nowEmpty,
+        deletedIds: this._collectDeletedIds(key, previousValue, merged),
+      });
+      if (nowEmpty) {
+        /* 空数据 → 走【专属的清空通道】_persistClear()。
+           _persist 的死规则是"空载荷永远不发"，所以清空只能走这条独立通道，
+           而它只有界面上的【清空按钮】/【删光最后一条】才会调用。 */
+        this._persistClearSafely(key);
+      } else {
+        this._persistSafely(key, merged, {
+          at: Date.now(),
+          deletedIds: this._collectDeletedIds(key, previousValue, merged),
+        });
+      }
     }
     return merged;
+  },
+
+  /**
+   * 这次写入"明确删掉了哪些 id"。
+   *
+   * ⛔ 为什么必须显式：服务端以前是"按这次 payload 里没带的旧行去删"（整表替换语义），
+   *    结果手机端拿着旧快照推上来时，把电脑端刚写进去的新教案当成旧行删掉 ——
+   *    那就是"空数据自杀式覆盖"的真凶。
+   *    改成"客户端点名要删哪几条"，旧快照就再也伤不到新数据。
+   *
+   * @returns {string[]} 本次被删掉的 id（没有则空数组）
+   */
+  _collectDeletedIds(key, previous, next) {
+    if (this._isMeetKey(key)) return [];              // 合并型键：不按 id 删
+    const idsOf = value => {
+      if (Array.isArray(value)) return value.map(item => String(item?.id ?? '')).filter(Boolean);
+      return [];
+    };
+    const prev = new Set(idsOf(previous));
+    if (!prev.size) return [];
+    const nextIds = new Set(idsOf(next));
+    return [...prev].filter(id => !nextIds.has(id));
+  },
+
+  /**
+   * 清空云端某张表的"安全版"：失败时进待写队列（由 _persistEntry 走同一条清空通道重试）。
+   */
+  async _persistClearSafely(key) {
+    try {
+      await this._persistClear(key);
+      this._clearUnconfirmed(key);
+    } catch (error) {
+      if (error && error.status === 503) {
+        this.cloudState = 'off';
+        this.mode = 'local';
+        this._clearUnconfirmed(key);
+        return;
+      }
+      const entry = this._pendingWrites.get(key) || { value: null, at: Date.now(), attempts: 0 };
+      entry.attempts = (entry.attempts || 0) + 1;
+      entry.lastError = error?.message || String(error);
+      entry.clear = true;
+      if (entry.attempts >= MAX_PERSIST_ATTEMPTS) {
+        this._markPersistFailed(key, entry, error);
+        return;
+      }
+      this._pendingWrites.set(key, entry);
+      this._writeLock(key, entry);
+      this._onPersistError(key, error);
+    }
   },
 
   /**
@@ -1145,7 +1233,12 @@ const Store = {
     }
 
     try {
-      await this._persistWithRetry(key, saved, attempts, { allowEmpty: clearIntent });   // ③ 到这里才发网络请求
+      if (clearIntent) {
+        // 清空走【专属通道】：_persist 的死规则是"空载荷永远不发"
+        await this._persistClear(key);
+      } else {
+        await this._persistWithRetry(key, saved, attempts, { at: lockEntry.at });   // ③ 到这里才发网络请求
+      }
       this._clearUnconfirmed(key);
       console.log(`[Store] ✅ ${key} 已写入云端并确认`);
       // 通知所有模块立刻重取（赛程编排不用等下次轮询就能看到新报名）
@@ -1192,7 +1285,7 @@ const Store = {
       const entry = this._pendingWrites.get(key);
       if (!entry) { this._criticalTimers.delete(key); return; }
       try {
-        const sent = await this._persist(key, entry.value, { allowEmpty: entry.clear === true });
+        const sent = await this._persistEntry(key, entry);
         if (sent === false) {               // 空数据：闸门已交出锁，别再无限续传
           this._criticalTimers.delete(key);
           return;
@@ -1268,6 +1361,8 @@ const Store = {
       clear: options.clear !== undefined ? Boolean(options.clear) : Boolean(prev?.clear),
       attempts: prev?.attempts || 0,
       label: prev?.label || '',
+      // 本次"明确要删掉的 id"：补推时要用（服务端只删这些）
+      deletedIds: Array.isArray(options.deletedIds) ? options.deletedIds : (prev?.deletedIds || []),
     };
     this._pendingWrites.set(key, entry);
     this._writeLock(key, entry);
@@ -1327,6 +1422,15 @@ const Store = {
       if (value === undefined || value === null) {
         try { localStorage.removeItem(lockKey); } catch (error) { /* 忽略 */ }
         return;   // 本地都没这份数据，没什么可保护的
+      }
+      /* ⛔ 过期的"清空指令"直接作废：
+         清空意图会留在 localStorage 的保护锁里。手机端几个月前的一次删除留下的"清空锁"，
+         会在某次刷新时突然生效 → 把云端当天的教案删光。
+         现在超过 CLEAR_LOCK_TTL_MS 的清空锁一律作废，绝不再执行。 */
+      if (info?.clear === true && Date.now() - (info?.at || 0) > CLEAR_LOCK_TTL_MS) {
+        try { localStorage.removeItem(lockKey); } catch (error) { /* 忽略 */ }
+        console.warn(`[Store] ⛔ ${key} 的清空锁已过期，已作废（不会再删云端数据）`);
+        return;
       }
       /* ⛔ 本地这份是空的 → 这把锁护不住任何东西，反而会坏事：
          ① 它会让之后的每次云端同步都跳过这个键 → 手机端明明能从云端拉到教案，却一直显示空的；
@@ -1436,6 +1540,20 @@ const Store = {
   },
 
   /**
+   * 这个值算不算"空载荷"（绝不允许推到云端的那种空）。
+   * ⛔ 空对象 / 空数组 / null / 空字符串一律算空载荷 —— 它们推上去就是"把云端洗成 0 条"。
+   */
+  _isEmptyPayloadForPush(key, value) {
+    if (value === null || value === undefined) return true;
+    if (Array.isArray(value)) return value.length === 0;
+    if (this._isPlainObject(value)) {
+      if (this._isMeetKey(key)) return !this._hasContent(key, value);  // 运动会：报名 0 条 = 空
+      return Object.keys(value).length === 0;
+    }
+    return !String(value).trim();
+  },
+
+  /**
    * 推送到云端的唯一出口。
    * ⛔ 云端之所以会被洗成 0 条，绝大多数是"某个页面内存里恰好是空快照，又把它整体写回去了"。
    *    所以这里设一道闸门：本机这份数据是空的，一律不许推，也不许反复重试。
@@ -1446,20 +1564,16 @@ const Store = {
   async _persist(key, value, options = {}) {
     // ⏸ 暂停期间不往云端推任何东西（强行恢复后想推，请先 window.resumeCloud()）
     if (this._cloudPaused) return false;
-    /* ⛔ 空值闸门（所有键统一）：
-       本机这份是空的 → 绝不发 POST。原因有三：
-         ① 云端一旦被写成空数组，那份真实数据就再也回不来了；
-         ② 服务端现在也会 400 拒绝空载荷（双保险）；
-         ③ 手机端拿着空缓存刷新时，正好是最容易"把空推回云端"的时刻。 */
-    if (!this._hasContent(key, value) && options.allowEmpty !== true) {
-      const pending = this._pendingWrites.get(key);
-      if (!pending || pending.clear !== true) {
-        console.warn(`[Store] ⛔ 本机 ${key} 是空的，已拦下这次云端推送`
-          + '（要在云端清空请走界面上的删除操作并带 clearIntent，否则一次误写就会把云端洗成 0 条）');
-        this._clearUnconfirmed(key);      // 连同已放飞的重试一起作废，别让它无限续传
-        const timer = this._criticalTimers.get(key);
-        if (timer) { clearTimeout(timer); this._criticalTimers.delete(key); }
-      }
+    /* ⛔ 死规则（最高优先级）：空载荷【永远不发】—— 不管有没有 clearIntent。
+       清空云端只能走 _persistClear() 这条专属通道（只有界面上的【清空按钮】会调它）。
+       ⚠️ 以前 _flushPending 会拿 "allowEmpty: entry.clear === true" 绕开闸门，
+          结果手机端上那条几周前的"清空锁"会在某次刷新时突然把云端的教案删光。 */
+    if (this._isEmptyPayloadForPush(key, value)) {
+      console.warn(`[Store] ⛔ 本机 ${key} 是空的，已拦下这次云端推送`
+        + '（空载荷永远不发往云端；要在云端清空请用界面上的【清空按钮】）');
+      this._clearUnconfirmed(key);
+      const timer = this._criticalTimers.get(key);
+      if (timer) { clearTimeout(timer); this._criticalTimers.delete(timer); }
       return false;
     }
     // 写入同样带超时：网络挂起时不会一直 pending，失败会进入待写队列
@@ -1472,16 +1586,66 @@ const Store = {
     await this._fetchJSON('/api/data', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      // clear / clearIntent=true：服务端据此判断"这是用户亲手清空"，才允许把该表清空；
-      // 不带这个标记的空数组，服务端一律 400 拒绝（防止把云端洗成 0 条）
+      // deletedIds：本次"明确要删掉"的 id —— 服务端只删这些，
+      //   绝不按"这次 payload 里没带的"去推断旧行（旧快照会误删别人的新数据）。
       body: JSON.stringify({
         key,
         value,
-        clear: options.allowEmpty === true,
-        clearIntent: options.allowEmpty === true,
+        deletedIds: Array.isArray(options.deletedIds) ? options.deletedIds : [],
         snapshotAt,
       }),
     });
+    return true;
+  },
+
+  /**
+   * 清空云端某张表 —— 【唯一】被允许"把云端清空"的通道。
+   * 只有界面上的【清空按钮】/【删光最后一条】才会走到这里；
+   * 自动同步、补推、修复流程【一律】不许调用。
+   */
+  async _persistClear(key) {
+    if (this._cloudPaused) return false;
+    await this._fetchJSON('/api/data', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        key,
+        value: null,
+        clear: true,
+        clearIntent: true,
+        snapshotAt: new Date().toISOString(),
+      }),
+    });
+    return true;
+  },
+
+  /**
+   * 补推一条待写记录（_flushPending 与后台续传共用）。
+   * ⛔ 同样执行死规则：空载荷永远不发；
+   *    清空意图只走 _persistClear，且只认 CLEAR_LOCK_TTL_MS 之内的新鲜指令。
+   */
+  async _persistEntry(key, entry) {
+    if (entry.clear === true) {
+      const age = Date.now() - (entry.at || 0);
+      if (age > CLEAR_LOCK_TTL_MS) {
+        console.warn(`[Store] ⛔ ${key} 的清空指令已过期（约 ${Math.round(age / 60000)} 分钟前），不再执行`
+          + '（防止几天前的清空锁把今天的云端数据删掉）');
+        this._clearUnconfirmed(key);
+        return false;
+      }
+      await this._persistClear(key);
+      this._clearUnconfirmed(key);
+      console.log(`[Store] 已把 ${key} 的清空指令推送到云端`);
+      return true;
+    }
+    if (this._isEmptyPayloadForPush(key, entry.value)) {
+      console.warn(`[Store] ⛔ ${key} 这份数据是空的，绝不发往云端（已丢弃这次补推）`);
+      this._clearUnconfirmed(key);
+      return false;
+    }
+    const sent = await this._persist(key, entry.value, { at: entry.at, deletedIds: entry.deletedIds });
+    if (sent === false) return false;
+    this._clearUnconfirmed(key);
     return true;
   },
 
@@ -1501,7 +1665,8 @@ const Store = {
     if (!this._pendingWrites.size) return;
     for (const [key, entry] of [...this._pendingWrites]) {
       try {
-        const sent = await this._persist(key, entry.value, { allowEmpty: entry.clear === true });
+        // ⛔ 死规则在这里同样生效：空载荷永远不发；清空只走 _persistClear 且必须新鲜
+        const sent = await this._persistEntry(key, entry);
         if (sent === false) continue;      // 空数据被拦下，锁已在闸门里交出
         this._clearUnconfirmed(key);
         console.log(`[Store] 已补推 ${key} 到云端`);
@@ -1998,8 +2163,36 @@ const Store = {
   },
 
   /**
-   * 🛟 抢救脚本：把本地缓存 / 本地备份里的数据推回云端
+   * 📥 纯拉取：从云端把数据拉到本地，【绝对不向云端发送任何修改】。
    *
+   * 手机端遇到"云端有数据、屏幕上却是空的"时，在控制台敲这一行就行：
+   *   await pullCloudOnly()
+   *   await pullCloudOnly(['pe_lesson_plans'])     // 只拉某个键
+   *
+   * ⛔ 保险丝：整个过程只发 GET，一个 POST 都没有 ——
+   *    连"把本地数据反推回云端"的自愈动作也会被关闭（_readOnlyPull）。
+   * ⛔ 强制以云端为准：本地未确认锁、熔断状态一律忽略，云端有数据就覆盖本地并重绘。
+   */
+  async pullCloudOnly(keys = null) {
+    this._readOnlyPull = true;          // ⛔ 全程只读
+    try {
+      const payload = await this._fetchJSON('/api/data', { headers: { Accept: 'application/json' } });
+      const data = payload?.data || {};
+      const wanted = Array.isArray(keys) && keys.length ? keys : null;
+      const target = {};
+      (wanted || Object.keys(data)).forEach(key => { target[key] = data[key]; });
+      const changed = this._applyCloud(target, { force: true });
+      this._mirrorLocal(changed);
+      this._dispatchSync(changed, { forced: true, pulled: true });
+      console.log(`[Store] 📥 已从云端拉取 ${changed.length} 项数据并重绘（本次未向云端发送任何修改）`);
+      return changed;
+    } finally {
+      this._readOnlyPull = false;
+    }
+  },
+
+  /**
+   * 🛟 抢救脚本：把本地缓存 / 本地备份里的数据推回云端   *
    * 适用场景：「手机端刷新后云端的教案凭空消失」——云端表被洗成 0 条，
    *          但这台电脑上还留着那份数据（localStorage 镜像 / 时光机备份）。
    *
@@ -2132,4 +2325,9 @@ if (typeof window !== 'undefined') {
        —— 把本地缓存 / 时光机备份里的数据推回云端（云端被洗成 0 条时用）
        用法：await restoreCloudData()  /  await restoreCloudData(['pe_lesson_plans']) */
   window.restoreCloudData = (keys, options) => Store.restoreCloudData(keys, options || {});
+  /* 📥 手机端不同步时的救命一行（只读，绝不向云端发任何修改）：
+       await pullCloudOnly()                  拉全部键
+       await pullCloudOnly(['pe_lesson_plans']) 只拉某个键 */
+  window.pullCloudOnly = (keys) => Store.pullCloudOnly(keys);
+  window.forcePullCloud = (keys) => Store.pullCloudOnly(keys);
 }

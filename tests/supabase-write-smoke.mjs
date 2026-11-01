@@ -138,18 +138,32 @@ await test('② 先写后删：upsert 失败时旧数据一根汗毛都不能少
   equal(calls.filter(call => call.type === 'delete').length, 0, '写入失败时不得执行任何删除');
 });
 
-await test('③ 写成功后才删旧行：本次没带的旧记录要从云端消失（整表替换语义）', async () => {
+await test('③ 只 upsert、不推断删除：没带 deletedIds 就一个旧行都不许删（旧快照伤不到新数据）', async () => {
   const { client, calls, rowsOf } = makeFakeSupabase({
     fitness_records: [{ id: 'F1' }, { id: 'F2' }, { id: 'F3' }],
   });
   const result = await writeCollectionRows(client, 'fitness_records', [{ id: 'F1', data: {} }], {});
   equal(result.written, 1, '写入 1 条');
-  equal(result.removed, 2, '删掉 2 条旧行');
-  equal(rowsOf('fitness_records').size, 1, '表里只剩这次带来的那条');
+  equal(result.removed, 0, '没点名要删 → 一条都不许删（这就是"空数据自杀式覆盖"的根治点）');
+  equal(rowsOf('fitness_records').size, 3, '云端的老行必须原封不动');
+  equal(calls.filter(call => call.type === 'delete').length, 0, '不许发出任何删除');
+  equal(calls[0].type, 'upsert', '第一个动作必须是 upsert');
+});
+
+await test('③b 点了名要删的 id 才会被删（且只删这些）', async () => {
+  const { client, calls, rowsOf } = makeFakeSupabase({
+    fitness_records: [{ id: 'F1' }, { id: 'F2' }, { id: 'F3' }],
+  });
+  const result = await writeCollectionRows(client, 'fitness_records', [{ id: 'F1', data: {} }], {
+    deletedIds: ['F2'],
+  });
+  equal(result.removed, 1, '只删了点名的 F2');
+  const ids = [...rowsOf('fitness_records').keys()].sort();
+  equal(ids.join(','), 'F1,F3', 'F3 没被点名，必须留下');
   const order = calls.map(call => call.type);
-  equal(order[0], 'upsert', '第一个动作必须是 upsert（先写后删）');
   assert(order.indexOf('upsert') < order.indexOf('delete'), '删除必须发生在写入之后');
 });
+
 
 await test('④ 同 id 去重：批量导入时 id 撞车不再触发主键冲突', async () => {
   const rows = [
@@ -166,13 +180,20 @@ await test('④ 同 id 去重：批量导入时 id 撞车不再触发主键冲�
   equal(new Set(upserted.payload.map(row => row.id)).size, upserted.payload.length, '写进数据库的 id 必须互不相同');
 });
 
-await test('⑤ 空数据 + 没有清空意图 → 一行都不删（不许把云端洗成 0 条）', async () => {
+await test('⑤ 空载荷 + 没有清空意图 → 直接抛错中断（一个字节都不写、一个字节都不删）', async () => {
   const { client, calls, rowsOf } = makeFakeSupabase({ fitness_records: [{ id: 'F1' }, { id: 'F2' }] });
-  const result = await writeCollectionRows(client, 'fitness_records', [], {});
-  equal(result.skippedClear, true, '要明确报告"这次是空写入，已跳过清空"');
+  let error = null;
+  try {
+    await writeCollectionRows(client, 'fitness_records', [], {});
+  } catch (thrown) {
+    error = thrown;
+  }
+  assert(error, '必须抛错中断');
+  equal(error.status, 400, '必须是 400');
   equal(rowsOf('fitness_records').size, 2, '云端的行一根都不能少');
-  equal(calls.filter(call => call.type === 'delete').length, 0, '不许发出任何删除');
+  equal(calls.length, 0, '连一次 upsert / delete 都不许发');
 });
+
 
 await test('⑥ 空数据 + 明确清空意图（clear=true）→ 才允许把表清空', async () => {
   const { client, rowsOf } = makeFakeSupabase({ fitness_records: [{ id: 'F1' }, { id: 'F2' }] });
@@ -186,11 +207,12 @@ await test('⑦ 删除分批：一次删几百行也不会把 URL 撑爆', async
   equal(chunkList([], 50).length, 0, '空数组不产生批次');
   const rows = Array.from({ length: 120 }, (_, index) => ({ id: `F${index}` }));
   const { client, rowsOf } = makeFakeSupabase({ fitness_records: rows });
-  await writeCollectionRows(client, 'fitness_records', [{ id: 'F-new' }], {});
-  equal(rowsOf('fitness_records').size, 1, '120 条旧行全部清掉，只剩新的那条');
+  await writeCollectionRows(client, 'fitness_records', [{ id: 'F-new' }], {
+    deletedIds: rows.map(row => row.id),
+  });
+  equal(rowsOf('fitness_records').size, 1, '120 条点名要删的旧行全部清掉，只剩新的那条');
 });
 
-/* ---------- 「云端被手机端反向清空」这场灾难的专项防线 ---------- */
 
 await test('⑧ 空载荷（空数组）+ 没有 clearIntent → 直接 400 拒绝，一个字都不许写', async () => {
   const { client, calls, rowsOf } = makeFakeSupabase({ lesson_plans: [{ id: 'L1' }] });
@@ -236,24 +258,38 @@ await test('⑪ 并发保护：别人在我之后写的行（updated_at 更新�
       { id: 'L-new', updated_at: newer },   // 别人刚写的 → 一个都不许删
     ],
   });
-  await writeData('pe_lesson_plans', [{ id: 'L-mine', data: {} }], { client });
+  await writeData('pe_lesson_plans', [{ id: 'L-mine', data: {} }], {
+    client,
+    deletedIds: ['L-old', 'L-new'],
+  });
   const ids = [...rowsOf('lesson_plans').keys()];
   assert(ids.includes('L-mine'), '我这条必须写进去');
-  assert(ids.includes('L-new'), '别人在我之后写的行必须留下（绝不能被旧快照当成"该删的旧行"）');
-  assert(!ids.includes('L-old'), '比我旧、又不在我快照里的行应该被删掉（整表替换语义）');
+  assert(ids.includes('L-new'), '别人在我之后写的行必须留下（并发保护）');
+  assert(!ids.includes('L-old'), '比我旧、且点名要删的行应该被删掉');
 });
 
 await test('⑫ 删除永远按【id 列表】执行，绝不出现整表 DELETE', async () => {
   const { client, calls } = makeFakeSupabase({
     lesson_plans: [{ id: 'L1' }, { id: 'L2' }, { id: 'L3' }],
   });
-  await writeData('pe_lesson_plans', [{ id: 'L1', data: {} }], { client });
+  await writeData('pe_lesson_plans', [{ id: 'L1', data: {} }], { client, deletedIds: ['L2', 'L3'] });
   const deletes = calls.filter(call => call.type === 'delete');
   equal(deletes.length, 1, '应该只有一次删除');
   assert(Array.isArray(deletes[0].ids) && deletes[0].ids.length === 2,
     '删除必须带上明确的 id 列表（没有 id 列表 = 整表 DELETE，一律禁止）');
   assert(!deletes[0].ids.includes('L1'), '保留下来的行不能被删');
 });
+
+await test('⑯ 旧快照推上来时，云端的新数据一根都不能少（核心防线）', async () => {
+  // 手机端拿着旧快照（只有 L1）推上来，云端其实已经有 L1 + L2（电脑端刚生成的）
+  const { client, rowsOf } = makeFakeSupabase({
+    lesson_plans: [{ id: 'L1' }, { id: 'L2' }],
+  });
+  await writeData('pe_lesson_plans', [{ id: 'L1', data: {} }], { client });
+  const ids = [...rowsOf('lesson_plans').keys()].sort();
+  equal(ids.join(','), 'L1,L2', '旧快照绝不能把云端那条新教案当成"该删的旧行"删掉');
+});
+
 
 await test('⑬ 批量迁移：空的那一项标记为 skipped-empty（不算失败），云端一个字节都不动', async () => {
   const { client, rowsOf } = makeFakeSupabase({ lesson_plans: [{ id: 'L1' }] });
@@ -297,10 +333,14 @@ await test('⑮ snapshotAt 并发保护：另一台设备在我这份快照【�
       { id: 'L-new', updated_at: afterSnapshot },                              // 我快照之后对方写的 → 必须留下
     ],
   });
-  await writeData('pe_lesson_plans', [{ id: 'L-mine', data: {} }], { client, snapshotAt });
+  await writeData('pe_lesson_plans', [{ id: 'L-mine', data: {} }], {
+    client,
+    snapshotAt,
+    deletedIds: ['L-old', 'L-new'],
+  });
   const ids = [...rowsOf('lesson_plans').keys()];
   assert(ids.includes('L-new'), '对方在我快照之后写的行必须留下（两端同时在线不能互相抹掉）');
-  assert(!ids.includes('L-old'), '我快照之前就存在的旧行应该被删掉');
+  assert(!ids.includes('L-old'), '我快照之前就存在、且点名要删的行应该被删掉');
   assert(ids.includes('L-mine'), '我这条必须写进去');
 });
 
