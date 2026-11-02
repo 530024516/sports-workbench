@@ -2630,3 +2630,127 @@ select.form-control {
     display: none;
   }
 }
+
+/* =============================================================
+   体测成绩排名（体测数据 → 成绩排名）
+   ============================================================= */
+.ranking-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: 1 1 380px;
+  min-width: 0;
+}
+
+.ranking-filters .form-control {
+  width: auto;
+  min-width: 118px;
+  max-width: 240px;
+}
+
+.ranking-grid {
+  align-items: start;
+}
+
+.ranking-card {
+  min-width: 0;
+}
+
+.ranking-export-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ranking-direction-tip {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--primary-100, #eef4ff);
+  color: var(--primary-dark, #1d4ed8);
+  font-size: 13px;
+}
+
+.ranking-direction-note {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.ranking-table {
+  width: 100%;
+}
+
+.ranking-table td {
+  vertical-align: middle;
+}
+
+.ranking-rank {
+  white-space: nowrap;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.ranking-rank-medal {
+  margin-right: 4px;
+  font-size: 15px;
+}
+
+.ranking-top-row {
+  background: #fffdf3;
+}
+
+.ranking-current-row {
+  background: var(--primary-100, #eef4ff);
+}
+
+.ranking-current-badge {
+  margin-left: 6px;
+  white-space: nowrap;
+}
+
+/* 进度条：按与第一名的比例 */
+.ranking-bar {
+  width: 100%;
+  min-width: 70px;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: var(--bg-hover);
+}
+
+.ranking-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.5s ease;
+}
+
+@media (max-width: 768px) {
+  .ranking-filters {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .ranking-filters .form-control {
+    width: 100%;
+    max-width: none;
+    min-height: 40px;
+    font-size: 16px;              /* iOS 聚焦不放大页面 */
+  }
+
+  .ranking-export-actions {
+    width: 100%;
+  }
+
+  .ranking-export-actions .btn {
+    flex: 1 1 auto;
+    min-height: 40px;
+    font-size: 14px;
+  }
+
+  .ranking-bar {
+    min-width: 56px;
+  }
+}

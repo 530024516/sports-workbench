@@ -77,8 +77,9 @@ content.innerHTML = `
   <div class="toolbar">
     <div class="toolbar-left">
       <div class="segmented" id="viewSwitch">
-        <button class="${fitnessView === 'records' ? 'active' : ''}" onclick="switchView('records')">成绩列表</button>
-        <button class="${fitnessView === 'stats' ? 'active' : ''}" onclick="switchView('stats')">统计分析</button>
+        <button data-view="records" class="${fitnessView === 'records' ? 'active' : ''}" onclick="switchView('records')">成绩列表</button>
+        <button data-view="stats" class="${fitnessView === 'stats' ? 'active' : ''}" onclick="switchView('stats')">统计分析</button>
+        <button data-view="ranking" class="${fitnessView === 'ranking' ? 'active' : ''}" onclick="switchView('ranking')">成绩排名</button>
       </div>
     </div>
     <div class="toolbar-right" id="filterArea"></div>
@@ -117,8 +118,8 @@ function refreshFitnessDataViews() {
 function switchView(view) {
   fitnessView = view;
   // 更新按钮
-  document.querySelectorAll('#viewSwitch button').forEach((btn, i) => {
-    btn.classList.toggle('active', (i === 0 && view === 'records') || (i === 1 && view === 'stats'));
+  document.querySelectorAll('#viewSwitch button').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.view === view);
   });
   renderView();
 }
@@ -126,8 +127,10 @@ function switchView(view) {
 function renderView() {
   if (fitnessView === 'records') {
     renderRecordsView();
-  } else {
+  } else if (fitnessView === 'stats') {
     renderStatsView();
+  } else if (typeof renderRankingView === 'function') {
+    renderRankingView();          // 成绩排名（js/fitness-ranking.js）
   }
 }
 
