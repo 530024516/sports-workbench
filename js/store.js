@@ -68,7 +68,7 @@ const MEET_DATA_KEYS = [
  *    localStorage，表现就是"刷新一下主键立刻变 0 条"，日志还会打"本次无差异"。
  *    如果你的控制台里看不到下面这行，说明浏览器还在用缓存里的旧 store.js —— 先硬刷（Cmd+Shift+R）。
  */
-const STORE_BUILD = 'v3-数据丢失防线（时光机备份 + 云端0条防污染 + forceRecover）2026-10-29';
+const STORE_BUILD = 'v4-单键彻底清空（clearKey + 清空防复活 + 反推自愈闸门）2026-11-02';
 
 // 所有接口请求的统一超时上限
 // 20 秒：Vercel（尤其免费版）冷启动 + Supabase 首次连接经常超过 5 秒，
@@ -106,6 +106,12 @@ const MAX_PERSIST_ATTEMPTS = 3;
  *    现在超过这个时间就算过期，绝不再执行。
  */
 const CLEAR_LOCK_TTL_MS = 10 * 60 * 1000;
+/**
+ * 「清空已确认」后的沉降期（毫秒）。
+ * 云端确认删干净之后仍留一小段沉降期：万一还有一发"清空之前发出、清空之后才回来"
+ * 的同步结果，它带着旧数据回来也不会被复活到本地。
+ */
+const CLEAR_SETTLE_MS = 10000;
 // 重要表单云端确认失败后的后台续传节奏（毫秒）
 const CRITICAL_RETRY_DELAYS = [1500, 5000, 15000, 30000];
 /**
@@ -130,8 +136,13 @@ const MEET_MAIN_KEY = 'pe_sports_meet_v1';
  *   ① 用户在别的页面亲手点了「一键清空」→ 必须跟着清空（否则清空了又被老数据复活）；
  *   ② 兄弟页面自己也在启动中、手上恰好是空快照 → 必须无视（否则就是"刷新一下数据没了"）。
  * 世代号落地到 localStorage 就是为了做这个区分，它本身不是业务数据键。
+ *
+ * ⚠️ 键名沿用旧的 pe_meet_purge_epoch_v1 —— 正在运行的旧标签页只认这个键，
+ *    换名字它们就收不到清空指令了。
+ * ⚠️ 载荷里多了 keys 清单：清空不再只是"某个键"，而是"明确点名要清哪些键"，
+ *    兄弟页面照单全收（老版本没有这个字段时，退回到"清空触发 storage 事件的那个键"）。
  */
-const MEET_PURGE_EPOCH_KEY = 'pe_meet_purge_epoch_v1';
+const PURGE_SIGNAL_KEY = 'pe_meet_purge_epoch_v1';
 // 清空指令的"有效期"：世代号带时间戳，只认 10 秒内刚发生的清空。
 // 否则隔天别的页面导入新数据时，一次残留的世代号前进会被误判成清空指令，把新数据抹掉
 const PURGE_SIGNAL_TTL_MS = 10000;
@@ -180,6 +191,16 @@ const Store = {
   _purgeEpoch: 0,
   // 本实例看到的世代号（含别的 iframe 写的）：storage 事件靠它识别"明确的清空指令"
   _purgeEpochSeen: 0,
+  /**
+   * 正在清空流程中的键：key → { at, confirmedAt }
+   * ⛔ 这是"用户亲手清空"必须绝对可靠的关键闸门：
+   *    清空期间云端回来的旧数据一律【不复活到本地】，也不会触发"反推自愈"
+   *    （把本地这份反推回云端）。否则云端清空失败或慢半拍时，
+   *    旧数据会一路复活回来 —— 那正是这次要根治的毛病。
+   */
+  _pendingClearKeys: new Map(),
+  // 清空云端失败后的后台补清定时器：key → timer
+  _clearRetryTimers: new Map(),
   // 上一次同步的防污染报告：{ protected, refused, healed }，供 _logOverwrite 打印
   _lastSyncReport: null,
   /**
@@ -600,6 +621,16 @@ const Store = {
       const next = data[key] === undefined ? null : data[key];
       const cloudEmpty = this._isEmptyValue(next);
       const localHasData = !this._isEmptyValue(current);
+      /* ⛔ 「清空中」的键：云端回来的旧数据一律【不复活到本地】，
+         也绝不触发"反推自愈"（把这份旧数据又推回云端）。
+         这是"用户亲手清空体测数据"必须绝对可靠的最后一道闸门：
+         没有它，云端清空慢半拍或失败时，旧数据会一路复活回来 ——
+         也就是这次要根治的那个毛病（本地缓存把云端重新污染回去）。 */
+      if (this._isClearPending(key) && !this._isEmptyValue(next)) {
+        protectedKeys.push(key);
+        console.warn(`[Store] ⛔ ${key} 处于清空流程中，云端返回的旧数据不会复活到本地（等云端清空确认）`);
+        return;
+      }
       /* ✅ 云端返回了【有效数据】而本地是空的 → 强制用云端数据覆盖本地，并触发重绘。
          这条是"手机端刷新后必须能看到电脑端刚生成的教案"的保证：
          以前手机端握着一把"空值锁"，云端的数据被挡在门外 → 页面一直空白，
@@ -773,17 +804,26 @@ const Store = {
     window.addEventListener('storage', event => {
       const key = event.key;
       if (!key || !STORE_KEYS.includes(key)) return;
-      // 本页这份键还有「云端未确认」的写入 → 保留本地，绝不让别人（或云端旧值）覆盖
-      if (this._pendingWrites.has(key)) return;
-      /* ✅ 唯一的例外：别的 iframe 明确执行了「一键清空」（世代号前进了）。
-         用户亲自确认过的清空必须生效，否则兄弟页面"死活不清空"会被当成 Bug 再报一次。 */
-      if (this._detectForeignPurge()) {
-        this.cache.delete(key);
-        try { localStorage.removeItem(key); } catch (error) { /* 忽略 */ }
-        console.log(`[Store] 🧨 检测到其它页面执行了一键清空，${key} 已同步清空（不再从备份复活）`);
-        this._dispatchSync([key], { reason: 'purgeMeetData', crossDocument: true });
+      /* ✅ 明确的清空指令优先于一切本地保护：
+           用户亲手确认过的清空必须生效 —— 哪怕本页还握着一把"云端未确认"的锁。
+           （以前这条检查排在 pendingWrites 后面：本页握着锁时它会直接 return，
+             于是本页把清空前的旧数据当成"本地刚写的"补推回云端 → 数据原地复活。）
+           信号里带 keys 清单就照单全收，老版本信号没有清单时退回"清空触发事件的那个键"。 */
+      const purgedKeys = this._consumeForeignPurge(key);
+      if (purgedKeys && purgedKeys.length) {
+        purgedKeys.forEach(purgeKey => {
+          this.cache.delete(purgeKey);
+          this._localWrites.delete(purgeKey);
+          this._failedWrites.delete(purgeKey);
+          this._clearUnconfirmed(purgeKey);        // 解除防覆盖锁，别再把旧数据补推回云端
+          try { localStorage.removeItem(purgeKey); } catch (error) { /* 忽略 */ }
+        });
+        console.log(`[Store] 🧨 检测到其它页面执行了清空指令，已同步清空：${purgedKeys.join('、')}（不再从备份复活）`);
+        this._dispatchSync(purgedKeys, { reason: 'purgeKeys', crossDocument: true });
         return;
       }
+      // 本页这份键还有「云端未确认」的写入 → 保留本地，绝不让别人（或云端旧值）覆盖
+      if (this._pendingWrites.has(key)) return;
       let next = null;
       try {
         next = event.newValue === null || event.newValue === undefined ? null : JSON.parse(event.newValue);
@@ -826,16 +866,20 @@ const Store = {
     });
   },
 
-  /** 盘上的「一键清空」指令：{ epoch, at }（早期版本可能只存了纯数字，一并兼容） */
+  /** 盘上的「一键清空」指令：{ epoch, at, keys }（早期版本可能只存了纯数字，一并兼容） */
   _storedPurgeSignal() {
     try {
-      const raw = localStorage.getItem(MEET_PURGE_EPOCH_KEY);
-      if (!raw) return { epoch: 0, at: 0 };
+      const raw = localStorage.getItem(PURGE_SIGNAL_KEY);
+      if (!raw) return { epoch: 0, at: 0, keys: [] };
       const parsed = JSON.parse(raw);
-      if (typeof parsed === 'number') return { epoch: parsed, at: Date.now() };
-      return { epoch: Number(parsed?.epoch) || 0, at: Number(parsed?.at) || 0 };
+      if (typeof parsed === 'number') return { epoch: parsed, at: Date.now(), keys: [] };
+      return {
+        epoch: Number(parsed?.epoch) || 0,
+        at: Number(parsed?.at) || 0,
+        keys: Array.isArray(parsed?.keys) ? parsed.keys.filter(key => typeof key === 'string') : [],
+      };
     } catch (error) {
-      return { epoch: 0, at: 0 };
+      return { epoch: 0, at: 0, keys: [] };
     }
   },
 
@@ -847,10 +891,32 @@ const Store = {
   _detectForeignPurge() {
     const { epoch, at } = this._storedPurgeSignal();
     if (epoch <= this._purgeEpochSeen) return false;
-    this._purgeEpochSeen = epoch;                 // 认下这个世代号，后续不再重复判断
     if (at && Date.now() - at > PURGE_SIGNAL_TTL_MS) return false;
-    this._purgeEpoch = Math.max(this._purgeEpoch, epoch);
     return true;
+  },
+
+  /**
+   * 读取并"认领"别的文档发来的清空指令。
+   * @param {string} eventKey 触发 storage 事件的键（老版本信号没有 keys 清单时用它兜底）
+   * @returns {string[]|null} 需要跟着一起清空的键清单；null = 这不是清空指令
+   */
+  _consumeForeignPurge(eventKey = '') {
+    const { epoch, at, keys } = this._storedPurgeSignal();
+    if (epoch <= this._purgeEpochSeen) return null;
+    this._purgeEpochSeen = epoch;                 // 认下这个世代号，后续不再重复判断
+    if (at && Date.now() - at > PURGE_SIGNAL_TTL_MS) return null;
+    this._purgeEpoch = Math.max(this._purgeEpoch, epoch);
+    const wanted = keys.length ? keys : (eventKey ? [eventKey] : []);
+    return wanted.filter(key => STORE_KEYS.includes(key));
+  },
+
+  /**
+   * 写一份「清空指令」到盘上：兄弟 iframe / 其它标签页据此跟着清空。
+   * @param {string[]} keys 本次点名要清的键（老版本只认 epoch/at，keys 会被忽略）
+   */
+  _writePurgeSignal(keys = []) {
+    const signal = JSON.stringify({ epoch: this._purgeEpoch, at: Date.now(), keys: [...keys] });
+    try { localStorage.setItem(PURGE_SIGNAL_KEY, signal); } catch (error) { /* 忽略 */ }
   },
 
   /**
@@ -880,7 +946,7 @@ const Store = {
     /* ⛔ 自愈底线：只要主数据是空的，就【无条件、同步】试一次时光机备份。
        不看云同步走到哪一步、不看有没有差异 —— 备份在，任何页面任何时刻读到的都必须是 216 条。
        这是"三个页面（报名 / 赛程 / 成绩）表现绝对一致"的最后保证。 */
-    if (this._isMeetKey(key)) this._healMeetDataFromBackup(key);
+    if (this._isMeetKey(key) && !this._isClearPending(key)) this._healMeetDataFromBackup(key);
     const value = this.cache.get(key);
     const result = value === undefined ? fallback : value;
     if (this._isMeetKey(key)) {
@@ -912,6 +978,8 @@ const Store = {
     this._traceEmptyWrite(key, before, merged, 'write()');      // 🚨 看门狗：谁把主数据写成 0 条
     this.cache.set(key, merged);
     this._localWrites.add(key);
+    // 用户又写入了这个键 → 解除「清空中」标记（这份新数据照常落地、照常参与同步）
+    this._pendingClearKeys.delete(key);
     // 用户又改了 → 之前熔断的状态作废，重新给一次机会
     this._failedWrites.delete(key);
     if (this._isMeetKey(key)) {
@@ -1145,6 +1213,7 @@ const Store = {
     try {
       MEET_DATA_KEYS.filter(key => this._isMeetKey(key)).forEach(key => {
         if (options.key && key !== options.key) return;
+        if (this._isClearPending(key)) return;         // 正在清空：备份也不许复活旧数据
         const slot = this._readBackupSlot(key);
         if (!slot) return;
         if (!this._hasContent(key, slot.data)) return;            // 备份本身就是空的，没得恢复
@@ -1176,6 +1245,7 @@ const Store = {
   /** 自愈入口：主数据空 → 拉备份（read / 云端空 / 兄弟页面清空 都会走这里） */
   _healMeetDataFromBackup(key, reason) {
     if (!this._isMeetKey(key)) return false;
+    if (this._isClearPending(key)) return false;      // 正在清空：绝不允许备份把旧数据复活
     if (this._hasContent(key, this._readLocalValue(key))) return false;
     return this._restoreFromBackup({ key, reason: reason || '主数据为空自愈' });
   },
@@ -1767,11 +1837,11 @@ const Store = {
     // 世代号 +1：作废所有还在飞的同步结果，免得清空完又被旧数据复活
     this._purgeEpoch += 1;
     this._purgeEpochSeen = this._purgeEpoch;
-    const purgeSignal = JSON.stringify({ epoch: this._purgeEpoch, at: Date.now() });
     /* 世代号同时落到 localStorage：这是给兄弟 iframe 看的"明确的清空指令"。
        没有它，兄弟页面会把这次清空当成"对方还在初始化、手上正好是空快照"，
-       按防污染规则无视掉 —— 用户眼里就是"点了清空，隔壁 Tab 数据还在"。 */
-    try { localStorage.setItem(MEET_PURGE_EPOCH_KEY, purgeSignal); } catch (error) { /* 忽略 */ }
+       按防污染规则无视掉 —— 用户眼里就是"点了清空，隔壁 Tab 数据还在"。
+       ⚠️ keys 清单让兄弟页面一次清掉全部 4 个键（以前它只清"触发 storage 事件的那一个"）。 */
+    this._writePurgeSignal(MEET_DATA_KEYS);
     /* 时光机备份（含按存储键分槽的每一份）一起删，否则"一键清空"之后数据又从备份里长回来 */
     try {
       const backupKeys = [];
@@ -1845,6 +1915,152 @@ const Store = {
       mode: this.mode,
       clearedKeys,
       cloud,
+      error: error || undefined,
+    };
+  },
+
+  /**
+   * ⛔ 这个键是不是正处在「用户亲手清空」的流程里？
+   *   · 清空还没被云端确认 → 保护期内（旧数据不复活、不反推）
+   *   · 云端已确认清空   → 只留一小段沉降期，挡住"清空前发出、清空后才回来"的旧结果
+   * 保护期最长 CLEAR_LOCK_TTL_MS：超过就恢复正常同步（并提示用户重试清空）。
+   */
+  _isClearPending(key) {
+    const entry = this._pendingClearKeys.get(key);
+    if (!entry) return false;
+    const limit = entry.confirmedAt ? CLEAR_SETTLE_MS : CLEAR_LOCK_TTL_MS;
+    if (Date.now() - (entry.confirmedAt || entry.at) > limit) {
+      this._pendingClearKeys.delete(key);
+      return false;
+    }
+    return true;
+  },
+
+  /**
+   * 清空云端失败后的后台补清：断网/超时的情况下，稍后再试一次。
+   * 补清成功前，「清空中」标记一直有效 —— 本地绝不会被旧数据顶回来。
+   */
+  _scheduleClearRetry(key, label = key) {
+    if (typeof window === 'undefined') return;
+    if (this._clearRetryTimers.has(key)) return;
+    const delays = [3000, 10000, 30000];
+    let step = 0;
+    const runNext = async () => {
+      this._clearRetryTimers.delete(key);
+      try {
+        const sent = await this._persistClear(key);
+        if (sent !== false) {
+          this._pendingClearKeys.set(key, { at: Date.now(), confirmedAt: Date.now() });
+          console.log(`[Store] ✅ ${label} 的云端清空已在后台补成功`);
+          if (typeof window.showToast === 'function') window.showToast(`${label}的云端数据已补清`, 'success');
+          this._dispatchSync([key], { reason: 'clearKeyRetry', cleared: true, cloudCleared: true });
+          return;
+        }
+      } catch (error) {
+        console.warn(`[Store] ${label} 的云端清空重试失败：${error?.message || error}`);
+      }
+      step += 1;
+      if (step >= delays.length) {
+        console.warn(`[Store] ${label} 的云端清空多次失败：请联网后再次点击清空按钮，`
+          + `或在控制台执行 Store.clearKey('${key}')`);
+        return;
+      }
+      this._clearRetryTimers.set(key, setTimeout(runNext, delays[step]));
+    };
+    this._clearRetryTimers.set(key, setTimeout(runNext, delays[0]));
+  },
+
+  /**
+   * 清空单个存储键（用户亲手清空）——【体测数据一键清空】用的专属通道。
+   *
+   * 一次做完全套，绝不留下任何"能复活旧数据"的痕迹：
+   *   ① 内存缓存            → cache.delete
+   *   ② localStorage 镜像   → removeItem(key)
+   *   ③ 本地备份（时光机）  → removeItem(key__local_backup) + removeItem(备份分槽)
+   *   ④ 防覆盖锁            → _clearUnconfirmed(key)（内存队列 + 盘上的锁一起解除）
+   *   ⑤ 云端数据库          → POST /api/data { key, value:null, clear:true, clearIntent:true }
+   *
+   * ⛔ 绝不触发「反推自愈」：
+   *   · 世代号 +1 —— 清空之前发出、清空之后才回来的同步结果直接作废；
+   *   · 「清空中」标记 —— 云端回来的旧数据不复活到本地，也不会被反推回云端；
+   *   · 本地先洗地、云端后清 —— 即使云端清空失败，本地也不会再被旧数据顶回来。
+   *
+   * ⚠️ 只清传进来的这一个键：学生名单、教案、课表、考勤等其它数据一律不动。
+   *
+   * @param {string} key Store 管理的存储键名
+   * @param {{label?:string, attempts?:number}} options label 只用于提示文案
+   * @returns {Promise<{ok:boolean, mode:string, key:string, label:string, cloudCleared:boolean, error?:string}>}
+   */
+  async clearKey(key, options = {}) {
+    if (!STORE_KEYS.includes(key)) {
+      throw new Error(`未知的存储键：${key}（只允许清空 Store 管理的键）`);
+    }
+    const label = options.label || key;
+    const attempts = options.attempts ?? 2;
+
+    // ① 世代号 +1：作废所有还在飞的同步结果（别让它们把刚清掉的数据写回来）
+    this._purgeEpoch += 1;
+    this._purgeEpochSeen = this._purgeEpoch;
+    // ② 标记「清空中」：云端回来的旧数据不复活，也不反推回云端
+    this._pendingClearKeys.set(key, { at: Date.now() });
+    // ③ 跨文档清空指令：兄弟 iframe / 其它标签页跟着清空
+    this._writePurgeSignal([key]);
+
+    // ④ 本地洗地：内存 → 待写队列/锁 → localStorage 镜像 → 备份
+    this.cache.delete(key);
+    this._localWrites.delete(key);
+    this._failedWrites.delete(key);
+    this._clearUnconfirmed(key);                     // 解除防覆盖锁（内存队列 + 盘上的锁）
+    const timer = this._criticalTimers.get(key);
+    if (timer) { clearTimeout(timer); this._criticalTimers.delete(key); }
+    try { localStorage.removeItem(key); } catch (error) { /* 忽略 */ }
+    try { localStorage.removeItem(`${key}__local_backup`); } catch (error) { /* 忽略 */ }
+    // 时光机备份的"分槽"那一份（pe_sports_meet_backup_v1::<key>）
+    try { localStorage.removeItem(this._backupKeyOf(key)); } catch (error) { /* 忽略 */ }
+    // ⚠️ 裸备份键 pe_sports_meet_backup_v1 装的是【运动会主数据】，只有清它自己时才动
+    if (this._isCountableMeetKey(key)) {
+      try { localStorage.removeItem(MEET_BACKUP_KEY); } catch (error) { /* 忽略 */ }
+    }
+
+    // ⑤ 清云端：走【专属清空通道】—— 只有带 clearIntent 的空载荷才被允许写进云端
+    let cloudCleared = false;
+    let cloudSkipped = false;
+    let error = null;
+    if (this.cloudState === 'off') {
+      // 纯本地模式（服务端没配 Supabase）或当前离线：没有云端可清，别傻等
+      cloudSkipped = true;
+      error = '云端存储未连接（服务端未配置 Supabase，或网络不可用）：本次只清空了本地数据';
+    } else {
+      for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        try {
+          const sent = await this._persistClear(key);
+          cloudCleared = sent !== false;
+          error = cloudCleared ? null : '云端同步处于暂停状态，本次没有真正清空云端';
+          break;
+        } catch (clearError) {
+          error = clearError?.message || String(clearError);
+          if (attempt < attempts) await this._delay(RETRY_DELAY);
+        }
+      }
+    }
+
+    if (cloudCleared) {
+      // 云端已确认清空 → 只留一小段沉降期，挡住"清空前发出、清空后才回来"的旧结果
+      this._pendingClearKeys.set(key, { at: Date.now(), confirmedAt: Date.now() });
+      console.log(`[Store] 🧹 已清空 ${label}（本地 + 云端）`);
+    } else if (cloudSkipped) {
+      // 没有云端可清：保护标记留着（本地不会被旧数据顶回来），但不做无谓的后台重试
+      console.warn(`[Store] ⚠️ ${label} 本地已清空，但${error}`);
+    } else {
+      // 云端没清掉：保护标记继续有效（本地不会被旧数据顶回来），并在后台补清
+      this._scheduleClearRetry(key, label);
+      console.warn(`[Store] ⚠️ ${label} 本地已清空，但云端清空失败：${error}（后台会自动补清）`);
+    }
+
+    // ⑥ 通知页面重绘（成绩列表 / 统计 / 排名都会立刻变成空）
+    this._dispatchSync([key], { reason: 'clearKey', cleared: true, cloudCleared });
+    return {
+      ok: cloudCleared, mode: this.mode, key, label, cloudCleared, cloudSkipped,
       error: error || undefined,
     };
   },
@@ -2325,6 +2541,9 @@ if (typeof window !== 'undefined') {
        —— 把本地缓存 / 时光机备份里的数据推回云端（云端被洗成 0 条时用）
        用法：await restoreCloudData()  /  await restoreCloudData(['pe_lesson_plans']) */
   window.restoreCloudData = (keys, options) => Store.restoreCloudData(keys, options || {});
+  /* 🧹 单键彻底清空（控制台）：await clearStoreKey('pe_fitness_records')
+     —— 内存 + localStorage + 云端 + 备份 + 保护锁一次清干净，绝不反推自愈 */
+  window.clearStoreKey = (key, options) => Store.clearKey(key, options || {});
   /* 📥 手机端不同步时的救命一行（只读，绝不向云端发任何修改）：
        await pullCloudOnly()                  拉全部键
        await pullCloudOnly(['pe_lesson_plans']) 只拉某个键 */

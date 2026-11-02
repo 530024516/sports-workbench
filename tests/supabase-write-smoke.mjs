@@ -344,6 +344,26 @@ await test('⑮ snapshotAt 并发保护：另一台设备在我这份快照【�
   assert(ids.includes('L-mine'), '我这条必须写进去');
 });
 
+await test('⑯ 一键清空体测数据（clearIntent）→ 体测表整表清空，其它表一根汗毛都不少', async () => {
+  const { client, rowsOf, calls } = makeFakeSupabase({
+    fitness_records: [
+      { id: 'F1', data: { id: 'F1', studentId: 'S1' } },
+      { id: 'F2', data: { id: 'F2', studentId: 'S2' } },
+    ],
+    students: [{ id: 'S1', data: { id: 'S1', name: '张三' } }],
+    lesson_plans: [{ id: 'L1', data: { id: 'L1' } }],
+  });
+  // 前端 clearKey() 发过来的正是这种请求：value=null + clear + clearIntent
+  const result = await writeData('pe_fitness_records', null, { client, clear: true });
+  equal(result.count, 0, '清空后写入条数必须是 0');
+  equal(rowsOf('fitness_records').size, 0, '体测表必须被清空');
+  equal(rowsOf('students').size, 1, '学生名单不能被清空');
+  equal(rowsOf('lesson_plans').size, 1, '教案不能被清空');
+  assert(!calls.some(call => call.type === 'upsert' && call.table !== 'fitness_records'),
+    '清空时不该往其它表写任何东西');
+  assert(!calls.some(call => call.type === 'insert'), '清空时一律不许 insert');
+});
+
 const failed = results.filter(result => !result.ok);
 console.log(`\n${failed.length ? '❌' : '✅'} ${results.length - failed.length}/${results.length} 通过\n`);
 if (failed.length) process.exitCode = 1;

@@ -2754,3 +2754,101 @@ select.form-control {
     min-width: 56px;
   }
 }
+
+/* ========== 体测数据：一键清空（危险操作） ========== */
+.fitness-purge-btn {
+  white-space: nowrap;
+}
+
+.fitness-purge {
+  font-size: 14px;
+  line-height: 1.8;
+  color: var(--text-primary);
+}
+
+.fitness-purge-warn {
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border-left: 4px solid var(--danger);
+  border-radius: var(--radius-sm);
+  background: var(--danger-light);
+  color: var(--text-primary);
+}
+
+.fitness-purge-list {
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.fitness-purge-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+  font-size: 13px;
+}
+
+.fitness-purge-list li b {
+  color: var(--text-primary);
+}
+
+.fitness-purge-list li span {
+  color: var(--text-secondary);
+}
+
+.fitness-purge-safe {
+  margin: 0 0 12px;
+  color: var(--success);
+  font-size: 13px;
+}
+
+.fitness-purge code {
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--bg-hover);
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+
+.fitness-purge-input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card, #fff);
+  color: var(--text-primary);
+  font-size: 16px;                /* iOS 聚焦不放大页面 */
+  font-family: inherit;
+  letter-spacing: 2px;
+}
+
+.fitness-purge-input:focus {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(214, 40, 40, 0.15);
+}
+
+@media (max-width: 768px) {
+  .fitness-purge-list li {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .fitness-purge-input {
+    font-size: 16px;
+    min-height: 44px;
+  }
+
+  .modal-footer .btn {
+    flex: 1 1 auto;
+    min-height: 44px;
+  }
+}

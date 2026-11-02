@@ -45,6 +45,10 @@ content.innerHTML = `
       <button class="btn btn-primary" onclick="openAddRecord()">
         <span>📝</span> 录入成绩
       </button>
+      <button class="btn btn-danger fitness-purge-btn" onclick="requestFitnessPurge()"
+        title="清空全部体测成绩记录（本地 + 云端），不影响学生名单、教案等其它数据">
+        <span>🗑️</span> 清空体测数据
+      </button>
     </div>
   </div>
 
@@ -131,6 +135,74 @@ function renderView() {
     renderStatsView();
   } else if (typeof renderRankingView === 'function') {
     renderRankingView();          // 成绩排名（js/fitness-ranking.js）
+  }
+}
+
+// ===== 清空体测数据（本地 + 云端，一次清干净）=====
+const FITNESS_PURGE_CONFIRM_TEXT = 'DELETE';
+const FITNESS_PURGE_KEY = 'pe_fitness_records';
+let fitnessPurgePendingCount = 0;
+
+/**
+ * 打开确认弹窗：必须手动输入 DELETE 才允许执行。
+ * 弹窗里写清楚"清什么、不清什么"，避免老师以为会把学生名单一起删掉。
+ */
+function requestFitnessPurge() {
+  fitnessPurgePendingCount = DB.getFitnessRecords().length;
+  showModal(
+    '🗑️ 清空全部体测数据',
+    `<div class="fitness-purge">
+       <p class="fitness-purge-warn">此操作<b>不可恢复</b>，将删除全部 <b>${fitnessPurgePendingCount}</b> 条体测成绩记录。</p>
+       <ul class="fitness-purge-list">
+         <li><b>本地</b><span>内存缓存 + localStorage 镜像 + 保护锁 + 本地备份</span></li>
+         <li><b>云端</b><span>Supabase 体测数据表（整表清空）</span></li>
+       </ul>
+       <p class="fitness-purge-safe">✔ 只清体测数据：学生名单、教案、课表、考勤等其它数据一律不动。</p>
+       <p>确定请手动输入 <code>DELETE</code> 后再点红色按钮：</p>
+       <input id="fitnessPurgeConfirm" class="fitness-purge-input" type="text" autocomplete="off"
+         placeholder="输入 DELETE" aria-label="输入 DELETE 以确认清空体测数据">
+     </div>`,
+    `<button class="btn btn-secondary" onclick="closeModal(this)">取消</button>
+     <button class="btn btn-danger" onclick="confirmFitnessPurge(this)">我确认，彻底清空</button>`,
+  );
+  document.getElementById('fitnessPurgeConfirm')?.focus();
+}
+
+/**
+ * 真正执行清空：走 Store.clearKey() 专属通道
+ * （内存 → localStorage → 备份 → 防覆盖锁 → 云端，且不会触发"反推自愈"）。
+ */
+async function confirmFitnessPurge(button) {
+  const input = document.getElementById('fitnessPurgeConfirm');
+  if (input?.value.trim() !== FITNESS_PURGE_CONFIRM_TEXT) {
+    showToast('请输入 DELETE 以确认清空', 'error');
+    input?.focus();
+    return;
+  }
+  if (button) {
+    button.disabled = true;
+    button.textContent = '正在清空…';
+  }
+  try {
+    const result = await Store.clearKey(FITNESS_PURGE_KEY, { label: '体测数据' });
+    const closeBtn = document.querySelector('.modal-close');
+    if (closeBtn) closeModal(closeBtn);
+    if (result.cloudCleared) {
+      showToast(`已清空体测数据（本地 + 云端，共 ${fitnessPurgePendingCount} 条）`, 'success');
+    } else if (result.cloudSkipped) {
+      showToast(`本地体测数据已清空；${result.error || '当前未连接云端，没有云端数据可清'}`, 'error');
+    } else {
+      showToast(`本地体测数据已清空，但云端清空失败（${result.error || '未知原因'}）；`
+        + '后台会自动补清，也请联网后再点一次清空按钮', 'error');
+    }
+    refreshFitnessDataViews();
+  } catch (error) {
+    console.error('清空体测数据失败', error);
+    if (button) {
+      button.disabled = false;
+      button.textContent = '我确认，彻底清空';
+    }
+    showToast(`清空失败：${error?.message || error}`, 'error');
   }
 }
 
