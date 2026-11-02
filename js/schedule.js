@@ -82,7 +82,11 @@ let fieldOrderMode = 'class';
 let scheduleStorageError = '';
 let scheduleGradeFilter = 'all';
 let scheduleGenderFilter = 'all';
+let scheduleEventFilter = 'all';   // 项目名（'' 表示全部），成绩表批量打印按它筛选
 let scheduleDayFilter = 'all';   // 'all' 或某一天的日期键（如 2026-05-21）
+/* 成绩表排版：compact = 紧凑拼版（省纸，A4 内 2 列网格）；single = 一表一页（大字） */
+const SHEET_LAYOUT_STORAGE_KEY = 'pe_sports_meet_sheet_layout';
+let sheetLayoutMode = 'compact';
 
 /* 多日渲染缓存：最多 4 天 × 上百个时段，切 Tab / 切筛选时复用已拼好的甘特图 HTML，
    不必每次都把每一天重新拼一遍（赛程一改、筛选一变就失效，绝不显示旧内容）。 */
@@ -187,6 +191,24 @@ pageContent.innerHTML = `
             <option value="all">全部性别</option><option value="male">男子组</option><option value="female">女子组</option>
           </select>
         </label>
+        <label>项目
+          <select id="scheduleEventFilter" aria-label="筛选赛程项目" onchange="updateScheduleFilters()">
+            <option value="all">全部项目</option>
+          </select>
+        </label>
+        <div class="schedule-sheet-print">
+          <label class="sheet-layout-mode">排版
+            <select id="sheetLayoutMode" aria-label="成绩表排版方式" onchange="updateSheetLayoutMode()">
+              <option value="compact">紧凑拼版（省纸版，推荐）</option>
+              <option value="single">一表一页（大字版）</option>
+            </select>
+          </label>
+          <span class="meet-muted" id="sheetPrintHint">成绩表：0 张</span>
+          <button class="btn btn-secondary" type="button" onclick="printFilteredScoreSheets()"
+            title="按当前【年级】【性别】【项目】筛选打印，跨比赛日合并">🖨️ 按条件打印成绩表</button>
+          <button class="btn btn-primary" type="button" onclick="printAllScoreSheets()"
+            title="忽略筛选，打印全部赛程的成绩表">🖨️ 一键打印全部成绩表</button>
+        </div>
       </div>
     </div>
     <div class="card-body">
@@ -296,6 +318,39 @@ function normalizeGender(value) {
 
 function eventIdentity(eventName, genderGroup, grade) {
   return `${grade}|${genderGroup}|${eventName.trim().toLowerCase()}`;
+}
+
+/**
+ * 裁判员安排（来自「裁判员管理」页写入的 referees 字段）。
+ * ⚠️ 现行格式：按【项目名】绑定，一组可以有多个人
+ *      referees = { "50米": [{name, phone}, …] }
+ *    同一个项目的所有年级 / 男、女组共用这一组裁判。
+ *    旧格式（按「年级|组别|项目」绑定的单人）由 RefereeUtils.normalize 自动折算。
+ */
+let refereeDictCache = { source: null, dict: {} };
+
+/** 取当前裁判员字典（按引用缓存：数据没换就不重新解析，渲染几百个卡片也不卡） */
+function currentRefereeDict() {
+  const source = meetData?.referees;
+  if (refereeDictCache.source === source) return refereeDictCache.dict;
+  refereeDictCache = { source, dict: RefereeUtils.normalize(source).dict };
+  return refereeDictCache.dict;
+}
+
+/** 该项目的裁判名单（数组，可能多人；没指派返回空数组） */
+function refereeOf(entry) {
+  if (!entry?.eventName) return [];
+  return RefereeUtils.membersOf(currentRefereeDict(), entry.eventName);
+}
+
+/** 裁判员显示文本："张老师、李老师"；没填显示"待指派" */
+function refereeLabel(entry) {
+  return RefereeUtils.labelOf(currentRefereeDict(), entry?.eventName);
+}
+
+/** 裁判员显示文本（含电话）："张老师（138…）、李老师" */
+function refereeFullLabel(entry) {
+  return RefereeUtils.fullOf(currentRefereeDict(), entry?.eventName) || '待指派';
 }
 
 /** 赛制：默认一枪制，脏数据也退回一枪制 */
@@ -1492,7 +1547,7 @@ function renderGanttDay(entries, sessions, conflictInfo) {
       const laneStyle = laneCount > 1
         ? `left:calc(${(lane * 100 / laneCount).toFixed(3)}% + 2px);right:auto;width:calc(${(100 / laneCount).toFixed(3)}% - 5px);`
         : '';
-      const tooltip = `${entry.eventName} · ${scope} · ${stage} · ${formatClock(start)}-${formatClock(end)}`;
+      const tooltip = `${entry.eventName} · ${scope} · ${stage} · ${formatClock(start)}-${formatClock(end)} · 裁判：${refereeFullLabel(entry)}`;
       return `<div class="schedule-gantt-block tone-${venue.tone}${compact ? ' compact' : ''}${conflicted ? ' conflict' : ''}${recoveryRisk ? ' recovery' : ''}${entry.needsFlex ? ' flex' : ''}${laneCount > 1 ? ' narrow' : ''}"
           data-venue="${venue.key}"
           style="top:${top}px;height:${height}px;${laneStyle}"
@@ -1502,7 +1557,7 @@ function renderGanttDay(entries, sessions, conflictInfo) {
             ${flags}
           </div>
           <div class="schedule-gantt-block-title" title="${escapeScheduleHTML(titleLine)}">${escapeScheduleHTML(titleLine)}</div>
-          ${compact ? '' : `<div class="schedule-gantt-block-meta">${escapeScheduleHTML(scope)} · ${escapeScheduleHTML(stage)}</div>`}
+          ${compact ? '' : `<div class="schedule-gantt-block-meta">${escapeScheduleHTML(scope)} · ${escapeScheduleHTML(stage)} · 裁判 ${escapeScheduleHTML(refereeLabel(entry))}</div>`}
         </div>`;
     }).join('');
     return `<div class="schedule-gantt-track" data-venue="${venue.key}">${offBands}${inner}</div>`;
@@ -1618,14 +1673,13 @@ function renderSchedule() {
     return;
   }
 
-  const filtered = [...currentSchedule]
-    .filter(entry => (scheduleGradeFilter === 'all' || String(entry.grade || '') === scheduleGradeFilter) &&
-      (scheduleGenderFilter === 'all' || entry.genderGroup === scheduleGenderFilter))
-    .sort((a, b) => new Date(a.startAt) - new Date(b.startAt));
+  refreshEventFilterOptions();
+  const filtered = filteredScheduleEntries();
+  updateSheetPrintHint();
   const scheduleDate = meetData.schedule?.settings?.date || filtered[0]?.startAt.slice(0, 10) || '';
-  const filterLabel = `${scheduleGradeFilter === 'all' ? '全部年级' : `${scheduleGradeFilter}年级`} · ${scheduleGenderFilter === 'all' ? '全部性别' : normalizeGender(scheduleGenderFilter)}`;
+  const filterLabel = scheduleFilterLabel();
   if (!filtered.length) {
-    ganttBox.innerHTML = '<div class="meet-empty">当前年级和性别筛选下没有赛程。</div>';
+    ganttBox.innerHTML = '<div class="meet-empty">当前筛选条件下没有赛程。</div>';
     booksBox.innerHTML = '';
     if (tabsBox) tabsBox.innerHTML = '';
     document.getElementById('scheduleSummary').textContent =
@@ -1762,7 +1816,81 @@ function bindGanttStickySync() {
 function updateScheduleFilters() {
   scheduleGradeFilter = document.getElementById('scheduleGradeFilter').value;
   scheduleGenderFilter = document.getElementById('scheduleGenderFilter').value;
+  scheduleEventFilter = document.getElementById('scheduleEventFilter')?.value || 'all';
   renderSchedule();
+}
+
+/**
+ * 【项目】下拉：按当前赛程里出现过的项目名动态生成。
+ * 选项集合没变就绝不重建（否则老师刚选好的项目会被重置回"全部项目"）。
+ */
+function refreshEventFilterOptions() {
+  const select = document.getElementById('scheduleEventFilter');
+  if (!select) return;
+  const names = [...new Set(currentSchedule.map(entry => entry.eventName).filter(Boolean))]
+    .sort((a, b) => String(a).localeCompare(String(b), 'zh-CN'));
+  const signature = names.join('');
+  if (select.dataset.signature === signature) {
+    if (scheduleEventFilter !== 'all' && !names.includes(scheduleEventFilter)) scheduleEventFilter = 'all';
+    return;
+  }
+  select.dataset.signature = signature;
+  select.innerHTML = `<option value="all">全部项目</option>`
+    + names.map(name => `<option value="${escapeScheduleHTML(name)}">${escapeScheduleHTML(name)}</option>`).join('');
+  if (!names.includes(scheduleEventFilter)) scheduleEventFilter = 'all';
+  select.value = scheduleEventFilter;
+}
+
+/** 当前筛选条件下的赛程（年级 / 性别 / 项目）——视图与成绩表打印共用同一套条件 */
+function filteredScheduleEntries() {
+  return [...currentSchedule]
+    .filter(entry => (scheduleGradeFilter === 'all' || String(entry.grade || '') === scheduleGradeFilter)
+      && (scheduleGenderFilter === 'all' || entry.genderGroup === scheduleGenderFilter)
+      && (scheduleEventFilter === 'all' || entry.eventName === scheduleEventFilter))
+    .sort((a, b) => new Date(a.startAt) - new Date(b.startAt));
+}
+
+/** 筛选条件的文字描述（打印提示用） */
+function scheduleFilterLabel() {
+  const grade = scheduleGradeFilter === 'all' ? '全部年级' : `${scheduleGradeFilter}年级`;
+  const gender = scheduleGenderFilter === 'all' ? '全部性别' : normalizeGender(scheduleGenderFilter);
+  const event = scheduleEventFilter === 'all' ? '全部项目' : scheduleEventFilter;
+  return `${grade} · ${gender} · ${event}`;
+}
+
+/** 读取已保存的排版偏好（紧凑拼版 / 一表一页） */
+function loadSheetLayoutMode() {
+  try {
+    const saved = localStorage.getItem(SHEET_LAYOUT_STORAGE_KEY);
+    if (saved === 'single' || saved === 'compact') sheetLayoutMode = saved;
+  } catch (error) {
+    // localStorage 不可用（隐私模式）时用默认值，不影响打印
+  }
+  const select = document.getElementById('sheetLayoutMode');
+  if (select) select.value = sheetLayoutMode;
+}
+
+/** 切换排版方式：记住选择，下次打开还是这个 */
+function updateSheetLayoutMode() {
+  const select = document.getElementById('sheetLayoutMode');
+  if (select) sheetLayoutMode = select.value === 'single' ? 'single' : 'compact';
+  try {
+    localStorage.setItem(SHEET_LAYOUT_STORAGE_KEY, sheetLayoutMode);
+  } catch (error) {
+    // 存不了就算了，本次会话内照样生效
+  }
+  updateSheetPrintHint();
+}
+
+/** 打印按钮旁的提示：当前条件会打印几张成绩表、用哪种排版 */
+function updateSheetPrintHint() {
+  const hint = document.getElementById('sheetPrintHint');
+  if (!hint) return;
+  const count = filteredScheduleEntries().length;
+  const layoutText = sheetLayoutMode === 'single' ? '一表一页（大字）' : '紧凑拼版（省纸）';
+  // 紧凑版一页大约塞得下 8 张小表（2 列 × 4 行），给个粗略的页数估计
+  const pages = sheetLayoutMode === 'single' ? count : Math.max(1, Math.ceil(count / 8));
+  hint.textContent = `成绩表：${count} 张 · ${layoutText} · 约 ${pages} 页`;
 }
 
 function renderScheduleLane(entries, conflictInfo, venue = VENUE_RESOURCES[0]) {
@@ -1792,9 +1920,12 @@ function renderScheduleLane(entries, conflictInfo, venue = VENUE_RESOURCES[0]) {
             <span class="schedule-checkin">检录 ${escapeScheduleHTML(formatClock(checkinTime))}</span>
           </div>
           <div class="schedule-event-content">
-            <div class="schedule-event-title">
-              <strong>${escapeScheduleHTML(entry.eventName)}</strong>
-              <span class="meet-muted">${entry.grade ? `${entry.grade}年级 · ` : ''}${escapeScheduleHTML(normalizeGender(entry.genderGroup))} · ${escapeScheduleHTML(modeLabel)}</span>
+            <div class="schedule-event-head">
+              <div class="schedule-event-title">
+                <strong>${escapeScheduleHTML(entry.eventName)}</strong>
+                <span class="meet-muted">${entry.grade ? `${entry.grade}年级 · ` : ''}${escapeScheduleHTML(normalizeGender(entry.genderGroup))} · ${escapeScheduleHTML(modeLabel)}</span>
+              </div>
+              <div class="schedule-event-referee" title="裁判组：${escapeScheduleHTML(refereeFullLabel(entry))}">👨‍⚖️ 裁判：${escapeScheduleHTML(refereeLabel(entry))}</div>
             </div>
             ${conflicted ? '<span class="schedule-warning">⚠ 需要手动调整</span>' : ''}
             ${(recoveryNotes.get(entry.id) || []).map(note => `<span class="schedule-warning schedule-recovery">💤 ${escapeScheduleHTML(note)}</span>`).join('')}
@@ -1828,6 +1959,303 @@ function printSchedule() {
     return;
   }
   window.print();
+}
+
+/* =============================================================
+   成绩登记表（A4 纵向打印）
+   ─────────────────────────────────────────────────────────────
+   实现方式：把成绩表写进一个【藏在屏幕外的 iframe】，再调它的 print()。
+   好处：
+     ① 打印出来的只有成绩表本身，不会把甘特图、侧边栏一起打出来；
+     ② iframe 有自己独立的样式，@page 可以单独设成 A4 纵向，
+        不会影响「打印赛程秩序册」那张横向 A4；
+     ③ 不弹新窗口 → 不会被浏览器的弹窗拦截器挡住。
+   ============================================================= */
+
+const SCORE_SHEET_STYLE = `
+  @page { size: A4 portrait; margin: 10mm; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    color: #111;
+    background: #fff;
+    font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", -apple-system, sans-serif;
+  }
+  .sheet { width: 100%; }
+  .sheet-title {
+    text-align: center;
+    font-weight: 800;
+    margin: 0 0 6px;
+  }
+  .sheet-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 14px;
+    margin-bottom: 5px;
+  }
+  .sheet-meta b { font-weight: 700; }
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  th, td {
+    border: 1px solid #333;
+    text-align: center;
+  }
+  th { background: #f0f0f0; font-weight: 700; }
+  td.left { text-align: left; }
+  td.bib { color: #555; }
+  .sheet-sign {
+    display: flex;
+    justify-content: space-between;
+    gap: 6px;
+  }
+  .sheet-sign div { flex: 1; text-align: center; }
+  .sheet-sign span {
+    display: inline-block;
+    border-bottom: 1px solid #333;
+    vertical-align: bottom;
+  }
+  .sheet-tip { margin: 8px 0 0; font-size: 11px; color: #555; line-height: 1.6; }
+
+  /* =========================================================
+     大字版：一表一页（原来的排版，打印最清楚但最费纸）
+     ========================================================= */
+  .layout-single { font-size: 13px; }
+  .layout-single .sheet-page {
+    page-break-after: always;
+    break-after: page;
+    page-break-inside: avoid;
+  }
+  .layout-single .sheet-page:last-child {
+    page-break-after: auto;
+    break-after: auto;
+  }
+  .layout-single .sheet-title { font-size: 21px; letter-spacing: 2px; margin: 0 0 12px; }
+  .layout-single .sheet-meta { font-size: 13px; gap: 6px 24px; margin-bottom: 8px; }
+  .layout-single th, .layout-single td { padding: 5px 4px; font-size: 13px; height: 30px; }
+  .layout-single td.left { padding-left: 8px; }
+  .layout-single td.bib { font-size: 11px; }
+  .layout-single .sheet-sign { margin-top: 26px; font-size: 13px; }
+  .layout-single .sheet-sign span { min-width: 130px; height: 26px; }
+  .layout-single .sheet-tip { margin-top: 16px; font-size: 11px; line-height: 1.7; }
+
+  /* =========================================================
+     紧凑拼版（省纸版，默认）：A4 内 2 列网格，一页塞好几张小表
+     —— 小表四周浅灰虚线，打印后拿剪刀沿线裁开
+     —— 每张小表 break-inside: avoid，绝不会被从中间切断
+     ========================================================= */
+  .layout-compact { font-size: 10px; }
+  .layout-compact .sheet-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4mm;
+    align-items: start;
+  }
+  .layout-compact .sheet-page {
+    border: 1px dashed #ccc;
+    padding: 3mm 3.5mm;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .layout-compact .sheet-title { font-size: 13px; letter-spacing: 0; margin: 0 0 3px; line-height: 1.3; }
+  .layout-compact .sheet-meta { font-size: 9.5px; gap: 1px 8px; margin-bottom: 3px; line-height: 1.45; }
+  .layout-compact th, .layout-compact td { padding: 1px 3px; font-size: 9.5px; height: 18px; line-height: 1.3; }
+  .layout-compact td.left { padding-left: 5px; }
+  .layout-compact td.bib { font-size: 8.5px; }
+  .layout-compact .sheet-sign { margin-top: 4px; font-size: 9.5px; }
+  .layout-compact .sheet-sign span { min-width: 34px; height: 14px; }
+  .layout-compact .sheet-tip { display: none; }
+`;
+
+/**
+ * 成绩登记表正文（纯 HTML 字符串，交给 iframe 渲染）
+ * @param {object} entry 比赛场次
+ * @param {'compact'|'single'} mode 排版：紧凑拼版（省纸）/ 一表一页（大字）
+ */
+function buildScoreSheetHTML(entry, mode = 'compact') {
+  const compact = mode !== 'single';
+  const athleteById = new Map((meetData.athletes || []).map(athlete => [athlete.id, athlete]));
+  const roster = (entry.participantIds || [])
+    .map(id => athleteById.get(id))
+    .filter(Boolean);
+  const referees = refereeOf(entry);          // 裁判组（数组，可能多人）
+  const mainReferee = referees[0] || null;    // 第一位即主裁判
+  const start = new Date(entry.startAt);
+  const end = scheduleEnd(entry);
+  const dateFull = Number.isFinite(start.getTime())
+    ? `${start.getFullYear()}年${start.getMonth() + 1}月${start.getDate()}日`
+    : '';
+  const dateShort = Number.isFinite(start.getTime())
+    ? `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}-${String(start.getDate()).padStart(2, '0')}`
+    : '';
+  const timeText = Number.isFinite(start.getTime())
+    ? `${formatClock(start)}–${formatClock(end)}`
+    : '待定';
+  const title = `${gradeTextOf(entry.grade)}${normalizeGender(entry.genderGroup)}${entry.eventName}成绩登记表`;
+  const roundText = entry.round === 'preliminary'
+    ? `（预赛第${entry.groupNumber}组）`
+    : entry.round === 'final' && entry.groupNumber > 1
+      ? `（决赛第${entry.groupNumber}组）`
+      : '';
+
+  const rows = roster.length
+    ? roster.map((athlete, index) => `
+        <tr>
+          <td>${index + 1}</td>
+          <td class="left">${escapeScheduleHTML(athlete.name)}${athlete.bibNumber ? `<span class="bib">（${escapeScheduleHTML(athlete.bibNumber)}号）</span>` : ''}</td>
+          <td>${escapeScheduleHTML(athlete.className || '')}</td>
+          <td></td>
+          <td></td>
+          <td></td>
+        </tr>`).join('')
+    : `<tr><td colspan="6"${compact ? '' : ' style="height:60px;"'}>参赛名单待定</td></tr>`;
+
+  // 签字栏：大字版三栏分开，紧凑版压成一行
+  const signHTML = compact
+    ? `<div class="sheet-sign">
+        <div>主裁：<span></span></div>
+        <div>检录：<span></span></div>
+        <div>记录：<span></span></div>
+      </div>`
+    : `<div class="sheet-sign">
+        <div>检录员签字：<span></span></div>
+        <div>裁判员签字：<span></span></div>
+        <div>记录员签字：<span></span></div>
+      </div>`;
+
+  // 表头信息：项目名称、时间、场地、裁判 —— 一项都不能少
+  const metaHTML = compact
+    ? `<div class="sheet-meta">
+        <span>时间：<b>${escapeScheduleHTML(dateShort)} ${escapeScheduleHTML(timeText)}</b></span>
+        <span>场地：<b>${escapeScheduleHTML(entry.venue || '待定')}</b></span>
+        <span>裁判：<b>${escapeScheduleHTML(referees.length ? refereeFullLabel(entry) : '待指派')}</b></span>
+      </div>`
+    : `<div class="sheet-meta">
+        <span>比赛时间：<b>${escapeScheduleHTML(dateFull)} ${escapeScheduleHTML(timeText)}</b></span>
+        <span>比赛场地：<b>${escapeScheduleHTML(entry.venue || '待定')}</b></span>
+        <span>主裁判：<b>${escapeScheduleHTML(mainReferee ? mainReferee.name || '待指派' : '待指派')}</b></span>
+        ${mainReferee && mainReferee.phone ? `<span>联系电话：<b>${escapeScheduleHTML(mainReferee.phone)}</b></span>` : ''}
+        ${referees.length > 1 ? `<span>裁判组：<b>${escapeScheduleHTML(refereeFullLabel(entry))}</b></span>` : ''}
+      </div>`;
+
+  return `
+    <div class="sheet">
+      <h1 class="sheet-title">${escapeScheduleHTML(title)}${escapeScheduleHTML(roundText)}</h1>
+      ${metaHTML}
+      <table>
+        <thead>
+          <tr>
+            <th style="width:9%;">道次/序号</th>
+            <th style="width:20%;">姓名</th>
+            <th style="width:19%;">班级</th>
+            <th style="width:18%;">成绩</th>
+            <th style="width:14%;">名次</th>
+            <th style="width:20%;">备注</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+      ${signHTML}
+      <p class="sheet-tip">
+        说明：本表由「赛程编排」自动生成；成绩、名次、备注三列请现场手写填写。
+        裁判员信息来自「裁判员管理」，如需变更请先在该页保存。
+      </p>
+    </div>`;
+}
+
+/** 年级中文（一/二/三…），成绩表标题用 */
+function gradeTextOf(grade) {
+  const map = { 1: '一', 2: '二', 3: '三', 4: '四', 5: '五', 6: '六' };
+  const num = Number(grade);
+  return map[num] ? `${map[num]}年级` : '';
+}
+
+/** 一场次 = 一张小表（紧凑版拼进网格；大字版独占一页） */
+function buildScoreSheetPage(entry, mode = 'compact') {
+  return `<section class="sheet-page">${buildScoreSheetHTML(entry, mode)}</section>`;
+}
+
+/**
+ * 批量成绩表文档：整份 HTML 用字符串一次拼好，浏览器只解析一次。
+ * ⚠️ 性能要点：绝不逐张 createElement/appendChild —— 几十上百张表那样插 DOM 会卡死浏览器；
+ *    字符串拼接 + 一次 doc.write() 最快（一次布局、一次打印对话框）。
+ * @param {Array} entries 比赛场次
+ * @param {'compact'|'single'} mode 排版：compact = 紧凑拼版（省纸，默认）；single = 一表一页（大字）
+ */
+function buildScoreSheetsHTML(entries, mode = 'compact') {
+  const layout = mode === 'single' ? 'single' : 'compact';
+  const pages = entries.map(entry => buildScoreSheetPage(entry, layout)).join('');
+  const body = layout === 'compact'
+    ? `<div class="sheet-grid">${pages}</div>`     // 2 列网格，一页塞多张
+    : pages;                                        // 每张独占一页
+  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">`
+    + `<title>成绩登记表（${entries.length} 张 · ${layout === 'compact' ? '紧凑拼版' : '一表一页'}）</title>`
+    + `<style>${SCORE_SHEET_STYLE}</style></head>`
+    + `<body class="layout-${layout}">${body}</body></html>`;
+}
+
+/**
+ * 打印一批成绩表：一次性写进屏幕外 iframe，再统一调一次系统打印对话框。
+ * @param {Array} entries 比赛场次
+ * @param {string} label 提示用的条件说明
+ * @param {'compact'|'single'} mode 排版：紧凑拼版（省纸）/ 一表一页（大字）
+ */
+function printScoreSheets(entries, label = '', mode = sheetLayoutMode) {
+  const list = [...(entries || [])]
+    .filter(Boolean)
+    .sort((a, b) => new Date(a.startAt) - new Date(b.startAt));
+  if (!list.length) {
+    showScheduleError('没有符合条件的比赛场次，暂时没有成绩表可打印。');
+    return;
+  }
+  const layout = mode === 'single' ? 'single' : 'compact';
+  const frame = document.getElementById('scoreSheetFrame');
+  if (!frame) {
+    showScheduleError('打印区缺失，请刷新页面后重试。');
+    return;
+  }
+  const frameWindow = frame.contentWindow;
+  const doc = frameWindow?.document;
+  if (!doc) {
+    showScheduleError('打印区初始化失败，请刷新页面后重试。');
+    return;
+  }
+  doc.open();
+  doc.write(buildScoreSheetsHTML(list, layout));
+  doc.close();
+  try { frameWindow.focus(); } catch (error) { /* 忽略：部分浏览器会拒绝聚焦 */ }
+  showToast(`已生成 ${list.length} 张成绩表（${layout === 'compact' ? '紧凑拼版·省纸' : '一表一页·大字'}）`
+    + `${label ? `（${label}）` : ''}，请在打印预览里确认…`, 'info');
+  // 等一帧让排版稳定，再调打印（一次对话框出全部页）
+  setTimeout(() => {
+    try {
+      frameWindow.print();
+    } catch (error) {
+      console.error('成绩表打印失败', error);
+      showScheduleError('打印失败，请检查浏览器的打印权限设置。');
+    }
+  }, 320);
+}
+
+/** 按当前【年级】【性别】【项目】筛选打印成绩表（跨比赛日合并，一次打印对话框） */
+function printFilteredScoreSheets() {
+  if (!currentSchedule.length) {
+    showScheduleError('请先生成赛程，再打印成绩表。');
+    return;
+  }
+  const entries = filteredScheduleEntries();
+  if (!entries.length) {
+    showScheduleError(`当前筛选（${scheduleFilterLabel()}）下没有比赛场次。`);
+    return;
+  }
+  printScoreSheets(entries, scheduleFilterLabel());
+}
+
+/** 一键打印全部成绩表（忽略筛选，按比赛时间排序） */
+function printAllScoreSheets() {
+  if (!currentSchedule.length) {
+    showScheduleError('请先生成赛程，再打印成绩表。');
+    return;
+  }
+  printScoreSheets(currentSchedule, '全部场次');
 }
 
 function exportScheduleWord() {
@@ -1911,6 +2339,7 @@ function initializeSchedulePage() {
   );
   document.getElementById('scheduleGradeFilter').value = scheduleGradeFilter;
   document.getElementById('scheduleGenderFilter').value = scheduleGenderFilter;
+  loadSheetLayoutMode();          // 成绩表排版偏好（紧凑拼版 / 一表一页）
   renderEventFormatList();
   const savedSchedule = meetData.schedule;
   if (savedSchedule?.settings && Array.isArray(savedSchedule.entries)) {
@@ -1975,8 +2404,10 @@ function bindCrossModuleMeetSync() {
       return;
     }
     const scheduleChanged = JSON.stringify(latest.schedule) !== JSON.stringify(meetData?.schedule);
+    // 裁判员安排变了也要重画：甘特图卡片与明细列表上的「裁判」要立刻更新
+    const refereesChanged = JSON.stringify(latest.referees || {}) !== JSON.stringify(meetData?.referees || {});
     meetData = { ...latest, eventFormats: meetData?.eventFormats || latest.eventFormats };
-    if (!scheduleChanged) return;
+    if (!scheduleChanged && !refereesChanged) return;
     currentSchedule = Array.isArray(latest.schedule?.entries) ? latest.schedule.entries : [];
     bumpScheduleRenderToken();
     if (document.getElementById('scheduleGantt')) renderSchedule();

@@ -7,6 +7,7 @@ const sportsMeetTabs = [
   { id: 'schedule', label: '2. 赛程编排', title: '赛程编排', src: 'schedule.html?embed=1' },
   { id: 'results', label: '3. 成绩与排名', title: '成绩与排名', src: 'results.html?embed=1' },
   { id: 'export', label: '4. 导出与颁奖', title: '导出与颁奖', src: 'results.html?embed=1&view=reports' },
+  { id: 'referees', label: '5. 裁判员管理', title: '裁判员管理', src: 'referees.html?embed=1' },
 ];
 const SPORTS_MEET_TITLE_KEY = 'sportsMeetTitle';
 

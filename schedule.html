@@ -9,8 +9,11 @@
 </head>
 <body>
   <div id="app"></div>
+  <!-- 成绩登记表打印区：平时藏在屏幕外，点「打印成绩表」时把内容写进来再调 window.print() -->
+  <iframe id="scoreSheetFrame" class="score-sheet-frame" title="成绩登记表打印区" aria-hidden="true"></iframe>
   <script src="js/store.js"></script>
   <script src="js/layout.js"></script>
+  <script src="js/referee-utils.js"></script>
   <script src="js/meet-purge.js"></script>
   <script src="js/schedule.js"></script>
 </body>

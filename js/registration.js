@@ -164,24 +164,43 @@ function loadMeetData() {
  */
 /**
  * @param {object} data
- * @param {{force?: boolean}} options
+ * @param {{force?: boolean, allowEmpty?: boolean, clearReferees?: boolean}} options
  *        force=true：用户在界面上亲手点了删除 / 清空，才允许把报名数据写空。
  *        Store 默认会【抛异常终止写入】，任何后台同步 / 页面跳转带来的空数据都不准覆盖。
+ *        clearReferees=true：连裁判员安排一起清掉（只在"清空全部报名"时用）。
  */
 async function saveMeetData(data, options = {}) {
-  pageData = data;
+  // ⚠️ 裁判员安排由「裁判员管理」页维护，而本页的 data 多半来自页面加载时的旧快照。
+  //    如果直接写回，会把老师刚填好的裁判员悄悄覆盖成旧值 —— 这里一律以 Store 里的最新裁判员为准。
+  const payload = (() => {
+    try {
+      const latest = Store.read(STORAGE_KEY, null);
+      const latestReferees = latest && typeof latest === 'object' ? latest.referees : null;
+      if (options.clearReferees === true) {
+        const { referees, ...rest } = data || {};
+        return rest;
+      }
+      if (latestReferees && typeof latestReferees === 'object') {
+        return { ...(data || {}), referees: latestReferees };
+      }
+    } catch (error) {
+      // 读不到就按原样写，不因保险丝失败阻断保存
+    }
+    return data;
+  })();
+  pageData = payload;
   storageError = '';
   try {
     // 版本兜底：浏览器缓存了旧版 store.js 时没有 writeCritical，退回同步写，
     // 数据照样落本地（旧行为），并提示老师强制刷新，绝不让保存按钮失灵
     if (typeof Store.writeCritical !== 'function') {
-      Store.write(STORAGE_KEY, data);
+      Store.write(STORAGE_KEY, payload);
       renderPage();
       renderStorageAlert();
       showToast('已保存到本机（存储组件需更新，请强制刷新页面以确保同步到云端）', 'error');
       return true;
     }
-    const result = await Store.writeCritical(STORAGE_KEY, data, {
+    const result = await Store.writeCritical(STORAGE_KEY, payload, {
       label: '运动会报名数据',
       force: options.force === true || options.allowEmpty === true,
     });
@@ -1501,7 +1520,8 @@ async function confirmClearAllRegistrations() {
 
   const count = pageData.athletes.length;
   const updatedData = { ...emptyMeetData(), laneCount, schedule: null };
-  if (!(await saveMeetData(updatedData, { force: true }))) return;   // 清空全部：就是要写空
+  // 清空全部：报名、赛程、裁判员安排一并清掉（项目都没了，裁判员留着也没意义）
+  if (!(await saveMeetData(updatedData, { force: true, clearReferees: true }))) return;
   closeModal(document.querySelector('.modal-close'));
   selectedAthleteIds.clear();
   currentPage = 1;

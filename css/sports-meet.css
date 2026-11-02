@@ -53,6 +53,13 @@
   display: block;
 }
 
+/* 提示型（不是错误）：如"旧数据已自动升级" */
+.meet-alert.info {
+  border-color: var(--primary, #2563eb);
+  background: var(--primary-100, #eef4ff);
+  color: var(--primary-dark, #1d4ed8);
+}
+
 .meet-alert ul {
   margin: 6px 0 0 20px;
   list-style: disc;
@@ -300,12 +307,6 @@
   min-width: 0;
   flex-direction: column;
   gap: 8px;
-}
-
-.schedule-event-title {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
 }
 
 .schedule-inline-edit {
@@ -2774,8 +2775,7 @@
    移动端适配（手机 < 768px）
    运动会 / 赛程甘特图 / 成绩录入 / 大单元课时表 / 离线资源库
    放在文件末尾：同优先级下"后写的生效"，桌面端样式一行不改。
-   ============================================================= */
-@media (max-width: 768px) {
+   ============================================================= */@media (max-width: 768px) {
   /* ========== ① 甘特图：外围横向滚动 ==========
      ⚠️ 原来 .schedule-gantt / .schedule-gantt-body 是 overflow:clip，
         窄屏下右侧的场地列被【直接裁掉】，用户根本看不到后面的场地。
@@ -2915,5 +2915,257 @@
 
   .result-attempts label {
     min-height: 40px;
+  }
+}
+
+/* =============================================================
+   裁判员管理（referees.html）
+   ============================================================= */
+.referee-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 一个项目 = 一张卡片 */
+.referee-group {
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  overflow: hidden;
+}
+
+.referee-group.is-assigned {
+  border-left-color: var(--success, #2e7d32);
+}
+
+.referee-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  background: var(--bg-hover, #f7f8fa);
+  border-bottom: 1px solid var(--border);
+}
+
+.referee-group-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.referee-group-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.referee-group-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: var(--primary-100, #e8f0fe);
+  color: var(--primary, #2563eb);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.referee-group-tag.orphan {
+  background: #fff4e5;
+  color: #b8860b;
+}
+
+.referee-group-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* 裁判名单：可动态增删的行 */
+.referee-members {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+}
+
+.referee-member {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.referee-member-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--bg-hover, #f1f2f4);
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.referee-member .form-control {
+  flex: 1 1 180px;
+  min-width: 130px;
+  min-height: 38px;
+}
+
+.referee-member .referee-phone {
+  flex: 1 1 150px;
+}
+
+.referee-member-remove {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-card);
+  color: var(--text-tertiary);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.referee-member-remove:hover {
+  border-color: var(--danger, #d32f2f);
+  color: var(--danger, #d32f2f);
+}
+
+.referee-empty {
+  font-size: 13px;
+  color: var(--text-tertiary);
+  padding: 4px 0;
+}
+
+.referee-event-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.referee-status {
+  flex: 0 0 auto;
+  align-self: center;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.referee-group.is-assigned .referee-status {
+  color: var(--success, #2e7d32);
+}
+
+/* ---------- 赛程：卡片头部（项目名 + 裁判，同一行自适应） ---------- */
+.schedule-event-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 14px;
+  flex-wrap: wrap;
+}
+
+.schedule-event-title {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.schedule-event-referee {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+/* 成绩登记表打印区：平时藏在屏幕外，打印时才用 */
+.score-sheet-frame {
+  position: fixed;
+  left: -12000px;
+  top: 0;
+  width: 794px;          /* A4 纵向 @ 96dpi */
+  height: 1123px;
+  border: 0;
+  visibility: hidden;
+}
+
+/* 赛程页：成绩表批量打印（筛选 + 两个打印按钮） */
+.schedule-sheet-print {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-left: 10px;
+  border-left: 1px dashed var(--border);
+}
+
+.schedule-sheet-print .meet-muted {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* 排版切换（紧凑拼版 / 一表一页） */
+.schedule-sheet-print .sheet-layout-mode {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.schedule-sheet-print .sheet-layout-mode select {
+  min-height: 34px;
+  padding: 4px 26px 4px 8px;
+  border: 1px solid var(--border-dark);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font: inherit;
+  font-weight: 600;
+}
+
+@media (max-width: 768px) {
+  .referee-group-head {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .referee-group-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .referee-member .form-control {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  .referee-member-remove {
+    width: 40px;
+    height: 40px;
+  }
+
+  .schedule-sheet-print {
+    padding-left: 0;
+    border-left: 0;
+    width: 100%;
   }
 }
