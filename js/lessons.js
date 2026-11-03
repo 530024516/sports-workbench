@@ -22,13 +22,13 @@ content.innerHTML = `
       <p>管理教学计划、教案与教学资源</p>
     </div>
     <div style="display:flex;gap:8px;">
-      <button class="btn btn-secondary" onclick="openAddLesson()">
+      <button data-admin-only class="btn btn-secondary" onclick="openAddLesson()">
         <span>📋</span> 新建教案
       </button>
       <button class="btn btn-secondary" onclick="openAIGeneration()">
         <span>✨</span> AI 生成教案
       </button>
-      <button class="btn btn-primary" onclick="openAddResource()">
+      <button data-admin-only class="btn btn-primary" onclick="openAddResource()">
         <span>📎</span> 添加资源
       </button>
     </div>
@@ -1028,7 +1028,7 @@ function openAIGeneration() {
     </form>
   `, `
     <button class="btn btn-ghost" onclick="closeModal(this)">取消</button>
-    <button class="btn btn-primary" id="generateLessonButton" onclick="generateLessonWithAI()"><span>✨</span> 生成教案草稿</button>
+    <button data-admin-only class="btn btn-primary" id="generateLessonButton" onclick="generateLessonWithAI()"><span>✨</span> 生成教案草稿</button>
   `);
 }
 

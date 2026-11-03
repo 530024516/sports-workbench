@@ -330,7 +330,29 @@ const Store = {
    * 所以重试期间绝不会出现多条并发请求把浏览器连接数占满
    */
   _fetchJSON(url, options = {}, timeout = REQUEST_TIMEOUT) {
-    const run = () => this._doFetch(url, options, timeout);
+    /* ⛔ 权限闸门（前端体验层，真正的底线在服务端 lib/admin-auth.js）：
+       GET 读数据放行；POST/PUT/DELETE 写数据必须带管理员凭证 ——
+       ① 没登录 → 一个字节都不发给后端，直接提示"请先登录管理员"；
+       ② 已登录 → 自动带上 X-Admin-Password 请求头。 */
+    let guarded = options;
+    const method = String(options?.method || 'GET').toUpperCase();
+    if (method !== 'GET' && method !== 'HEAD' && typeof window !== 'undefined' && window.Auth) {
+      if (!String(url).includes('/api/admin')) {
+        if (!window.Auth.isAdmin() || !window.Auth.getPassword()) {
+          // ⚠️ 只给 3 秒轻提示，绝不自动弹登录框（自动弹窗会打断浏览）
+          if (typeof window.Auth.notifyGuest === 'function') window.Auth.notifyGuest();
+          else window.Auth.toast('游客只能查看数据，修改请先点击右上角登录', 'error');
+          const denied = new Error('请先登录管理员');
+          denied.adminRequired = true;
+          return Promise.reject(denied);
+        }
+        guarded = {
+          ...options,
+          headers: { ...(options.headers || {}), 'X-Admin-Password': window.Auth.getPassword() },
+        };
+      }
+    }
+    const run = () => this._doFetch(url, guarded, timeout);
     const result = this._requestChain.then(run, run);
     // 链条本身不因某次失败而中断（错误交给调用方处理）
     this._requestChain = result.then(() => {}, () => {});
@@ -355,8 +377,15 @@ const Store = {
       request = fetch(url, { ...options, signal: controller ? controller.signal : undefined });
       const response = await Promise.race([request, timeoutRace]);
       if (!response.ok) {
-        const error = new Error(`${url} 返回 HTTP ${response.status}`);
+        /* 把服务端返回的错误体读出来：
+           403 + code=ADMIN_REQUIRED 是"游客没登录管理员"，不是"写入失败" ——
+           带上 adminRequired 标记，让上层安静处理，别报成同步失败。 */
+        let detail = null;
+        try { detail = await response.json(); } catch (parseError) { /* 响应体不是 JSON，忽略 */ }
+        const error = new Error(detail?.error || `${url} 返回 HTTP ${response.status}`);
         error.status = response.status;
+        error.code = detail?.code || '';
+        if (detail?.adminRequired === true) error.adminRequired = true;
         throw error;
       }
       return await response.json();
@@ -957,6 +986,23 @@ const Store = {
   },
 
   /**
+   * 现在能不能往云端写？
+   * ⛔ 游客（未登录管理员）一律不能 —— 而且是【不发请求】，不是"发了被拒"。
+   *    这条是"游客浏览时自动弹登录框"的根治点：
+   *    以前后台静默同步（补推待写队列 / 断点续传）会发出写请求 →
+   *    被后端 403 → 前端就弹登录框 → 每切一个页面弹一次。
+   *    现在游客模式下这些请求根本不会发出，自然就没有 403、也没有弹窗。
+   *
+   * 没有加载 auth.js 的页面（老页面 / 测试沙箱）保持原行为，不影响既有逻辑。
+   */
+  _canWriteCloud() {
+    if (typeof window === 'undefined') return true;
+    const auth = window.Auth;
+    if (!auth || typeof auth.isAdmin !== 'function') return true;
+    return auth.isAdmin() === true;
+  },
+
+  /**
    * 写入：本地镜像 + 内存缓存立即生效，云端异步推送
    * ⚠️ 推送【前】就打上"未确认"标记，成功后才清除 ——
    *    否则这段"写入已发出、云端还没返回"的窗口里，云端旧数据一回就会被覆盖（数据丢失）
@@ -976,6 +1022,27 @@ const Store = {
     const previousValue = this._isMeetKey(key) ? before : this._readLocalValue(key);
     const merged = this._mergeMeetData(key, value, options);   // ⛔ 空覆盖在这里抛异常
     this._traceEmptyWrite(key, before, merged, 'write()');      // 🚨 看门狗：谁把主数据写成 0 条
+    /* ⛔ 游客模式（只读身份）：一份写请求都不发。
+       ① 不写云端（不发请求 → 不会 403 → 不会弹任何窗）；
+       ② 如果这份键正被"保护锁"守护（管理员离线时留下的未同步数据），
+          连本地镜像都不许覆盖 —— 覆盖了就等于把管理员那份没推上去的修改弄丢了；
+       ③ 其余情况照常写本地，页面照常能用，下次同步云端会覆盖回来。 */
+    if (!this._canWriteCloud()) {
+      const pending = this._pendingWrites.get(key);
+      if (pending) {
+        console.warn(`[Store] ℹ️ ${key} 正被保护锁守护，游客模式下不覆盖本地镜像（保住未同步的数据）`);
+      } else {
+        this.cache.set(key, merged);
+        this._pendingClearKeys.delete(key);
+        this._failedWrites.delete(key);
+        try { localStorage.setItem(key, JSON.stringify(merged)); } catch (error) { /* 忽略 */ }
+        if (this._isMeetKey(key)) this._updateBackup(key, merged, options);
+      }
+      if (typeof window !== 'undefined' && typeof window.Auth?.notifyGuest === 'function') {
+        window.Auth.notifyGuest();
+      }
+      return merged;
+    }
     this.cache.set(key, merged);
     this._localWrites.add(key);
     // 用户又写入了这个键 → 解除「清空中」标记（这份新数据照常落地、照常参与同步）
@@ -1063,10 +1130,22 @@ const Store = {
    * 清空云端某张表的"安全版"：失败时进待写队列（由 _persistEntry 走同一条清空通道重试）。
    */
   async _persistClearSafely(key) {
+    /* ⛔ 游客模式：直接跳过，连请求都不发（也不解除保护锁，避免动到管理员的待推数据） */
+    if (!this._canWriteCloud()) {
+      console.warn(`[Store] ⛔ ${key} 的清空未推送：当前是游客模式（只读）`);
+      return;
+    }
     try {
       await this._persistClear(key);
       this._clearUnconfirmed(key);
     } catch (error) {
+      /* 游客（未登录管理员）被后端 403 拦下：这不是"写失败"，不要重试也不要报错，
+         否则老师会看到"同步失败"的误报。本地这份数据交给下次同步用云端覆盖。 */
+      if (error?.adminRequired) {
+        console.warn(`[Store] ⛔ ${key} 的清空未执行：未登录管理员（游客只读）`);
+        this._clearUnconfirmed(key);
+        return;
+      }
       if (error && error.status === 503) {
         this.cloudState = 'off';
         this.mode = 'local';
@@ -1274,6 +1353,18 @@ const Store = {
   async writeCritical(key, value, {
     label = '', attempts = CRITICAL_WRITE_ATTEMPTS, allowEmpty = false, force = false,
   } = {}) {
+    /* ⛔ 游客模式（只读身份）：重要表单也不写云端。
+       必须在最前面拦：一旦走到后面，就会打上"保护锁"并留下待推记录，
+       锁留在盘上会挡住云端把最新数据同步下来，游客反而看到过期数据。 */
+    if (!this._canWriteCloud()) {
+      const reason = '游客只能查看数据，修改请先点击右上角登录';
+      console.warn(`[Store] ⛔ 重要数据 ${key} 未写入云端：${reason}`);
+      if (typeof window !== 'undefined' && typeof window.Auth?.notifyGuest === 'function') {
+        window.Auth.notifyGuest(reason);
+      }
+      this._dispatchSync([key], { localWrite: true, cloudConfirmed: false, critical: true });
+      return { ok: false, mode: this.mode, localSaved: true, error: reason, adminRequired: true };
+    }
     /* ⚠️ 时序铁律（用户可能 0.1 秒后按 F5，任何一步都不能排在 fetch 后面）：
      *   ① 先同步落 localStorage（write 内部完成）
      *   ② 再同步打锁并落盘
@@ -1385,11 +1476,23 @@ const Store = {
   },
 
   async _persistSafely(key, value, options = {}) {
+    /* ⛔ 游客模式：不推云端（连请求都不发） */
+    if (!this._canWriteCloud()) {
+      console.warn(`[Store] ⛔ ${key} 未推送云端：当前是游客模式（只读）`);
+      return;
+    }
     try {
       const sent = await this._persist(key, value, options);
       if (sent === false) return;          // 空数据被闸门拦下（锁已在里面交出），无需重试
       this._clearUnconfirmed(key);
     } catch (error) {
+      /* 游客（未登录管理员）被后端 403：不是写入失败，安静放行，
+         免得把"权限不足"报成"同步失败（可能是数据结构冲突）"。 */
+      if (error?.adminRequired) {
+        console.warn(`[Store] ⛔ ${key} 未写入云端：未登录管理员（游客只读）`);
+        this._clearUnconfirmed(key);
+        return;
+      }
       // 服务端没配 Supabase：安静地退回纯本地模式，不打扰用户
       if (error && error.status === 503) {
         this.cloudState = 'off';
@@ -1634,6 +1737,13 @@ const Store = {
   async _persist(key, value, options = {}) {
     // ⏸ 暂停期间不往云端推任何东西（强行恢复后想推，请先 window.resumeCloud()）
     if (this._cloudPaused) return false;
+    /* ⛔ 游客模式：一个字节都不发。
+       后台静默同步（补推待写队列 / 断点续传）也会走到这里 ——
+       游客模式下这些请求直接跳过，就不会出现 403，也就不会触发任何弹窗提示。 */
+    if (!this._canWriteCloud()) {
+      console.warn(`[Store] ⛔ ${key} 未写入云端：当前是游客模式（只读）`);
+      return false;
+    }
     /* ⛔ 死规则（最高优先级）：空载荷【永远不发】—— 不管有没有 clearIntent。
        清空云端只能走 _persistClear() 这条专属通道（只有界面上的【清空按钮】会调它）。
        ⚠️ 以前 _flushPending 会拿 "allowEmpty: entry.clear === true" 绕开闸门，
@@ -1675,6 +1785,11 @@ const Store = {
    */
   async _persistClear(key) {
     if (this._cloudPaused) return false;
+    /* ⛔ 游客模式：不清云端（也不发请求）。清空是写操作，游客一律无权。 */
+    if (!this._canWriteCloud()) {
+      console.warn(`[Store] ⛔ ${key} 的云端清空未执行：当前是游客模式（只读）`);
+      return false;
+    }
     await this._fetchJSON('/api/data', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1695,6 +1810,11 @@ const Store = {
    *    清空意图只走 _persistClear，且只认 CLEAR_LOCK_TTL_MS 之内的新鲜指令。
    */
   async _persistEntry(key, entry) {
+    /* ⛔ 游客模式：补推 / 续传一律跳过（不发请求 → 不会 403 → 不会弹窗） */
+    if (!this._canWriteCloud()) {
+      console.warn(`[Store] ⛔ ${key} 的待补推已跳过：当前是游客模式（只读）`);
+      return false;
+    }
     if (entry.clear === true) {
       const age = Date.now() - (entry.at || 0);
       if (age > CLEAR_LOCK_TTL_MS) {
@@ -1733,6 +1853,14 @@ const Store = {
    */
   async _flushPending() {
     if (!this._pendingWrites.size) return;
+    /* ⛔ 游客模式：整个补推队列直接跳过。
+       这是"每切一个页面就弹一次登录框"的直接来源：
+       每次同步结束都会调 _flushPending 补推盘上残留的待写记录，
+       游客发出去必然 403 → 于是弹窗。游客模式下干脆一个请求都不发。 */
+    if (!this._canWriteCloud()) {
+      console.warn('[Store] ⛔ 游客模式：已跳过本次待写队列补推（不发任何写请求）');
+      return;
+    }
     for (const [key, entry] of [...this._pendingWrites]) {
       try {
         // ⛔ 死规则在这里同样生效：空载荷永远不发；清空只走 _persistClear 且必须新鲜
@@ -1741,6 +1869,12 @@ const Store = {
         this._clearUnconfirmed(key);
         console.log(`[Store] 已补推 ${key} 到云端`);
       } catch (error) {
+        // 游客被权限拦下：停止补推，交给下一次同步用云端数据覆盖本地
+        if (error?.adminRequired) {
+          console.warn(`[Store] ⛔ ${key} 补推未执行：未登录管理员（游客只读）`);
+          this._clearUnconfirmed(key);
+          continue;
+        }
         entry.attempts = (entry.attempts || 0) + 1;
         entry.lastError = error?.message || String(error);
         // 连续失败超过上限 → 熔断：出队、不再重试，但【保留本地数据与保护锁】

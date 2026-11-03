@@ -5,6 +5,9 @@
     },
     "api/data.js": {
       "maxDuration": 30
+    },
+    "api/admin.js": {
+      "maxDuration": 10
     }
   }
 }

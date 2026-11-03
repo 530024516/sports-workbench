@@ -155,7 +155,7 @@ content.innerHTML = `
             <option value="medium" selected>中优先级</option>
             <option value="low">低优先级</option>
           </select>
-          <button onclick="handleAddTodo()">添加</button>
+          <button data-admin-only onclick="handleAddTodo()">添加</button>
         </div>
         <!-- 统计 -->
         <div class="todo-stats" id="todoStats"></div>

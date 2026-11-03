@@ -18,7 +18,7 @@ content.innerHTML = `
       <button class="btn btn-secondary" onclick="downloadStudentImportTemplate()">下载导入模板</button>
       <label class="btn btn-secondary" for="studentImportFile">导入 CSV</label>
       <input id="studentImportFile" class="student-file-input" type="file" accept=".csv,text/csv" onchange="importStudentsCSV(this.files[0])">
-      <button class="btn btn-primary" onclick="openAddStudent()"><span>➕</span> 添加学生</button>
+      <button data-admin-only class="btn btn-primary" onclick="openAddStudent()"><span>➕</span> 添加学生</button>
     </div>
   </div>
 

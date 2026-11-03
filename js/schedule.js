@@ -151,7 +151,7 @@ pageContent.innerHTML = `
             <option value="random">随机打乱</option>
           </select>
         </label>
-        <button class="btn btn-primary" onclick="generateSchedule()">生成 / 重新编排</button>
+        <button data-admin-only class="btn btn-primary" onclick="generateSchedule()">生成 / 重新编排</button>
       </div>
       <details class="schedule-format-panel">
         <summary>🏁 赛制设置（一枪制 / 两枪制，按项目自己定）</summary>

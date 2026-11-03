@@ -303,10 +303,13 @@ await test('⑬ 批量迁移：空的那一项标记为 skipped-empty（不算�
 await test('⑭ 接口层：空载荷写入返回 400（不是 5xx —— 否则前端会无限重试刷屏）', async () => {
   process.env.SUPABASE_URL = process.env.SUPABASE_URL || 'https://example.supabase.co';
   process.env.SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'test-anon-key';
+  // 带上管理员密码：这条用例验的是"空载荷被拒"，不是权限（权限由 admin-auth-smoke 覆盖）
+  process.env.ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'e2e-admin-secret';
   const { handleDataRequest } = require(path.join(ROOT, 'lib/data-api.js'));
   const req = {
     method: 'POST',
     url: '/api/data',
+    headers: { 'x-admin-password': process.env.ADMIN_PASSWORD },
     body: { key: 'pe_lesson_plans', value: [] },
     on() {},
   };

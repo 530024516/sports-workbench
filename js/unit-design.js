@@ -114,7 +114,7 @@ document.getElementById('page-content').innerHTML = `
       <div class="ud2-field ud2-actions">
         <span class="ud2-field-label">&nbsp;</span>
         <div class="ud2-field-row">
-          <button id="ud2GenerateBtn" class="btn btn-primary" type="button" onclick="generateWholeUnit()">✨ 一键生成完整大单元</button>
+          <button data-admin-only id="ud2GenerateBtn" class="btn btn-primary" type="button" onclick="generateWholeUnit()">✨ 一键生成完整大单元</button>
           <button class="btn btn-secondary" type="button" onclick="openUnitResourcePicker()">📦 从离线资源库加载</button>
           <button class="btn btn-ghost" type="button" onclick="toggleAllUnitModules()">展开 / 收起全部</button>
           <button class="btn btn-ghost" type="button" onclick="clearUnitDesign()">清空重来</button>

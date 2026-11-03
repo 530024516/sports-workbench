@@ -403,6 +403,88 @@ input, textarea, select {
   background: var(--bg-hover);
 }
 
+/* ========== 管理员登录 / 退出（顶栏） ========== */
+.admin-topbar-btn {
+  width: auto;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  gap: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+
+.admin-topbar-btn:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: var(--primary-100, #fff2e8);
+}
+
+/* 已登录：绿色描边，一眼看出当前是管理员 */
+.admin-topbar-btn.is-admin {
+  border-color: var(--success);
+  color: var(--success);
+  background: rgba(6, 167, 125, 0.08);
+}
+
+.admin-login {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--text-primary);
+}
+
+.admin-login-tip {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border-left: 4px solid var(--primary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.admin-login-label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.admin-login-input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-size: 16px;              /* iOS 聚焦不放大页面 */
+  font-family: inherit;
+}
+
+.admin-login-input:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(232, 93, 4, 0.12);
+}
+
+@media (max-width: 768px) {
+  .admin-topbar-btn {
+    height: 34px;
+    padding: 0 10px;
+    font-size: 12px;
+  }
+
+  .admin-topbar-btn.is-admin {
+    font-size: 0;              /* 窄屏只留图标，避免顶栏挤爆 */
+    gap: 0;
+    padding: 0 10px;
+  }
+}
+
 /* 页面内容：不锁高度、不接管滚动，整页自然滚动（甘特图 / 明细列表有多高就多高） */
 .page-content {
   flex: 1;

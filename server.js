@@ -15,6 +15,8 @@ const fs = require('fs');
 const path = require('path');
 const { handleAiRequest } = require('./lib/ai-core.js');
 const { handleDataRequest } = require('./lib/data-api.js');
+const { handleAdminRequest } = require('./lib/admin-core.js');
+const { requireAdmin } = require('./lib/admin-auth.js');
 const supabase = require('./lib/supabase.js');
 
 const ROOT = __dirname;
@@ -73,11 +75,20 @@ const server = http.createServer((req, res) => {
     sendSupabaseConfig(req, res);
     return;
   }
+  // 管理员登录校验（这个接口是"门"本身，不受写操作闸门限制）
+  if (pathname === '/api/admin') {
+    handleAdminRequest(req, res);
+    return;
+  }
+  /* ⛔ 权限闸门（安全底线）：GET 放行，POST/PUT/DELETE 必须带 X-Admin-Password。
+     lib/data-api.js 与 lib/ai-core.js 里也各有一道，这里是入口处的第三道（纵深防御）。 */
   if (pathname === '/api/data') {
+    if (!requireAdmin(req, res)) return;
     handleDataRequest(req, res);
     return;
   }
   if (Object.prototype.hasOwnProperty.call(AI_ROUTES, pathname)) {
+    if (!requireAdmin(req, res)) return;
     handleAiRequest(req, res, { type: AI_ROUTES[pathname] || undefined });
     return;
   }

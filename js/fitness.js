@@ -36,16 +36,16 @@ content.innerHTML = `
       <p>成绩录入、统计分析与可视化看板</p>
     </div>
     <div style="display:flex;gap:8px;">
-      <button class="btn btn-secondary" onclick="openBatchImport()">
+      <button data-admin-only class="btn btn-secondary" onclick="openBatchImport()">
         <span>📥</span> 批量录入
       </button>
-      <button class="btn btn-secondary" onclick="openQuickEntry()">
+      <button data-admin-only class="btn btn-secondary" onclick="openQuickEntry()">
         <span>⌨️</span> 快捷录入
       </button>
-      <button class="btn btn-primary" onclick="openAddRecord()">
+      <button data-admin-only class="btn btn-primary" onclick="openAddRecord()">
         <span>📝</span> 录入成绩
       </button>
-      <button class="btn btn-danger fitness-purge-btn" onclick="requestFitnessPurge()"
+      <button data-admin-only class="btn btn-danger fitness-purge-btn" onclick="requestFitnessPurge()"
         title="清空全部体测成绩记录（本地 + 云端），不影响学生名单、教案等其它数据">
         <span>🗑️</span> 清空体测数据
       </button>
@@ -280,7 +280,7 @@ function renderRecordsTable() {
         <td>${score ? `<strong>${score.score}${score.bonus ? ` + ${score.bonus} 加分` : ''} 分</strong> · ` : ''}<span class="badge ${g.class}">${g.level}</span></td>
         <td>${r.testDate}</td>
         <td>
-          <button class="btn btn-ghost btn-sm" onclick="deleteRecord('${r.id}')" title="删除">🗑️</button>
+          <button data-admin-only class="btn btn-ghost btn-sm" onclick="deleteRecord('${r.id}')" title="删除">🗑️</button>
         </td>
       </tr>
     `;

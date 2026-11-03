@@ -54,7 +54,7 @@ fitnessContent.innerHTML = `
               <p class="fitness-field-hint">默认勾选「无器械」，可多选。</p>
             </div>
             <div class="fitness-form-actions">
-              <button id="fitnessGenerateBtn" class="btn btn-primary btn-lg" type="button" onclick="generateFitnessPlan()">生成今日训练计划</button>
+              <button data-admin-only id="fitnessGenerateBtn" class="btn btn-primary btn-lg" type="button" onclick="generateFitnessPlan()">生成今日训练计划</button>
               <button id="fitnessManualBtn" class="btn btn-secondary btn-lg" type="button" onclick="openManualFitnessPlanModal()">+ 手动创建计划</button>
               <button class="btn btn-ghost" type="button" onclick="resetFitnessForm()">重置</button>
             </div>

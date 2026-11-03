@@ -95,7 +95,7 @@ function renderRows() {
       <td><code class="inline">${tableOf(key)}</code></td>
       <td>${count === null ? '—' : (rawOf(key) === undefined ? 'JSON 损坏' : count)}</td>
       <td class="migrate-status-cell">${!known ? '云端无对应表，将跳过' : (count === null ? '无本地数据' : '待导入')}</td>
-      <td>${count === null ? '' : `<button class="btn btn-ghost" type="button" onclick="removeLocalKey('${key}')">删除本机</button>`}</td>
+      <td>${count === null ? '' : `<button data-admin-only class="btn btn-ghost" type="button" onclick="removeLocalKey('${key}')">删除本机</button>`}</td>
     </tr>`;
   }).join('');
   return keys;

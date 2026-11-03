@@ -124,6 +124,9 @@ const Layout = {
         </div>
         <div class="topbar-right">
           <button class="topbar-btn" type="button" aria-label="工作台显示设置" title="工作台显示设置" onclick="Layout.openDisplaySettings()">⚙️</button>
+          <button class="topbar-btn admin-topbar-btn" type="button" id="adminToggleBtn"
+                  aria-label="管理员登录" title="登录后可新增 / 编辑 / 删除数据"
+                  onclick="Auth.toggle()">🔒 管理员登录</button>
           <div class="topbar-date">
             <span>📅</span>
             <span>${dateStr} ${weekStr}</span>

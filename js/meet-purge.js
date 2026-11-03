@@ -49,7 +49,7 @@ function mountMeetPurgeZone() {
       <strong>🧨 数据管理</strong>
       <span>换一届运动会前请先清空上一届：报名、预分组、赛程、成绩排名会一起删除，不可恢复。</span>
     </div>
-    <button class="meet-purge-btn" type="button" onclick="requestMeetPurge()">一键清空本次运动会所有数据</button>
+    <button data-admin-only class="meet-purge-btn" type="button" onclick="requestMeetPurge()">一键清空本次运动会所有数据</button>
   `;
   host.prepend(zone);
 }

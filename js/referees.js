@@ -120,7 +120,7 @@ function renderShell() {
         </div>
         <div class="meet-toolbar-actions">
           <button class="btn btn-secondary" type="button" onclick="reloadRefereePage()">重新读取</button>
-          <button class="btn btn-primary" type="button" id="refereeSaveBtn" onclick="saveReferees()">保存裁判员安排</button>
+          <button data-admin-only class="btn btn-primary" type="button" id="refereeSaveBtn" onclick="saveReferees()">保存裁判员安排</button>
         </div>
       </div>
       <div class="card-body">
