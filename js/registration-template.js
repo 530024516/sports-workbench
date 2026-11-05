@@ -59,9 +59,11 @@ const GRADE_OPTIONS = [1, 2, 3, 4, 5, 6];
 
 /* ---------------- 数据来源 ---------------- */
 
-/** 班级选项：从学生库拼出「五年级1班」这样的全称（系统据此识别年级） */
+/** 班级选项：从体测记录派生的名册拼出「五年级1班」这样的全称（系统据此识别年级） */
 function getTemplateClassOptions() {
-  const students = Store.read('pe_students', []) || [];
+  const students = typeof DB !== 'undefined' && typeof DB.getFitnessStudents === 'function'
+    ? DB.getFitnessStudents()
+    : [];
   if (!Array.isArray(students)) return [];
   const map = new Map();
   students.forEach(student => {
@@ -827,12 +829,14 @@ function parseGroupValue(value) {
   return GROUP_ALIASES[text] || GROUP_ALIASES[String(value ?? '').trim()] || null;
 }
 
-/** 从班级名推断年级：优先“五年级1班”这种全称，再查学生库 */
+/** 从班级名推断年级：优先“五年级1班”这种全称，再查体测名册 */
 function resolveGradeByClassName(className) {
   const text = String(className ?? '').trim();
   const match = text.match(/(一年级|二年级|三年级|四年级|五年级|六年级)/);
   if (match) return gradeNumber(match[1]);
-  const students = Store.read('pe_students', []) || [];
+  const students = typeof DB !== 'undefined' && typeof DB.getFitnessStudents === 'function'
+    ? DB.getFitnessStudents()
+    : [];
   if (Array.isArray(students)) {
     const grades = new Set();
     students.forEach(student => {

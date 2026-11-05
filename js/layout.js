@@ -5,6 +5,8 @@
 
 const Layout = {
   DISPLAY_SETTINGS_KEY: 'pe_workbench_display_settings_v1',
+  /** 侧边栏折叠状态（只存本地，不上云） */
+  SIDEBAR_COLLAPSED_KEY: 'pe_sidebar_collapsed',
   defaultDisplaySettings: {
     workspaceName: '体育老师工作台',
     teacherName: '体育老师',
@@ -17,7 +19,6 @@ const Layout = {
       label: '教学管理',
       icon: '📁',
       children: [
-        { id: 'students', label: '学生信息', icon: '👥', href: 'students.html' },
         { id: 'fitness', label: '体测数据', icon: '💪', href: 'fitness.html' },
         { id: 'lessons', label: '教案与资源', icon: '📋', href: 'lessons.html' },
         { id: 'unit-design', label: '大单元设计', icon: '🧩', href: 'unit-design.html' },
@@ -69,24 +70,25 @@ const Layout = {
     <aside class="sidebar" id="appSidebar">
       <div class="sidebar-brand">
         <div class="logo">🏃</div>
-        <span class="brand-text">${this.escapeHTML(settings.workspaceName)}</span>
+        <span class="brand-text" title="${this.escapeHTML(settings.workspaceName)}">${this.escapeHTML(settings.workspaceName)}</span>
       </div>
       <nav class="sidebar-nav">
         ${this.navigation.map(item => item.children
           ? `<div class="nav-group" data-nav-group="${item.id}">
               <button class="nav-group-toggle" type="button" aria-expanded="false"
-                aria-controls="navGroup-${item.id}" onclick="Layout.toggleNavigationGroup('${item.id}')">
+                aria-controls="navGroup-${item.id}" data-tip="${this.escapeHTML(item.label)}"
+                onclick="Layout.toggleNavigationGroup('${item.id}')">
                 <span class="nav-icon">${item.icon}</span>
                 <span class="nav-text">${item.label}</span>
                 <span class="nav-group-chevron" aria-hidden="true">▾</span>
               </button>
               <div class="nav-submenu" id="navGroup-${item.id}" hidden>
-                ${item.children.map(child => `<a class="nav-item nav-subitem" data-page="${child.id}" href="${child.href}">
+                ${item.children.map(child => `<a class="nav-item nav-subitem" data-page="${child.id}" href="${child.href}" data-tip="${this.escapeHTML(child.label)}">
                   <span class="nav-icon">${child.icon}</span><span class="nav-text">${child.label}</span>
                 </a>`).join('')}
               </div>
             </div>`
-          : `<a class="nav-item nav-root-item" data-page="${item.id}" href="${item.href}">
+          : `<a class="nav-item nav-root-item" data-page="${item.id}" href="${item.href}" data-tip="${this.escapeHTML(item.label)}">
               <span class="nav-icon">${item.icon}</span><span class="nav-text">${item.label}</span>
             </a>`
         ).join('')}
@@ -114,6 +116,10 @@ const Layout = {
         <div class="topbar-left">
           <button class="topbar-hamburger" type="button" id="mobileNavToggle"
                   aria-label="打开导航菜单" aria-expanded="false" aria-controls="appSidebar">☰</button>
+          <button class="topbar-btn sidebar-collapse-toggle" type="button" id="sidebarCollapseToggle"
+                  aria-label="收起侧边栏" aria-expanded="true"
+                  title="收起侧边栏（给内容更多空间）"
+                  onclick="Layout.toggleSidebar()">☰</button>
           <div>
             <div class="topbar-title">${title}</div>
             <div class="topbar-breadcrumb">
@@ -147,6 +153,9 @@ const Layout = {
       return;
     }
 
+    /* 先把折叠状态挂到 body 上，再渲染布局 —— 避免刷新时侧边栏"闪一下" */
+    this.applySidebarState(this.isSidebarCollapsed());
+
     root.innerHTML = `
       <div class="app-layout">
         ${this.sidebarHTML()}
@@ -161,6 +170,8 @@ const Layout = {
     `;
 
     this.bindMobileNav(root);
+    this.bindSidebarTooltip(root);
+    this.applySidebarState(this.isSidebarCollapsed());
 
     this.applyDisplaySettings(root);
     window.addEventListener('storage', event => {
@@ -177,6 +188,87 @@ const Layout = {
         this.setNavigationGroupExpanded(group.dataset.navGroup, true);
       }
     }
+  },
+
+  /* ==========================================================================
+   * 侧边栏折叠
+   * ========================================================================== */
+
+  /** 读折叠状态（localStorage；Store 的本地镜像就是 localStorage） */
+  isSidebarCollapsed() {
+    try {
+      const value = Store.read(this.SIDEBAR_COLLAPSED_KEY, false);
+      return value === true || value === 'true';
+    } catch (error) {
+      console.error('读取侧边栏折叠状态失败', error);
+      return false;
+    }
+  },
+
+  /** 写折叠状态（只落本地，不上云） */
+  saveSidebarCollapsed(collapsed) {
+    try {
+      Store.write(this.SIDEBAR_COLLAPSED_KEY, !!collapsed, { push: false });
+    } catch (error) {
+      console.error('保存侧边栏折叠状态失败', error);
+      try { localStorage.setItem(this.SIDEBAR_COLLAPSED_KEY, JSON.stringify(!!collapsed)); } catch (ignore) { /* 忽略 */ }
+    }
+  },
+
+  /** 把折叠状态应用到页面（body 上的 class 驱动全部样式） */
+  applySidebarState(collapsed) {
+    const isCollapsed = !!collapsed;
+    document.body.classList.toggle('sidebar-collapsed', isCollapsed);
+    const toggle = document.getElementById('sidebarCollapseToggle');
+    if (toggle) {
+      toggle.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
+      toggle.setAttribute('aria-label', isCollapsed ? '展开侧边栏' : '收起侧边栏');
+      toggle.title = isCollapsed ? '展开侧边栏' : '收起侧边栏（给内容更多空间）';
+    }
+    return isCollapsed;
+  },
+
+  /** 点 ☰ → 折叠 / 展开 */
+  toggleSidebar() {
+    const collapsed = !document.body.classList.contains('sidebar-collapsed');
+    this.saveSidebarCollapsed(collapsed);
+    this.applySidebarState(collapsed);
+  },
+
+  /**
+   * 折叠态的悬浮提示：鼠标停在图标上，右侧弹一个黑色小框写清楚这是什么。
+   * 用 fixed 定位（不放在侧边栏里），避免被 .sidebar-nav 的 overflow 裁掉。
+   */
+  bindSidebarTooltip(root) {
+    const sidebar = root.querySelector('.sidebar');
+    if (!sidebar) return;
+    let tip = null;
+
+    const hide = () => {
+      if (tip) { tip.remove(); tip = null; }
+    };
+
+    root.querySelectorAll('.nav-item, .nav-group-toggle').forEach(item => {
+      item.addEventListener('mouseenter', () => {
+        if (!document.body.classList.contains('sidebar-collapsed')) return;
+        const label = item.getAttribute('data-tip');
+        if (!label) return;
+        hide();
+        const itemRect = item.getBoundingClientRect();
+        const sidebarRect = sidebar.getBoundingClientRect();
+        tip = document.createElement('div');
+        tip.className = 'sidebar-tip';
+        tip.textContent = label;
+        tip.style.top = `${itemRect.top + itemRect.height / 2}px`;
+        tip.style.left = `${sidebarRect.right + 10}px`;
+        document.body.appendChild(tip);
+      });
+      item.addEventListener('mouseleave', hide);
+      item.addEventListener('click', hide);
+    });
+
+    window.addEventListener('scroll', hide, true);
+    window.addEventListener('resize', hide);
   },
 
   /**

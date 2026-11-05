@@ -58,9 +58,11 @@
   --space-2xl: 48px;
 
   /* 布局 */
-  --sidebar-width: 240px;
+  --sidebar-width: 200px;            /* 展开时的侧边栏宽度 */
+  --sidebar-collapsed-width: 64px;   /* 折叠后的宽度（只留图标） */
   --topbar-height: 64px;
   --max-width: 1280px;
+  --max-width-collapsed: 1680px;     /* 折叠后内容区可以更宽（表格能拉开） */
 
   /* 字体 */
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
@@ -137,7 +139,7 @@ input, textarea, select {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 0 20px;
+  padding: 0 14px;
   border-bottom: 1px solid rgba(255,255,255,0.08);
 }
 
@@ -154,9 +156,12 @@ input, textarea, select {
 }
 
 .sidebar-brand .brand-text {
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 700;
   white-space: nowrap;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .sidebar-nav {
@@ -335,6 +340,87 @@ input, textarea, select {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  transition: margin-left 0.3s ease;
+}
+
+/* ========== 侧边栏折叠（☰） ==========
+   展开：200px + 文字；折叠：64px + 只留居中的图标。
+   宽度和边距都有 0.3s 过渡，收缩过程不会生硬闪烁。 */
+body.sidebar-collapsed .sidebar {
+  width: var(--sidebar-collapsed-width);
+}
+
+body.sidebar-collapsed .main-area {
+  margin-left: var(--sidebar-collapsed-width);
+}
+
+/* 折叠后内容区可以更宽 —— 成绩册这类宽表能多拉出好几十像素 */
+body.sidebar-collapsed .page-content {
+  max-width: var(--max-width-collapsed);
+}
+
+/* 文字、箭头全部藏起来，只剩图标 */
+body.sidebar-collapsed .sidebar .brand-text,
+body.sidebar-collapsed .sidebar .nav-text,
+body.sidebar-collapsed .sidebar .nav-group-chevron,
+body.sidebar-collapsed .sidebar .user-info {
+  display: none;
+}
+
+/* 图标居中 */
+body.sidebar-collapsed .sidebar .sidebar-brand {
+  justify-content: center;
+  padding: 0;
+}
+
+body.sidebar-collapsed .sidebar .nav-item,
+body.sidebar-collapsed .sidebar .nav-group-toggle,
+body.sidebar-collapsed .sidebar .nav-subitem {
+  justify-content: center;
+  gap: 0;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+body.sidebar-collapsed .sidebar .nav-item .nav-icon,
+body.sidebar-collapsed .sidebar .nav-group-toggle .nav-icon {
+  width: auto;
+}
+
+body.sidebar-collapsed .sidebar .nav-submenu {
+  padding: 4px 0;
+}
+
+body.sidebar-collapsed .sidebar .sidebar-footer {
+  padding: 16px 0;
+  display: flex;
+  justify-content: center;
+}
+
+body.sidebar-collapsed .sidebar .user-mini {
+  justify-content: center;
+}
+
+/* 折叠态的悬浮提示：黑色小框，写清楚这个图标是什么 */
+.sidebar-tip {
+  position: fixed;
+  z-index: 1400;
+  transform: translateY(-50%);
+  background: rgba(17, 24, 39, 0.95);
+  color: #fff;
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 6px 10px;
+  border-radius: 6px;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+  animation: sidebarTipIn 0.15s ease;
+}
+
+@keyframes sidebarTipIn {
+  from { opacity: 0; transform: translate(-5px, -50%); }
+  to { opacity: 1; transform: translate(0, -50%); }
 }
 
 /* 顶部栏 */
@@ -401,6 +487,15 @@ input, textarea, select {
 
 .topbar-btn:hover {
   background: var(--bg-hover);
+}
+
+/* 侧边栏折叠按钮（桌面端） */
+.sidebar-collapse-toggle {
+  flex-shrink: 0;
+}
+
+.sidebar-collapse-toggle:active {
+  transform: scale(0.92);
 }
 
 /* ========== 管理员登录 / 退出（顶栏） ========== */
@@ -603,6 +698,34 @@ input, textarea, select {
   color: white;
 }
 
+/* 绿色按钮：打印（"打印当前页面"用绿色，和导出按钮区分开） */
+.btn-success {
+  background: var(--success);
+  color: white;
+}
+
+.btn-success:hover {
+  background: #058A68;
+}
+
+.btn-success:disabled,
+.btn-success:disabled:hover {
+  background: var(--success);
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* 页面打印区：平时藏在屏幕外，点「打印当前页面」时把内容写进来再调它的 print() */
+.fitness-print-frame {
+  position: fixed;
+  left: -12000px;
+  top: 0;
+  width: 1123px;         /* A4 横向 @ 96dpi */
+  height: 794px;
+  border: 0;
+  visibility: hidden;
+}
+
 /* 表格 */
 .table-wrapper {
   overflow-x: auto;
@@ -783,6 +906,53 @@ table.data-table tbody tr:last-child td {
   body.mobile-nav-open .mobile-nav-backdrop { display: block; }
 
   .main-area { margin-left: 0 !important; }
+
+  /* 手机端是抽屉菜单，"折叠"这个概念不生效：
+     侧边栏照旧是 268px 抽屉，文字照旧要露出来，折叠按钮也不显示。 */
+  body.sidebar-collapsed .sidebar {
+    width: 268px;
+    max-width: 82vw;
+  }
+
+  body.sidebar-collapsed .main-area { margin-left: 0 !important; }
+
+  body.sidebar-collapsed .page-content { max-width: var(--max-width); }
+
+  body.sidebar-collapsed .sidebar .brand-text,
+  body.sidebar-collapsed .sidebar .nav-text,
+  body.sidebar-collapsed .sidebar .nav-group-chevron {
+    display: inline;
+  }
+
+  body.sidebar-collapsed .sidebar .user-info { display: block; }
+
+  body.sidebar-collapsed .sidebar .sidebar-brand {
+    justify-content: flex-start;
+    padding: 0 14px;
+  }
+
+  body.sidebar-collapsed .sidebar .nav-item,
+  body.sidebar-collapsed .sidebar .nav-group-toggle,
+  body.sidebar-collapsed .sidebar .nav-subitem {
+    justify-content: flex-start;
+    gap: 12px;
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  body.sidebar-collapsed .sidebar .nav-submenu {
+    padding: 3px 0 2px 8px;
+  }
+
+  body.sidebar-collapsed .sidebar .sidebar-footer {
+    padding: 16px;
+    justify-content: flex-start;
+  }
+
+  body.sidebar-collapsed .sidebar .user-mini { justify-content: flex-start; }
+
+  /* 折叠按钮在手机上不显示（顶栏已经有抽屉用的 ☰ 了） */
+  .sidebar-collapse-toggle { display: none; }
 
   /* 抽屉里的文字要露出来（不再是 64px 图标栏） */
   .nav-group-toggle { justify-content: flex-start; padding-right: 12px; padding-left: 12px; }
@@ -1160,72 +1330,11 @@ select.form-control {
   min-width: 130px;
 }
 
-.fitness-overview-heading {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 16px;
-  margin-bottom: 16px;
-}
-
-.fitness-overview-heading h2 {
-  margin: 0;
-  font-size: 20px;
-  font-weight: 700;
-}
-
-.fitness-overview-heading p,
-.fitness-overview-note {
-  color: var(--text-secondary);
-  font-size: 13px;
-}
-
-.fitness-overview-heading p {
-  margin: 5px 0 0;
-}
-
-.fitness-overview-summary {
-  margin-bottom: 16px;
-}
-
-.fitness-overview-charts {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 24px;
-}
-
-.fitness-chart-container {
-  position: relative;
-  min-height: 260px;
-}
-
-.fitness-chart-empty {
-  display: grid;
-  min-height: 260px;
-  place-items: center;
-  color: var(--text-secondary);
-  text-align: center;
-}
-
-.fitness-overview-note {
-  margin: 12px 0 0;
-}
-
+/* 注：旧版【统计分析】视图已删除，下面这批 overview / chart 样式随之移除；
+   .fitness-record-subtext 仍被【成绩排名】使用，保留。 */
 .fitness-record-subtext {
   color: var(--text-tertiary);
   font-size: 12px;
-}
-
-@media (max-width: 768px) {
-  .fitness-overview-charts {
-    grid-template-columns: 1fr;
-    gap: 16px;
-  }
-
-  .fitness-overview-heading {
-    align-items: flex-start;
-    flex-direction: column;
-  }
 }
 
 @media (max-width: 768px) {
@@ -2837,6 +2946,481 @@ select.form-control {
   }
 }
 
+/* ========== 体测数据 · 统计分析看板（BI 报表版） ========== */
+.fitness-bi {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* ---------- 全局控制区 ---------- */
+.fitness-bi-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 14px 18px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+.fitness-bi-control-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.fitness-bi-tab-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.fitness-bi-tab-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-tertiary);
+  flex: none;
+}
+
+.fitness-bi-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.fitness-bi-tab {
+  padding: 5px 13px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+
+.fitness-bi-tab:hover {
+  color: var(--primary);
+  background: var(--primary-100);
+}
+
+.fitness-bi-tab.active {
+  background: var(--primary);
+  color: #fff;
+  box-shadow: 0 4px 12px rgba(232, 93, 4, 0.28);
+}
+
+.fitness-bi-control-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: none;
+}
+
+.fitness-bi-scope {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+/* ---------- 区块 1：KPI 指标卡（4 张核心大卡） ---------- */
+.fitness-bi-kpis {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.fitness-bi-kpi {
+  position: relative;
+  overflow: hidden;
+  padding: 14px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+.fitness-bi-kpi::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--primary);
+}
+
+.fitness-bi-tone-success::before { background: var(--success); }
+.fitness-bi-tone-blue::before { background: #2563EB; }
+.fitness-bi-tone-info::before { background: #0288D1; }
+.fitness-bi-tone-danger::before { background: var(--danger); }
+
+.fitness-bi-kpi-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.fitness-bi-kpi-icon { font-size: 14px; }
+
+.fitness-bi-kpi-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.fitness-bi-kpi-value {
+  margin-top: 6px;
+  font-size: 26px;
+  font-weight: 800;
+  line-height: 1.2;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.fitness-bi-tone-success .fitness-bi-kpi-value { color: var(--success); }
+.fitness-bi-tone-blue .fitness-bi-kpi-value { color: #2563EB; }
+.fitness-bi-tone-info .fitness-bi-kpi-value { color: #0288D1; }
+.fitness-bi-tone-danger .fitness-bi-kpi-value { color: var(--danger); }
+
+.fitness-bi-kpi-sub {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+/* ---------- 区块 2：占比进度条 ---------- */
+.fitness-bi-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+.fitness-bi-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.fitness-bi-progress-label {
+  flex: none;
+  width: 52px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.fitness-bi-progress-track {
+  flex: 1;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  overflow: hidden;
+}
+
+.fitness-bi-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.45s ease;
+}
+
+.fitness-bi-fill-green { background: linear-gradient(90deg, #06A77D, #34D399); }
+.fitness-bi-fill-blue { background: linear-gradient(90deg, #2563EB, #60A5FA); }
+
+.fitness-bi-progress-value {
+  flex: none;
+  width: 210px;
+  text-align: right;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+/* ---------- 区块 3 / 5：图表 ---------- */
+.fitness-bi-grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.fitness-bi-card { min-width: 0; }
+
+.fitness-bi-chart {
+  width: 100%;
+  height: 260px;
+  padding: 10px 14px 14px;
+}
+
+.fitness-bi-chart-tall { height: 340px; }
+
+/* ---------- 区块 4：男女生对比 ---------- */
+.fitness-bi-gender {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.fitness-bi-gender-card {
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-hover);
+}
+
+.fitness-bi-gender-male { border-left: 3px solid #2563EB; }
+.fitness-bi-gender-female { border-left: 3px solid #EC4899; }
+
+.fitness-bi-gender-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.fitness-bi-gender-tag {
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+
+.fitness-bi-gender-count {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.fitness-bi-gender-average {
+  margin-top: 6px;
+  font-size: 28px;
+  font-weight: 800;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.fitness-bi-gender-average span {
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+}
+
+.fitness-bi-gender-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.fitness-bi-gender-meta b { color: var(--text-primary); }
+
+/* ---------- 区块 4：本年级概览 ---------- */
+.fitness-bi-summary-text {
+  font-size: 14px;
+  line-height: 1.9;
+  color: var(--text-primary);
+  margin: 0 0 12px;
+}
+
+.fitness-bi-summary-text .is-danger { color: var(--danger); }
+.fitness-bi-summary-text .is-warn { color: #B8860B; }
+.fitness-bi-summary-text .is-success { color: var(--success); }
+
+.fitness-bi-summary-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px 14px;
+}
+
+.fitness-bi-summary-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 5px;
+  border-bottom: 1px dashed var(--border);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.fitness-bi-summary-list b {
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.fitness-bi-summary-empty {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-tertiary);
+}
+
+/* ---------- 区块 6：班级对比 ---------- */
+.fitness-bi-table { font-size: 13px; }
+
+.fitness-bi-table tbody td { padding: 10px 14px; }
+
+.fitness-bi-average { font-variant-numeric: tabular-nums; }
+
+.fitness-bi-tag {
+  display: inline-block;
+  min-width: 52px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.fitness-bi-tag-good { background: var(--success-light); color: var(--success); }
+.fitness-bi-tag-bad { background: var(--danger-light); color: var(--danger); }
+
+.fitness-bi-rank {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--primary-100);
+  color: var(--primary-dark);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+/* ---------- 响应式 ---------- */
+@media (max-width: 1280px) {
+  .fitness-bi-kpis {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1024px) {
+  .fitness-bi-grid-2 {
+    grid-template-columns: 1fr;
+  }
+
+  .fitness-bi-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 768px) {
+  .fitness-bi-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .fitness-bi-kpi { padding: 12px 14px; }
+  .fitness-bi-kpi-value { font-size: 22px; }
+
+  .fitness-bi-gender { grid-template-columns: 1fr; }
+
+  .fitness-bi-summary-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+  .fitness-bi-progress-row { flex-wrap: wrap; }
+  .fitness-bi-progress-label { width: auto; }
+  .fitness-bi-progress-value { width: auto; text-align: left; }
+  .fitness-bi-progress-track { flex-basis: 100%; order: 3; }
+
+  .fitness-bi-chart { height: 240px; }
+  .fitness-bi-chart-tall { height: 300px; }
+
+  /* Tab 在窄屏上要能横向滑动，不能把布局撑破 */
+  .fitness-bi-tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .fitness-bi-tabs::-webkit-scrollbar { display: none; }
+}
+
+/* 视图切换 Tab 在窄屏上也要能横向滑动 */
+@media (max-width: 768px) {
+  .segmented {
+    max-width: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .segmented::-webkit-scrollbar {
+    display: none;
+  }
+
+  .segmented button {
+    padding: 6px 10px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+}
+
+/* ========== 体测成绩批量导入（固定表头 + 绝对容错） ========== */
+.fitness-import-guide {
+  margin-top: 16px;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--text-secondary);
+}
+
+.fitness-import-guide ol {
+  margin: 6px 0 0;
+  padding-left: 20px;
+}
+
+.fitness-import-guide b {
+  color: var(--text-primary);
+}
+
+.fitness-import-guide-note {
+  margin: 10px 0 0;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+  color: var(--text-secondary);
+}
+
+.fitness-import-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 2px 6px 2px 0;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-card, #fff);
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.fitness-import-chip b {
+  color: var(--text-primary);
+}
+
+@media (max-width: 768px) {
+  .fitness-import-chip {
+    white-space: normal;
+  }
+}
+
 /* ========== 体测数据：一键清空（危险操作） ========== */
 .fitness-purge-btn {
   white-space: nowrap;
@@ -2932,5 +3516,300 @@ select.form-control {
   .modal-footer .btn {
     flex: 1 1 auto;
     min-height: 44px;
+  }
+}
+
+/* ========== 体测成绩册（紧凑版：一格一个项目，上成绩下得分） ========== */
+.card-subtitle {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* ⚠️ 选择器必须写成 `table.fitness-gradebook-table ...`：
+   全局的 `table.data-table tbody td`（0,1,3）比 `.fitness-gradebook-table tbody td`（0,1,2）
+   权重更高，会把这里的紧凑 padding / 小字号 全部盖掉 —— 表就会又高又松。 */
+table.fitness-gradebook-table {
+  width: 100%;                  /* 侧边栏折叠后主内容区变宽 → 表格自动拉伸 */
+  min-width: 1080px;            /* 列不多，但项目列有数字，窄屏横向滚动，别把列压扁 */
+  font-size: 13px;
+  /* 整张表绝对不允许因为文字折行把行高撑开 —— 所有单元格一律单行 */
+  table-layout: auto;
+}
+
+table.fitness-gradebook-table thead th {
+  text-align: center;
+  padding: 6px 6px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+table.fitness-gradebook-table thead th.fitness-gb-item {
+  background: var(--primary-100);
+  color: var(--primary-dark);
+}
+
+table.fitness-gradebook-table tbody td {
+  padding: 3px 6px;             /* 行距压到最紧，一屏能看更多学生 */
+  text-align: center;
+  white-space: nowrap;           /* 数据列一律单行，不折行 */
+  line-height: 1.25;
+}
+
+table.fitness-gradebook-table .fitness-gb-basic,
+table.fitness-gradebook-table tbody td.fitness-gb-basic {
+  text-align: left;
+}
+
+/* ---------- 备注 / 弱项：固定宽度 + 单行省略号 + 悬浮看全文 ---------- */
+table.fitness-gradebook-table th.fitness-gb-note-col,
+table.fitness-gradebook-table td.fitness-gb-note-col,
+table.fitness-gradebook-table th.fitness-gb-weak-col,
+table.fitness-gradebook-table td.fitness-gb-weak-col {
+  min-width: 100px;
+  max-width: 180px;
+  width: 140px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: default;
+}
+
+/* 有内容才需要看全文的才给鼠标指针 */
+table.fitness-gradebook-table td.fitness-gb-note-col[title],
+table.fitness-gradebook-table td.fitness-gb-weak-col[title] {
+  cursor: help;
+}
+
+/* 序号（小灰字，贴在姓名前面） */
+table.fitness-gradebook-table .fitness-gb-no {
+  display: inline-block;
+  min-width: 18px;
+  margin-right: 4px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 项目格：上面原始成绩（大字）、下面国标折算分（小字） */
+.fitness-gb-cell {
+  vertical-align: middle;
+}
+
+table.fitness-gradebook-table .fitness-gb-val {
+  display: block;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+table.fitness-gradebook-table .fitness-gb-pts {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.fitness-gb-pts.is-good { color: var(--success); }
+.fitness-gb-pts.is-warn { color: #D97706; }
+.fitness-gb-pts.is-danger { color: var(--danger); }
+
+table.fitness-gradebook-table .fitness-gb-unit {
+  margin-left: 2px;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--text-tertiary);
+}
+
+table.fitness-gradebook-table .fitness-gb-bonus {
+  margin-left: 1px;
+  font-size: 10px;
+  color: var(--success);
+}
+
+table.fitness-gradebook-table .fitness-gb-tag {
+  margin-left: 3px;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--text-tertiary);
+}
+
+table.fitness-gradebook-table .fitness-gb-empty {
+  color: var(--text-tertiary);
+}
+
+/* 总成绩表头：可点排序 */
+table.fitness-gradebook-table thead th.fitness-gb-total-head {
+  cursor: pointer;
+  user-select: none;
+  background: var(--primary-100);
+  color: var(--primary-dark);
+}
+
+.fitness-gb-sort {
+  font-size: 10px;
+}
+
+/* 弱项列：不及格的项目名（单行 + 省略号，完整内容在 title 里） */
+table.fitness-gradebook-table .fitness-gb-weak-list {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--danger);
+  white-space: nowrap;
+}
+
+/* 弱项：单项不及格（或 BMI 肥胖）→ 浅红底高亮 */
+table.fitness-gradebook-table tbody tr.fitness-gb-row-alert > td {
+  background: rgba(214, 40, 40, 0.04);
+}
+
+table.fitness-gradebook-table tbody tr.fitness-gb-row-alert > td.fitness-gb-weak {
+  background: rgba(214, 40, 40, 0.13);
+}
+
+table.fitness-gradebook-table tbody tr.fitness-gb-row-alert > td.fitness-gb-weak .fitness-gb-val {
+  color: var(--danger);
+}
+
+/* 总分格：有弱项的学生标红 */
+table.fitness-gradebook-table .fitness-gb-total {
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+table.fitness-gradebook-table tbody td.fitness-gb-alert {
+  background: rgba(214, 40, 40, 0.13);
+  color: var(--danger);
+}
+
+table.fitness-gradebook-table .fitness-gb-sub {
+  margin-left: 3px;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--text-tertiary);
+}
+
+/* 备注：单行 + 省略号（列宽由 .fitness-gb-note-col 控制） */
+table.fitness-gradebook-table .fitness-gb-note {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.fitness-gradebook-note {
+  margin: 0;
+  padding: 10px 16px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-secondary);
+  border-top: 1px solid var(--border);
+  background: var(--bg-hover);
+}
+
+/* ========== 各项目弱项分布图（成绩册上方） ========== */
+.fitness-weak-chart {
+  width: 100%;
+  height: 280px;
+}
+
+@media (max-width: 768px) {
+  .fitness-gradebook-table {
+    min-width: 980px;
+  }
+
+  .fitness-weak-chart {
+    height: 240px;
+  }
+}
+
+/* ========== 体测看板 · 关注名单 + 全校年级对比 ========== */
+.fitness-bi-watch-tabs {
+  padding: 0 20px 12px;
+  gap: 8px;
+}
+
+.fitness-bi-watch-tabs .fitness-bi-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.fitness-bi-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgba(107, 114, 128, 0.16);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.fitness-bi-tab.active .fitness-bi-count {
+  background: rgba(255, 255, 255, 0.26);
+  color: #fff;
+}
+
+/* 宽表格在窄屏上横向滑动，不把列压扁 */
+.fitness-bi-watch-table {
+  min-width: 560px;
+}
+
+.fitness-bi-watch-table tbody td {
+  padding: 10px 16px;
+  vertical-align: middle;
+}
+
+.fitness-bi-watch-table .fitness-bi-sub {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-tertiary);
+}
+
+.fitness-bi-reason {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 6px;
+  background: var(--danger-light);
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+/* 全校年级对比：折线指标切换 */
+.fitness-bi-metric-switch {
+  flex: none;
+}
+
+.fitness-bi-metric-switch button {
+  padding: 5px 12px;
+  font-size: 12px;
+}
+
+/* 宽图表在窄屏上横向滑动 */
+.fitness-bi-chart-scroll {
+  width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+}
+
+@media (max-width: 768px) {
+  .fitness-bi-chart-scroll .fitness-bi-chart {
+    min-width: 560px;
+  }
+
+  .fitness-bi-watch-tabs {
+    padding: 0 14px 10px;
   }
 }

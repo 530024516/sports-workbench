@@ -99,15 +99,15 @@ function createEnv({ isAdmin = false, password = 'secret-pw' } = {}) {
   /* 构造待测按钮：写操作 + 读操作混在一起 */
   const buttons = [
     { id: 'btnSave', attrs: { onclick: 'saveRecord()' } },
-    { id: 'btnDelete', attrs: { onclick: "deleteStudent('S1')" } },
+    { id: 'btnDelete', attrs: { onclick: "deleteRecord('F1')" } },
     { id: 'btnGenerate', attrs: { onclick: 'generateWholeUnit()' } },
-    { id: 'btnOpenAdd', attrs: { onclick: 'openAddStudent()' } },
+    { id: 'btnOpenAdd', attrs: { onclick: 'openAddRecord()' } },
     { id: 'btnPurge', attrs: { onclick: 'requestFitnessPurge()' } },
     { id: 'btnEditRow', attrs: { onclick: 'OfflineResources.edit("R1")' } },
     { id: 'btnTagged', attrs: { onclick: 'someCustomWrite()', 'data-admin-only': '' } },
     { id: 'btnExport', attrs: { onclick: 'exportRankingCsv()' } },
     { id: 'btnPrint', attrs: { onclick: 'printUnitPlan()' } },
-    { id: 'btnView', attrs: { onclick: 'viewStudent("S1")' } },
+    { id: 'btnView', attrs: { onclick: 'openFitnessDayDetail("2026-05-01")' } },
     { id: 'btnSwitch', attrs: { onclick: "switchView('stats')" } },
     { id: 'btnDownload', attrs: { onclick: 'downloadTemplate()' } },
   ].map(item => {

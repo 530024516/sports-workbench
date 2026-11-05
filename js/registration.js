@@ -1074,17 +1074,17 @@ function downloadRegistrationTemplate() {
 
 /* ---------------- 全校报名总览看板 ---------------- */
 
-/** 学生库里的全校班级名（如“五年级1班”） */
+/** 全校班级名（如“五年级1班”）：来自体测记录派生的名册（已无独立的学生信息模块） */
 function getSchoolClassNames() {
   const names = new Set();
-  const students = Store.read('pe_students', []) || [];
-  if (Array.isArray(students)) {
-    students.forEach(student => {
-      if (!student) return;
-      const full = `${String(student.grade ?? '').trim()}${String(student.class ?? '').trim()}`;
-      if (full.trim()) names.add(full);
-    });
-  }
+  const roster = typeof DB !== 'undefined' && typeof DB.getFitnessStudents === 'function'
+    ? DB.getFitnessStudents()
+    : [];
+  roster.forEach(student => {
+    if (!student) return;
+    const full = `${String(student.grade ?? '').trim()}${String(student.class ?? '').trim()}`;
+    if (full.trim()) names.add(full);
+  });
   return [...names].sort((a, b) => a.localeCompare(b, 'zh-CN', { numeric: true }));
 }
 

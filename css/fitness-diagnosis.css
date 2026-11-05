@@ -1,0 +1,611 @@
+/* ==========================================================================
+ * 体测 · 个人成绩诊断报告
+ * 浅色圆角卡片，像一份专业医院的"体检报告"：
+ *   · 弱项标红（未达标）/ 橙（拖后腿），提分项标绿
+ *   · BMI 体型风险用橙色警告框，提分预测用浅蓝卡片
+ * ========================================================================== */
+
+/* ---------- 成绩册里的姓名：变成可点的链接 ---------- */
+.fitness-gb-name-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-weight: 700;
+  color: var(--primary);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+  text-decoration-color: rgba(3, 83, 164, 0.35);
+  transition: color 0.15s ease;
+}
+
+.fitness-gb-name-link:hover {
+  color: #1d4ed8;
+  text-decoration-color: currentColor;
+}
+
+/* ---------- 弹窗外壳 ---------- */
+.fitness-dx-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, 0.45);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.25s ease, visibility 0.25s ease;
+}
+
+.fitness-dx-overlay.show {
+  opacity: 1;
+  visibility: visible;
+}
+
+.fitness-dx-modal {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 760px;
+  max-height: 92vh;
+  background: #f8fafc;
+  border-radius: 20px;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.28);
+  overflow: hidden;
+  transform: translateY(12px) scale(0.98);
+  transition: transform 0.25s ease;
+}
+
+.fitness-dx-overlay.show .fitness-dx-modal {
+  transform: translateY(0) scale(1);
+}
+
+/* ---------- 弹窗头部 ---------- */
+.fitness-dx-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 22px;
+  background: linear-gradient(135deg, #ffffff 0%, #eff6ff 100%);
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.fitness-dx-modal-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.fitness-dx-modal-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  font-size: 20px;
+  background: #dbeafe;
+  border-radius: 12px;
+}
+
+.fitness-dx-modal-title h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.fitness-dx-modal-title p {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.fitness-dx-close {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  font-size: 22px;
+  line-height: 1;
+  color: #64748b;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.fitness-dx-close:hover {
+  color: #0f172a;
+  border-color: #cbd5e1;
+  background: #f1f5f9;
+}
+
+/* ---------- 弹窗正文 ---------- */
+.fitness-dx-modal-body {
+  flex: 1;
+  min-height: 0;
+  padding: 18px 22px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ---------- 报告主体 ---------- */
+.fitness-dx-report {
+  padding: 18px;
+  background: #ffffff;
+  border: 1px solid #e8eef6;
+  border-radius: 18px;
+  box-shadow: 0 2px 10px rgba(15, 23, 42, 0.04);
+}
+
+/* ---------- ① 头部信息区 ---------- */
+.fitness-dx-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 16px;
+  background: linear-gradient(135deg, #eff6ff 0%, #f0fdfa 100%);
+  border: 1px solid #dbeafe;
+  border-radius: 16px;
+}
+
+.fitness-dx-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 56px;
+  height: 56px;
+  font-size: 24px;
+  font-weight: 700;
+  color: #ffffff;
+  background: linear-gradient(135deg, #0353a4 0%, #4aa8f0 100%);
+  border-radius: 18px;
+  box-shadow: 0 6px 14px rgba(3, 83, 164, 0.25);
+}
+
+.fitness-dx-head-main {
+  flex: 1;
+  min-width: 140px;
+}
+
+.fitness-dx-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fitness-dx-name {
+  font-size: 20px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.fitness-dx-meta {
+  margin-top: 4px;
+  font-size: 13px;
+  color: #64748b;
+}
+
+.fitness-dx-head-metrics {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.fitness-dx-metric {
+  min-width: 82px;
+  padding: 8px 12px;
+  text-align: center;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+}
+
+.fitness-dx-metric span {
+  display: block;
+  font-size: 11px;
+  color: #64748b;
+}
+
+.fitness-dx-metric b {
+  display: block;
+  margin-top: 2px;
+  font-size: 18px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.fitness-dx-bmi-tag {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 7px;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 600;
+  border-radius: 999px;
+  vertical-align: middle;
+}
+
+.fitness-dx-bmi-tag.is-ok {
+  color: #047857;
+  background: #d1fae5;
+}
+
+.fitness-dx-bmi-tag.is-risk {
+  color: #b45309;
+  background: #fef3c7;
+}
+
+/* ---------- 通用区块 ---------- */
+.fitness-dx-section {
+  margin-top: 16px;
+  padding: 14px 16px;
+  background: #ffffff;
+  border: 1px solid #e8eef6;
+  border-radius: 16px;
+}
+
+.fitness-dx-section h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 700;
+  color: #334155;
+}
+
+.fitness-dx-empty {
+  margin: 0;
+  padding: 14px;
+  font-size: 13px;
+  color: #047857;
+  text-align: center;
+  background: #f0fdf4;
+  border: 1px dashed #86efac;
+  border-radius: 12px;
+}
+
+/* ---------- ② 弱项卡片 ---------- */
+.fitness-dx-weak-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 10px;
+}
+
+.fitness-dx-weak {
+  padding: 12px 14px;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-left: 4px solid #f97316;
+  border-radius: 12px;
+}
+
+.fitness-dx-weak.is-fail {
+  background: #fef2f2;
+  border-color: #fecaca;
+  border-left-color: #dc2626;
+}
+
+.fitness-dx-weak-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.fitness-dx-weak-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: #1f2937;
+}
+
+.fitness-dx-weak-tag {
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #b45309;
+  background: #ffedd5;
+  border-radius: 999px;
+}
+
+.fitness-dx-weak.is-fail .fitness-dx-weak-tag {
+  color: #b91c1c;
+  background: #fee2e2;
+}
+
+.fitness-dx-weak-score {
+  margin-top: 6px;
+  font-size: 13px;
+  color: #475569;
+}
+
+.fitness-dx-weak-score b {
+  color: #0f172a;
+}
+
+.fitness-dx-weak-meta {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.fitness-dx-weak-meta b {
+  color: #334155;
+}
+
+.fitness-dx-weak-meta .is-gain {
+  color: #16a34a;
+  font-weight: 700;
+}
+
+/* ---------- ③ 体型风险（橙色警告框） ---------- */
+.fitness-dx-section.is-risk {
+  background: #fffbf5;
+  border-color: #fed7aa;
+}
+
+.fitness-dx-risk-box {
+  padding: 12px 14px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #7c2d12;
+  background: #fff7ed;
+  border: 1px solid #fdba74;
+  border-radius: 12px;
+}
+
+.fitness-dx-risk-box b {
+  color: #9a3412;
+}
+
+.fitness-dx-risk-advice {
+  display: block;
+  margin-top: 6px;
+  padding-top: 6px;
+  font-size: 12px;
+  color: #9a3412;
+  border-top: 1px dashed #fdba74;
+}
+
+/* ---------- ④ 提分预测（浅蓝卡片） ---------- */
+.fitness-dx-section.is-predict {
+  background: #f5faff;
+  border-color: #bfdbfe;
+}
+
+.fitness-dx-predict-box {
+  padding: 12px 14px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #1e3a8a;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 12px;
+}
+
+.fitness-dx-predict-box b {
+  color: #1d4ed8;
+}
+
+.fitness-dx-predict-box .is-gain {
+  color: #16a34a;
+}
+
+/* ---------- ⑤ 训练处方 ---------- */
+.fitness-dx-rx {
+  padding: 12px 14px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+}
+
+.fitness-dx-rx + .fitness-dx-rx {
+  margin-top: 10px;
+}
+
+.fitness-dx-rx-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.fitness-dx-rx-head strong {
+  font-size: 14px;
+  color: #1e293b;
+}
+
+.fitness-dx-rx-score {
+  padding: 2px 8px;
+  font-size: 11px;
+  color: #b91c1c;
+  background: #fee2e2;
+  border-radius: 999px;
+}
+
+.fitness-dx-rx-summary {
+  margin: 6px 0 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #64748b;
+}
+
+.fitness-dx-rx-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+
+.fitness-dx-rx-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 7px 10px;
+  font-size: 12.5px;
+  color: #475569;
+  background: #ffffff;
+  border: 1px solid #eef2f7;
+  border-radius: 10px;
+}
+
+.fitness-dx-rx-list li b {
+  flex: none;
+  color: #0353a4;
+}
+
+/* ---------- 底部按钮 ---------- */
+.fitness-dx-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 14px 22px;
+  background: #ffffff;
+  border-top: 1px solid #e2e8f0;
+}
+
+.fitness-dx-actions .btn-ghost {
+  margin-left: auto;
+  color: #64748b;
+  background: transparent;
+  border: 1px solid #e2e8f0;
+}
+
+.fitness-dx-actions .btn-ghost:hover {
+  color: #0f172a;
+  background: #f1f5f9;
+}
+
+/* ---------- 窄屏适配 ---------- */
+@media (max-width: 768px) {
+  .fitness-dx-overlay {
+    align-items: flex-end;
+    padding: 0;
+  }
+
+  .fitness-dx-modal {
+    max-width: 100%;
+    max-height: 94vh;
+    border-radius: 18px 18px 0 0;
+  }
+
+  .fitness-dx-modal-head,
+  .fitness-dx-modal-body,
+  .fitness-dx-actions {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+
+  .fitness-dx-report {
+    padding: 14px;
+  }
+
+  .fitness-dx-head {
+    gap: 12px;
+    padding: 14px;
+  }
+
+  .fitness-dx-avatar {
+    width: 46px;
+    height: 46px;
+    font-size: 20px;
+    border-radius: 14px;
+  }
+
+  .fitness-dx-name {
+    font-size: 18px;
+  }
+
+  .fitness-dx-head-metrics {
+    width: 100%;
+  }
+
+  .fitness-dx-metric {
+    flex: 1;
+    min-width: 0;
+    padding: 8px 6px;
+  }
+
+  .fitness-dx-weak-list {
+    grid-template-columns: 1fr;
+  }
+
+  .fitness-dx-actions .btn {
+    flex: 1 1 auto;
+  }
+
+  .fitness-dx-actions .btn-ghost {
+    margin-left: 0;
+  }
+}
+
+/* ---------- 打印区（平时藏在屏幕外，打印时才用） ---------- */
+.fitness-dx-print-frame {
+  position: fixed;
+  left: -12000px;
+  top: 0;
+  width: 794px;          /* A4 纵向 @ 96dpi */
+  height: 1123px;
+  border: 0;
+  visibility: hidden;
+}
+
+/* ---------- 打印：只打印诊断单本身 ---------- */
+@media print {
+  /* ① 主页面：整个工作台（侧边栏 / 顶栏 / 内容区）全部藏掉 */
+  #app,
+  .toast-container {
+    display: none !important;
+  }
+
+  /* ② 弹窗铺满整页打印（兜底：万一直接 Ctrl+P，也只出诊断单） */
+  .fitness-dx-overlay {
+    position: static !important;
+    display: block !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    padding: 0 !important;
+    background: none !important;
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+
+  .fitness-dx-modal {
+    width: 100% !important;
+    max-width: none !important;
+    max-height: none !important;
+    overflow: visible !important;
+    background: #fff !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    transform: none !important;
+  }
+
+  /* ③ 打印件里不要出现按钮和弹窗标题栏 */
+  .fitness-dx-modal-head,
+  .fitness-dx-actions {
+    display: none !important;
+  }
+
+  .fitness-dx-modal-body {
+    padding: 0 !important;
+    overflow: visible !important;
+  }
+
+  .fitness-dx-report {
+    border: 0 !important;
+    box-shadow: none !important;
+  }
+}

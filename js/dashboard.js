@@ -38,7 +38,8 @@ function getWeekDates() {
 }
 
 // ===== 数据（云端数据就绪后会重新拉取并重绘，见文件末尾）=====
-let students = DB.getStudents();
+// 学生名册由体测记录派生（不再有独立的学生信息模块）
+let students = DB.getFitnessStudents();
 let fitnessRecords = DB.getFitnessRecords();
 let lessonPlans = DB.getLessonPlans();
 const weekDates = getWeekDates();
@@ -53,7 +54,7 @@ let currentWeekMode = DB.getWeekMode();
 
 /** 重新从 DB 取数（Store 就绪 / 云端同步完成后调用） */
 function refreshDashboardData() {
-  students = DB.getStudents();
+  students = DB.getFitnessStudents();
   fitnessRecords = DB.getFitnessRecords();
   lessonPlans = DB.getLessonPlans();
   pendingLessons = lessonPlans.filter(p => p.status === '待上课');
@@ -95,11 +96,11 @@ content.innerHTML = `
 
   <!-- 统计卡片 -->
   <div class="grid grid-4" style="margin-bottom:24px;">
-    <div class="stat-card fade-in fade-in-delay-1" style="cursor:pointer;" onclick="location.href='students.html'">
+    <div class="stat-card fade-in fade-in-delay-1" style="cursor:pointer;" onclick="location.href='fitness.html'">
       <div class="stat-icon" style="background:var(--primary-100);color:var(--primary);">👥</div>
       <div class="stat-content">
         <h3 id="statStudents">${students.length}</h3>
-        <p>在校学生总数</p>
+        <p>体测学生人数</p>
       </div>
     </div>
     <div class="stat-card fade-in fade-in-delay-2" style="cursor:pointer;" onclick="location.href='fitness.html'">
@@ -494,7 +495,7 @@ function renderCharts() {
   fitnessRecords.forEach(r => {
     const student = students.find(s => s.id === r.studentId);
     if (!student) return;
-    const g = DB.getGrade(r.value, r.testType, student.gender);
+    const g = DB.getGrade(r.value, r.testType, r.gender || student.gender, r.grade || student.grade);
     if (gradeCounts[g.level] !== undefined) gradeCounts[g.level]++;
   });
 

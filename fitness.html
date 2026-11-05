@@ -5,16 +5,27 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>体育教师工作台 - 体测数据</title>
   <link rel="stylesheet" href="css/style.css">
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="css/fitness-diagnosis.css">
+  <!-- 体测模块现在只用 ECharts（看板 / 弱项分布图）+ XLSX（导入导出），不再需要 Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 </head>
 <body>
   <div id="app"></div>
+  <!-- 个人成绩诊断单打印区：平时藏在屏幕外，点「打印」时把内容写进来再调它的 print() -->
+  <iframe id="fitnessDiagnosisPrintFrame" class="fitness-dx-print-frame" title="个人成绩诊断报告打印区" aria-hidden="true"></iframe>
+  <!-- 页面打印区：把「成绩列表 / 统计分析看板 / 成绩排名」的内容拼成干净 HTML 写进来再打印 -->
+  <iframe id="fitnessPrintFrame" class="fitness-print-frame" title="体测页面打印区" aria-hidden="true"></iframe>
   <script src="js/auth.js"></script>
   <script src="js/store.js"></script>
   <script src="js/data.js"></script>
   <script src="js/layout.js"></script>
+  <script src="js/fitness-gradebook.js"></script>
+  <script src="js/fitness-diagnosis.js"></script>
+  <script src="js/fitness-print.js"></script>
   <script src="js/fitness.js"></script>
   <script src="js/fitness-ranking.js"></script>
+  <script src="js/fitness-import.js"></script>
+  <script src="js/fitness-dashboard.js"></script>
 </body>
 </html>

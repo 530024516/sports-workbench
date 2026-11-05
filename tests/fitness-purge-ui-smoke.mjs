@@ -72,7 +72,7 @@ function createEnv() {
   const toasts = [];
   const modals = [];
   const clearCalls = [];
-  let storeData = { pe_students: STUDENTS, pe_fitness_records: RECORDS };
+  let storeData = { pe_fitness_records: RECORDS };
 
   const context = vm.createContext({
     document: documentStub,
@@ -82,7 +82,22 @@ function createEnv() {
     Layout: { init() {} },
     DB: {
       FITNESS_ITEMS: [{ key: 'run50', name: '50米跑', unit: '秒', icon: '🏃' }],
-      getStudents: () => STUDENTS,
+      // 名册由体测记录派生（系统里已无独立的学生名单）
+      getFitnessStudents: () => {
+        const map = new Map();
+        storeData.pe_fitness_records.forEach(record => {
+          const id = String(record.studentId || '');
+          if (!id || map.has(id)) return;
+          map.set(id, {
+            id,
+            name: record.studentName || '',
+            gender: record.gender || '',
+            grade: record.grade || '',
+            class: record.class || '',
+          });
+        });
+        return [...map.values()];
+      },
       getFitnessRecords: () => storeData.pe_fitness_records,
       getGrade: () => ({ level: '及格', class: 'pass' }),
       getFitnessScore: () => null,
@@ -98,6 +113,11 @@ function createEnv() {
       },
     },
     showToast: (message, type = 'success') => toasts.push({ message, type }),
+    // 成绩册在另一个文件里（这个用例只关心"清空"流程），给个最小替身即可
+    FITNESS_GRADEBOOK_STATE: { grade: 'all', className: 'all', search: '', sort: 'desc' },
+    renderFitnessGradebookTable: () => '',
+    fitnessGradebookBuild: () => ({ state: {}, students: [], rows: [], columns: [] }),
+    updateFitnessWeakChart: () => {},
     showModal: (title, bodyHTML, footerHTML = '', overlayClass = '') => {
       modals.push({ title, bodyHTML, footerHTML, overlayClass });
       return makeNode('overlay');
@@ -132,7 +152,7 @@ await test('② 点按钮弹出确认框：写清清什么 / 不清什么，并�
   const modal = env.modals[0];
   assert(modal.bodyHTML.includes('DELETE'), '确认框必须要求输入 DELETE');
   assert(modal.bodyHTML.includes('2'), '确认框要显示将要删除的记录条数');
-  assert(modal.bodyHTML.includes('学生名单'), '确认框要说明"学生名单不受影响"');
+  assert(modal.bodyHTML.includes('教案'), '确认框要说明其它数据（教案等）不受影响');
   assert(modal.footerHTML.includes('confirmFitnessPurge'), '确认按钮必须走二次确认');
 });
 

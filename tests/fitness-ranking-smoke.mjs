@@ -49,6 +49,7 @@ function record(studentId, testType, value, testDate = '2026-05-01') {
     id: `F-${studentId}-${testType}-${testDate}`,
     studentId,
     studentName: student.name,
+    gender: student.gender,
     grade: student.grade,
     class: student.class,
     testType,
@@ -104,7 +105,8 @@ function createEnv(records = RECORDS) {
     createElement: () => makeNode('tmp'),
     body: null,
   };
-  const storeData = { pe_students: STUDENTS, pe_fitness_records: records };
+  // ⚠️ 刻意【不】放 pe_students：排名只认体测记录自带的姓名/性别/年级/班级
+  const storeData = { pe_fitness_records: records };
   const toasts = [];
   const context = vm.createContext({
     document: documentStub,
@@ -134,7 +136,7 @@ function createEnv(records = RECORDS) {
   new vm.Script(`globalThis.__api = {
     direction: (type, name, unit) => fitnessTestDirection(type, name, unit),
     rows: (students, testType) => rankingBuildRows(rankingLatestRecords(students, testType)),
-    students: () => DB.getStudents(),
+    students: () => DB.getFitnessStudents(),
     records: () => DB.getFitnessRecords(),
     applies: (item, grade) => rankingItemAppliesToGrade(item, grade),
     available: () => rankingAvailableItems(),

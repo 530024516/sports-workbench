@@ -66,9 +66,12 @@ function rankingItemByKey(key) {
 
 /* ======================= 数据读取 ======================= */
 
-/** 当前筛选范围内的学生（不含班级） */
+/**
+ * 当前筛选范围内的学生（不含班级）
+ * 名册来自体测记录派生（DB.getFitnessStudents），不依赖任何独立的学生名单表
+ */
 function rankingStudentsByGrade() {
-  return DB.getStudents().filter(student =>
+  return DB.getFitnessStudents().filter(student =>
     (RANKING_STATE.grade === 'all' || student.grade === RANKING_STATE.grade) &&
     (RANKING_STATE.gender === 'all' || student.gender === RANKING_STATE.gender));
 }
@@ -100,7 +103,7 @@ function rankingLatestRecords(students, testType) {
 
 /** 把记录变成可排名的行（含等级、国标分、进度比例、名次） */
 function rankingBuildRows(records) {
-  const studentById = new Map(DB.getStudents().map(student => [student.id, student]));
+  const studentById = new Map(DB.getFitnessStudents().map(student => [student.id, student]));
   const rows = records.map(record => {
     const student = studentById.get(record.studentId);
     if (!student) return null;
@@ -112,8 +115,11 @@ function rankingBuildRows(records) {
       record.testName || item?.name || '',
       record.unit || item?.unit || '',
     );
-    const grade = DB.getGrade(value, record.testType, student.gender, student.grade);
-    const score = DB.getFitnessScore(value, record.testType, student.gender, student.grade);
+    // 性别 / 年级以记录自带的为准，名册只是兜底（缺性别时按未识别处理，不参与国标算分）
+    const gender = record.gender || student.gender || '';
+    const gradeName = record.grade || student.grade || '';
+    const grade = DB.getGrade(value, record.testType, gender, gradeName);
+    const score = DB.getFitnessScore(value, record.testType, gender, gradeName);
     return {
       record,
       student,
@@ -259,6 +265,8 @@ function renderRankingView() {
         <select class="form-control" id="rankingItemFilter" aria-label="按项目筛选" onchange="onRankingItemChange()">
           <option value="all">全部项目</option>
         </select>
+        <button class="btn btn-success btn-sm" type="button" onclick="printFitnessPage('ranking')"
+          title="把当前排名打印成 A4 横向表格">🖨️ 打印当前页面</button>
       </div>
     `;
   }
@@ -371,17 +379,33 @@ function renderRankingClassBoard() {
   `;
 }
 
+/**
+ * 学生副标题：显示「年级班级」（如 一年级2班）；没有班级就退而显示性别；
+ * 都没有就返回空字符串（调用方据此不渲染副标题）。
+ *
+ * ⚠️ 绝对不要显示 student.id！
+ *    那是 makeFitnessStudentId() 算出来的【内部主键】——「姓名+班级+年级」的哈希，
+ *    长得像 H0mr09js02y1b0y... 这种乱码，漏到界面上既难看又没有任何意义
+ *    （它既不是学号，也不是记录 id）。
+ */
+function rankingStudentSubtext(student) {
+  const classText = `${student?.grade || ''}${student?.class || ''}`.trim();
+  if (classText) return classText;
+  return String(student?.gender || '').trim();
+}
+
 function rankingRowHTML(row) {
   const medal = row.rank === 1 ? '🥇' : row.rank === 2 ? '🥈' : row.rank === 3 ? '🥉' : '';
   const color = row.rank === 1 ? '#F5B301' : row.rank === 2 ? '#9AA5B1' : row.rank === 3 ? '#C08457' : 'var(--primary)';
   const percent = Math.round(row.ratio * 100);
   const scoreText = row.score === null ? '—' : `${row.score}${row.bonus ? `+${row.bonus}` : ''} 分`;
+  const subtext = rankingStudentSubtext(row.student);
   return `
     <tr class="${row.rank <= 3 ? 'ranking-top-row' : ''}">
       <td class="ranking-rank"><span class="ranking-rank-medal">${medal}</span>${row.rank}</td>
       <td>
         <strong>${escapeFitnessHTML(row.student.name)}</strong>
-        <span class="fitness-record-subtext">${escapeFitnessHTML(row.student.id)} · ${escapeFitnessHTML(row.student.grade)}${escapeFitnessHTML(row.student.class)}</span>
+        ${subtext ? `<span class="fitness-record-subtext">${escapeFitnessHTML(subtext)}</span>` : ''}
       </td>
       <td><strong style="color:var(--primary);font-size:15px;">${escapeFitnessHTML(row.value)}</strong> ${escapeFitnessHTML(row.unit)}</td>
       <td>
@@ -587,7 +611,9 @@ function rankingExportRows() {
   const header = ['名次', '学号', '姓名', '性别', '年级', '班级', '项目', '成绩', '单位', '等级', '国标分', '测试日期'];
   const body = rows.map(row => [
     row.rank,
-    row.student.id,
+    // ⚠️ 系统没有真学号：student.id 是「姓名+班级+年级」算出来的内部哈希 id，
+    //    导出成"学号"就是把一串乱码发给家长/领导看。留空（'-'）最诚实。
+    '-',
     row.student.name,
     row.student.gender,
     row.student.grade,

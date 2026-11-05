@@ -271,12 +271,12 @@ const Auth = {
     'requestMeetPurge', 'resetFitnessForm', 'handleToggleTodo', 'toggleLessonFavorite',
     'OfflineResources.wbSave', 'OfflineResources.dismissImport', 'OfflineResources.openWorkbench',
     'Layout.saveDisplaySettings', 'saveDisplaySettings', 'commitImport', 'deleteSelectedAthletes',
-    'deleteSelectedStudents', 'clearAllRegistrations', 'removeManagedMeetEvent', 'removeLocalKey',
+    'clearAllRegistrations', 'removeManagedMeetEvent', 'removeLocalKey',
   ]),
 
   /** 这些动作用来"读"，任何情况下都不隐藏（万一被关键词误伤，以这条为准） */
   PUBLIC_ACTIONS: new Set([
-    'viewStudent', 'viewLesson', 'closeModal', 'switchView', 'switchWeekMode', 'changePage',
+    'viewLesson', 'closeModal', 'switchView', 'switchWeekMode', 'changePage',
     'downloadTemplate', 'downloadStudentImportTemplate', 'downloadRegistrationTemplate',
     'exportUnitWord', 'exportScheduleWord', 'exportResultsBook', 'exportTeamAwards',
     'exportAwardList', 'exportSelectedStudents', 'exportRegistrationTemplateExcel',
@@ -310,7 +310,7 @@ const Auth = {
     if (/^(save|delete|remove|clear|purge|generate|regenerate|revoke|commit|submit|create|import|upload|add|edit|reset|sync|restore|confirm|handleAdd|handleDelete|handleSave|handleToggle|toggleLessonFavorite)/i.test(base)) {
       return true;
     }
-    // ② open* 里带写意图的（openAddStudent / openEditStudent / openBatchImport …）
+    // ② open* 里带写意图的（openAddRecord / openEditRecord / openBatchImport …）
     if (/^open/i.test(base) && /(add|edit|batch|quick|import|upload|manual|ai|generation|workbench|create)/i.test(base)) {
       return true;
     }

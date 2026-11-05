@@ -126,6 +126,8 @@ const DB = {
       this._migrateSchedule();
       this._migrateTodos();
       this._migrateLessonResources();
+      // 体测记录去学生化：补 gender、换成哈希 studentId（幂等，只在第一次真正写入）
+      this.migrateFitnessRecords();
     });
   },
 
@@ -201,63 +203,29 @@ const DB = {
     Store.write(key, data, options);
   },
 
-  // ===== 学生管理 =====
-  getStudents() {
-    return this.get(this.KEYS.STUDENTS);
-  },
+  // ===== 体测数据（自带姓名 / 性别 / 年级 / 班级，不再依赖任何学生名单）=====
 
-  saveStudents(list, options = {}) {
-    const ids = new Set();
-    list.forEach(student => {
-      const id = String(student.id ?? '').trim();
-      if (!id) throw new Error('学生学号不能为空');
-      if (ids.has(id)) throw new Error(`学号 ${id} 重复，未保存学生名单`);
-      ids.add(id);
-    });
-    this.set(this.KEYS.STUDENTS, list, options);
-  },
-
-  addStudent(student) {
-    const list = this.getStudents();
-    student.id = String(student.id || `S${Date.now()}`).trim();
-    if (list.some(existing => String(existing.id) === student.id)) {
-      throw new Error(`学号 ${student.id} 已存在`);
+  /**
+   * 由「姓名 + 班级 + 年级」算出一个稳定的体测学生 id。
+   * 同一个学生在多条记录里共用同一个 id，才能分组统计；
+   * 不同学校、不同班同名也不会撞（前缀 H 与旧学号 S 天然区分）。
+   */
+  makeFitnessStudentId(student = {}) {
+    const source = [
+      String(student.name ?? student.studentName ?? '').trim(),
+      String(student.class ?? student.className ?? '').trim(),
+      String(student.grade ?? '').trim(),
+    ].join('|');
+    let h1 = 0x811c9dc5;
+    let h2 = 0x01000193;
+    for (let i = 0; i < source.length; i += 1) {
+      const code = source.charCodeAt(i);
+      h1 = Math.imul(h1 ^ code, 16777619) >>> 0;
+      h2 = Math.imul(h2 ^ code, 2246822519) >>> 0;
     }
-    student.createdAt = student.createdAt || new Date().toISOString();
-    list.push(student);
-    this.saveStudents(list);
-    return student;
+    return `H${h1.toString(36).padStart(7, '0')}${h2.toString(36).padStart(7, '0')}`;
   },
 
-  updateStudent(id, updates) {
-    const list = this.getStudents();
-    const idx = list.findIndex(s => s.id === id);
-    if (idx >= 0) {
-      const nextId = String(updates.id ?? id).trim();
-      if (list.some((student, index) => index !== idx && String(student.id) === nextId)) {
-        throw new Error(`学号 ${nextId} 已存在`);
-      }
-      list[idx] = { ...list[idx], ...updates, id: nextId };
-      this.saveStudents(list);
-      return list[idx];
-    }
-    return null;
-  },
-
-  deleteStudent(id) {
-    const list = this.getStudents().filter(s => s.id !== id);
-    // 删光了就明确告诉 Store"这是用户亲手清空"（否则云端那份会一直留着旧名单）
-    this.saveStudents(list, { clearIntent: list.length === 0 });
-    // 同时删除该学生的体测记录
-    const records = this.getFitnessRecords().filter(r => r.studentId !== id);
-    this.set(this.KEYS.FITNESS_RECORDS, records, { clearIntent: records.length === 0 });
-  },
-
-  getStudentById(id) {
-    return this.getStudents().find(s => s.id === id);
-  },
-
-  // ===== 体测数据 =====
   getFitnessRecords() {
     return this.get(this.KEYS.FITNESS_RECORDS);
   },
@@ -308,6 +276,95 @@ const DB = {
 
   getRecordsByTestType(testType) {
     return this.getFitnessRecords().filter(r => r.testType === testType);
+  },
+
+  /**
+   * 【体测学生名单】—— 从体测记录里派生出来的，
+   * 这是整个工作台唯一的"学生名册"来源（不再有独立的学生信息表）。
+   * 返回：[{ id, name, gender, grade, class }]
+   */
+  getFitnessStudents() {
+    const map = new Map();
+    this.getFitnessRecords().forEach(record => {
+      const id = String(record?.studentId ?? '').trim();
+      if (!id) return;
+      const existing = map.get(id);
+      if (existing) {
+        existing.name = existing.name || record.studentName || record.name || '';
+        existing.gender = existing.gender || record.gender || '';
+        existing.grade = existing.grade || record.grade || '';
+        existing.class = existing.class || record.class || '';
+        return;
+      }
+      map.set(id, {
+        id,
+        name: record.studentName || record.name || '',
+        gender: record.gender || '',
+        grade: record.grade || '',
+        class: record.class || '',
+      });
+    });
+    return [...map.values()];
+  },
+
+  getFitnessStudentById(id) {
+    return this.getFitnessStudents().find(student => student.id === id) || null;
+  },
+
+  /** 已知班级字典（运动会报名 / 筛选下拉都用它）：[{ grade, class }] */
+  getFitnessClasses() {
+    const seen = new Map();
+    this.getFitnessRecords().forEach(record => {
+      const grade = String(record?.grade ?? '').trim();
+      const className = String(record?.class ?? '').trim();
+      if (!grade && !className) return;
+      const key = `${grade}|${className}`;
+      if (!seen.has(key)) seen.set(key, { grade, class: className });
+    });
+    return [...seen.values()].sort((a, b) =>
+      String(a.grade).localeCompare(String(b.grade), 'zh-CN', { numeric: true })
+      || String(a.class).localeCompare(String(b.class), 'zh-CN', { numeric: true }));
+  },
+
+  /**
+   * 一次性迁移：把老数据（studentId 指向旧学生名单、且没有 gender）改成新体系。
+   *   · studentId → 由「姓名+班级+年级」算出的哈希 id
+   *   · gender   → 优先用记录自带，其次从旧名单回填（回填完就不再依赖旧名单）
+   * 幂等：已经是新体系的记录不会被改动。
+   */
+  migrateFitnessRecords() {
+    const records = this.getFitnessRecords();
+    if (!records.length) return { changed: false, updated: 0 };
+    let legacy = [];
+    try {
+      legacy = this.get(this.KEYS.STUDENTS) || [];
+    } catch (error) {
+      legacy = [];
+    }
+    const legacyById = new Map(legacy.map(student => [String(student.id ?? ''), student]));
+
+    let changed = false;
+    const next = records.map(record => {
+      const name = String(record.studentName || record.name || '').trim();
+      const grade = String(record.grade ?? '').trim();
+      const className = String(record.class ?? '').trim();
+      if (!name) return record;                       // 没有姓名就保持原样，不乱合并
+      const gender = record.gender || legacyById.get(String(record.studentId ?? ''))?.gender || '';
+      const studentId = this.makeFitnessStudentId({ name, grade, class: className });
+      if (studentId === record.studentId && gender === record.gender) return record;
+      changed = true;
+      return {
+        ...record,
+        studentId,
+        studentName: name,
+        gender,
+        grade,
+        class: className,
+      };
+    });
+
+    if (changed) this.saveFitnessRecords(next);
+    return { changed, updated: next.length };
   },
 
   // ===== 教案 =====
@@ -478,6 +535,22 @@ const DB = {
     return testType === 'run50x8' && gradeIndex >= 4;
   },
 
+  /**
+   * 该年级的【国标总分权重】：各项得分 × 权重 = 总分，权重合计为 1。
+   * 例：一年级 { BMI:0.15, vitalCapacity:0.15, run50:0.20, sitReach:0.30, jumpRope:0.20 }
+   * 成绩册算总分、导出打印都要用这一份权重，不能另写一套。
+   */
+  getAnnualFitnessWeights(grade) {
+    const gradeIndex = fitnessGradeIndex(grade);
+    if (gradeIndex < 0) return null;
+    return { ...FITNESS_ANNUAL_WEIGHTS[gradeIndex] };
+  },
+
+  /** 年级在国标里的序号（0=一年级 … 5=六年级）；认不出来返回 -1 */
+  getFitnessGradeIndex(grade) {
+    return fitnessGradeIndex(grade);
+  },
+
   getFitnessScore(value, testType, gender, grade) {
     const numericValue = Number(value);
     const gradeIndex = fitnessGradeIndex(grade);
@@ -541,6 +614,23 @@ const DB = {
         latestByType.set(record.testType, record);
       }
     });
+    // BMI 在本系统里不是单独录入的（成绩模板里只有身高、体重），
+    // 所以没有 BMI 记录时，用同一周期的身高体重自动折算一个 ——
+    // 否则总分永远会缺 BMI 这一项，年度总评就算不出来。
+    if (!latestByType.has('BMI')) {
+      const height = latestByType.get('height');
+      const weight = latestByType.get('weight');
+      if (height && weight) {
+        const heightValue = Number(height.value);
+        const weightValue = Number(weight.value);
+        if (Number.isFinite(heightValue) && Number.isFinite(weightValue) && heightValue > 0) {
+          latestByType.set('BMI', {
+            testType: 'BMI',
+            value: weightValue / ((heightValue / 100) ** 2),
+          });
+        }
+      }
+    }
     const missingItems = Object.keys(weights).filter(testType =>
       !latestByType.has(testType) || !this.getFitnessScore(latestByType.get(testType).value, testType, gender, grade));
     if (missingItems.length) {

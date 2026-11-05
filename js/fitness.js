@@ -1,39 +1,34 @@
 /**
- * 学生体测数据模块
- * 成绩录入、统计分析、可视化看板
+ * 体测数据模块
+ * 成绩录入、成绩册、可视化看板、成绩排名
+ *
+ * ⚠️ 本模块【不再依赖任何学生名单表】：
+ *    每一条体测记录自带 姓名 / 性别 / 年级 / 班级，
+ *    学生名册由记录派生（DB.getFitnessStudents()），
+ *    导入 Excel 时直接读表里的信息，不存在"找不到学生"的错误。
  */
 
-let fitnessView = 'records'; // records | stats
+let fitnessView = 'records'; // records | dashboard | ranking
 let fitnessCharts = {};
-let statsGradeFilter = 'all';
-let statsGenderFilter = 'all';
-let statsClassFilter = 'all';
 
 Layout.init('fitness', '体测数据', '体测数据');
 
 const content = document.getElementById('page-content');
 
 const records = DB.getFitnessRecords();
-const students = DB.getStudents();
 
-// 统计摘要
+// 统计摘要（性别 / 年级都从记录自带字段取，不再反查任何名单）
 const totalRecords = records.length;
-const excellentCount = records.filter(r => {
-  const s = students.find(st => st.id === r.studentId);
-  if (!s) return false;
-  return DB.getGrade(r.value, r.testType, s.gender, s.grade).level === '优秀';
-}).length;
-const needAttention = records.filter(r => {
-  const s = students.find(st => st.id === r.studentId);
-  if (!s) return false;
-  return ['不及格', '偏胖'].includes(DB.getGrade(r.value, r.testType, s.gender, s.grade).level);
-}).length;
+const excellentCount = records.filter(r =>
+  DB.getGrade(r.value, r.testType, r.gender, r.grade).level === '优秀').length;
+const needAttention = records.filter(r =>
+  ['不及格', '偏胖', '肥胖'].includes(DB.getGrade(r.value, r.testType, r.gender, r.grade).level)).length;
 
 content.innerHTML = `
   <div class="page-header">
     <div>
       <h1>学生体测数据</h1>
-      <p>成绩录入、统计分析与可视化看板</p>
+      <p>成绩录入、成绩册、可视化看板与成绩排名</p>
     </div>
     <div style="display:flex;gap:8px;">
       <button data-admin-only class="btn btn-secondary" onclick="openBatchImport()">
@@ -46,7 +41,7 @@ content.innerHTML = `
         <span>📝</span> 录入成绩
       </button>
       <button data-admin-only class="btn btn-danger fitness-purge-btn" onclick="requestFitnessPurge()"
-        title="清空全部体测成绩记录（本地 + 云端），不影响学生名单、教案等其它数据">
+        title="清空全部体测成绩记录（本地 + 云端），不影响教案、课表等其它数据">
         <span>🗑️</span> 清空体测数据
       </button>
     </div>
@@ -82,7 +77,7 @@ content.innerHTML = `
     <div class="toolbar-left">
       <div class="segmented" id="viewSwitch">
         <button data-view="records" class="${fitnessView === 'records' ? 'active' : ''}" onclick="switchView('records')">成绩列表</button>
-        <button data-view="stats" class="${fitnessView === 'stats' ? 'active' : ''}" onclick="switchView('stats')">统计分析</button>
+        <button data-view="dashboard" class="${fitnessView === 'dashboard' ? 'active' : ''}" onclick="switchView('dashboard')">统计分析看板</button>
         <button data-view="ranking" class="${fitnessView === 'ranking' ? 'active' : ''}" onclick="switchView('ranking')">成绩排名</button>
       </div>
     </div>
@@ -100,15 +95,10 @@ Store.onReady(() => {
 
 function updateFitnessSummaryCards() {
   const latestRecords = DB.getFitnessRecords();
-  const studentsById = new Map(DB.getStudents().map(student => [student.id, student]));
-  const excellent = latestRecords.filter(record => {
-    const student = studentsById.get(record.studentId);
-    return student && DB.getGrade(record.value, record.testType, student.gender, student.grade).level === '优秀';
-  }).length;
-  const attention = latestRecords.filter(record => {
-    const student = studentsById.get(record.studentId);
-    return student && ['不及格', '偏胖', '肥胖'].includes(DB.getGrade(record.value, record.testType, student.gender, student.grade).level);
-  }).length;
+  const excellent = latestRecords.filter(record =>
+    DB.getGrade(record.value, record.testType, record.gender, record.grade).level === '优秀').length;
+  const attention = latestRecords.filter(record =>
+    ['不及格', '偏胖', '肥胖'].includes(DB.getGrade(record.value, record.testType, record.gender, record.grade).level)).length;
   document.getElementById('fitnessTotalRecords').textContent = latestRecords.length;
   document.getElementById('fitnessExcellentCount').textContent = excellent;
   document.getElementById('fitnessAttentionCount').textContent = attention;
@@ -116,6 +106,11 @@ function updateFitnessSummaryCards() {
 
 function refreshFitnessDataViews() {
   updateFitnessSummaryCards();
+  // 看板：只刷新数据（setOption 重绘），不重建图表实例，切换更顺滑
+  if (fitnessView === 'dashboard' && typeof updateFitnessDashboard === 'function') {
+    updateFitnessDashboard();
+    return;
+  }
   renderView();
 }
 
@@ -125,16 +120,24 @@ function switchView(view) {
   document.querySelectorAll('#viewSwitch button').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.view === view);
   });
+  // 离开看板时把 ECharts 实例释放掉（DOM 已经被换掉，留着只会占内存）
+  if (view !== 'dashboard' && typeof destroyFitnessDashboardCharts === 'function') {
+    destroyFitnessDashboardCharts();
+  }
+  // 成绩册上方的弱项分布图同理
+  if (view !== 'records' && typeof destroyFitnessWeakChart === 'function') {
+    destroyFitnessWeakChart();
+  }
   renderView();
 }
 
 function renderView() {
   if (fitnessView === 'records') {
-    renderRecordsView();
-  } else if (fitnessView === 'stats') {
-    renderStatsView();
+    renderRecordsView();                     // 成绩列表 / 成绩册（js/fitness-gradebook.js）
+  } else if (fitnessView === 'dashboard') {
+    renderFitnessDashboard();                // 统计分析看板（js/fitness-dashboard.js · ECharts）
   } else if (typeof renderRankingView === 'function') {
-    renderRankingView();          // 成绩排名（js/fitness-ranking.js）
+    renderRankingView();                     // 成绩排名（js/fitness-ranking.js）
   }
 }
 
@@ -145,7 +148,7 @@ let fitnessPurgePendingCount = 0;
 
 /**
  * 打开确认弹窗：必须手动输入 DELETE 才允许执行。
- * 弹窗里写清楚"清什么、不清什么"，避免老师以为会把学生名单一起删掉。
+ * 弹窗里写清楚"清什么、不清什么"，避免老师以为会把其它数据一起删掉。
  */
 function requestFitnessPurge() {
   fitnessPurgePendingCount = DB.getFitnessRecords().length;
@@ -157,7 +160,7 @@ function requestFitnessPurge() {
          <li><b>本地</b><span>内存缓存 + localStorage 镜像 + 保护锁 + 本地备份</span></li>
          <li><b>云端</b><span>Supabase 体测数据表（整表清空）</span></li>
        </ul>
-       <p class="fitness-purge-safe">✔ 只清体测数据：学生名单、教案、课表、考勤等其它数据一律不动。</p>
+       <p class="fitness-purge-safe">✔ 只清体测数据：教案、课表、考勤、运动会报名等其它数据一律不动。</p>
        <p>确定请手动输入 <code>DELETE</code> 后再点红色按钮：</p>
        <input id="fitnessPurgeConfirm" class="fitness-purge-input" type="text" autocomplete="off"
          placeholder="输入 DELETE" aria-label="输入 DELETE 以确认清空体测数据">
@@ -206,85 +209,128 @@ async function confirmFitnessPurge(button) {
   }
 }
 
-// ===== 成绩列表视图 =====
+// ===== 成绩列表视图（紧凑成绩册）=====
+/**
+ * 成绩列表 = 一张紧凑的成绩册：
+ *   上方是【各项目弱项分布】图（随年级 / 班级联动），
+ *   下方是成绩册表格（一行一个学生，一格一个项目：上成绩、下得分）。
+ */
 function renderRecordsView() {
   const filterArea = document.getElementById('filterArea');
+  const grades = [...new Set(DB.getFitnessStudents().map(student => student.grade).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, 'zh-CN', { numeric: true }));
+
   filterArea.innerHTML = `
     <div class="search-box">
       <span>🔍</span>
-      <input type="text" placeholder="搜索学生..." id="recordSearch" oninput="renderRecordsTable()">
+      <input type="text" placeholder="搜索学生..." id="recordSearch"
+        value="${escapeFitnessHTML(FITNESS_GRADEBOOK_STATE.search)}"
+        oninput="onFitnessRecordsSearch(this.value)">
     </div>
-    <select class="form-control" style="width:auto;" id="testTypeFilter" onchange="renderRecordsTable()">
-      <option value="all">全部项目</option>
-      ${DB.FITNESS_ITEMS.map(t => `<option value="${t.key}">${t.icon} ${t.name}</option>`).join('')}
+    <select class="form-control" style="width:auto;" id="recordsGradeFilter" aria-label="筛选年级"
+      onchange="onFitnessRecordsGradeChange()">
+      <option value="all">全部年级</option>
+      ${grades.map(grade => `<option value="${escapeFitnessHTML(grade)}" ${FITNESS_GRADEBOOK_STATE.grade === grade ? 'selected' : ''}>${escapeFitnessHTML(grade)}</option>`).join('')}
     </select>
+    <select class="form-control" style="width:auto;" id="recordsClassFilter" aria-label="筛选班级"
+      onchange="onFitnessRecordsClassChange()">
+      <option value="all">全部班级</option>
+    </select>
+    <button class="btn btn-secondary btn-sm" type="button" onclick="exportFitnessRecordsExcel()">⬇️ Excel</button>
+    <button class="btn btn-secondary btn-sm" type="button" onclick="exportFitnessRecordsCsv()">⬇️ CSV</button>
+    <button class="btn btn-success btn-sm" type="button" onclick="printFitnessPage('records')"
+      title="把当前筛选范围的成绩册打印成 A4 横向表格">🖨️ 打印当前页面</button>
   `;
 
   const container = document.getElementById('fitnessContent');
   container.innerHTML = `
     <div class="card fade-in">
-      <div class="card-body" style="padding:0;">
-        <div class="table-wrapper">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>学生</th>
-                <th>年级班级</th>
-                <th>测试项目</th>
-                <th>成绩</th>
-                <th>等级</th>
-                <th>测试日期</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody id="recordsTableBody"></tbody>
-          </table>
+      <div class="card-header">
+        <div>
+          <div class="card-title"><span>📊</span> 各项目弱项分布</div>
+          <div class="card-subtitle" id="fitnessWeakNote">未达标 = 得分不到 60 分；拖后腿 = 60~79 分且比本人平均分低 8 分以上</div>
         </div>
+      </div>
+      <div class="card-body">
+        <div class="fitness-weak-chart" id="fitnessWeakChart"></div>
+      </div>
+    </div>
+
+    <div class="card fade-in">
+      <div class="card-header">
+        <div>
+          <div class="card-title"><span>📋</span> 体测成绩册</div>
+          <div class="card-subtitle" id="recordsScopeText"></div>
+        </div>
+      </div>
+      <div class="card-body" style="padding:0;">
+        <div id="recordsTableWrap"></div>
       </div>
     </div>
   `;
+
+  populateFitnessRecordsClassFilter();
   renderRecordsTable();
 }
 
+/** 成绩列表主体（成绩册 + 上方的弱项分布图一起刷新） */
 function renderRecordsTable() {
-  let list = DB.getFitnessRecords();
-  const search = document.getElementById('recordSearch')?.value.trim().toLowerCase() || '';
-  const testType = document.getElementById('testTypeFilter')?.value || 'all';
-
-  if (search) {
-    list = list.filter(r => r.studentName.toLowerCase().includes(search) || r.studentId.toLowerCase().includes(search));
+  const wrap = document.getElementById('recordsTableWrap');
+  if (wrap) {
+    wrap.innerHTML = renderFitnessGradebookTable();
+    updateFitnessRecordsScope();
   }
-  if (testType !== 'all') {
-    list = list.filter(r => r.testType === testType);
+  if (typeof updateFitnessWeakChart === 'function') updateFitnessWeakChart();
+}
+
+/** 顶部说明：当前范围 + 统计小结 */
+function updateFitnessRecordsScope() {
+  const target = document.getElementById('recordsScopeText');
+  if (!target) return;
+  const state = FITNESS_GRADEBOOK_STATE;
+  const gradeText = state.grade === 'all' ? '全部年级' : state.grade;
+  const classText = state.className === 'all' ? '全部班级' : state.className;
+  const data = fitnessGradebookBuild();
+  const weakCount = data.rows.filter(row => row.hasWeak).length;
+  const scored = data.rows.filter(row => row.total.total !== null && row.total.total !== undefined);
+  const average = scored.length
+    ? (scored.reduce((sum, row) => sum + row.total.total, 0) / scored.length).toFixed(1)
+    : '—';
+  target.textContent = `${gradeText} · ${classText} · ${data.rows.length} 名学生 · 平均 ${average} 分 · ${weakCount} 人有弱项`;
+}
+
+/** 年级变了 → 班级跟着重选 */
+function populateFitnessRecordsClassFilter() {
+  const select = document.getElementById('recordsClassFilter');
+  if (!select) return;
+  const state = FITNESS_GRADEBOOK_STATE;
+  const classes = [...new Set(DB.getFitnessStudents()
+    .filter(student => state.grade === 'all' || student.grade === state.grade)
+    .map(student => student.class).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, 'zh-CN', { numeric: true }));
+  select.innerHTML = '<option value="all">全部班级</option>'
+    + classes.map(className => `<option value="${escapeFitnessHTML(className)}" ${state.className === className ? 'selected' : ''}>${escapeFitnessHTML(className)}</option>`).join('');
+  if (!classes.includes(state.className)) {
+    state.className = 'all';
+    select.value = 'all';
   }
+}
 
-  // 按日期倒序
-  list.sort((a, b) => (b.testDate || '').localeCompare(a.testDate || ''));
+function onFitnessRecordsSearch(value) {
+  FITNESS_GRADEBOOK_STATE.search = value || '';
+  renderRecordsTable();
+}
 
-  const tbody = document.getElementById('recordsTableBody');
-  if (list.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state"><div class="empty-icon">📭</div><p>暂无体测记录</p></div></td></tr>`;
-    return;
-  }
+function onFitnessRecordsGradeChange() {
+  FITNESS_GRADEBOOK_STATE.grade = document.getElementById('recordsGradeFilter')?.value || 'all';
+  FITNESS_GRADEBOOK_STATE.className = 'all';
+  populateFitnessRecordsClassFilter();
+  renderRecordsTable();
+}
 
-  tbody.innerHTML = list.map(r => {
-    const student = students.find(s => s.id === r.studentId);
-    const g = DB.getGrade(r.value, r.testType, student?.gender || '男', student?.grade || r.grade);
-    const score = DB.getFitnessScore(r.value, r.testType, student?.gender || '男', student?.grade || r.grade);
-    return `
-      <tr>
-        <td><strong>${r.studentName}</strong><br><span style="font-size:12px;color:var(--text-tertiary);">${r.studentId}</span></td>
-        <td>${r.grade || '-'}${r.class || ''}</td>
-        <td>${r.testName}</td>
-        <td><strong style="font-size:16px;color:var(--primary);">${r.value}</strong> ${r.unit}</td>
-        <td>${score ? `<strong>${score.score}${score.bonus ? ` + ${score.bonus} 加分` : ''} 分</strong> · ` : ''}<span class="badge ${g.class}">${g.level}</span></td>
-        <td>${r.testDate}</td>
-        <td>
-          <button data-admin-only class="btn btn-ghost btn-sm" onclick="deleteRecord('${r.id}')" title="删除">🗑️</button>
-        </td>
-      </tr>
-    `;
-  }).join('');
+function onFitnessRecordsClassChange() {
+  FITNESS_GRADEBOOK_STATE.className = document.getElementById('recordsClassFilter')?.value || 'all';
+  renderRecordsTable();
 }
 
 function deleteRecord(id) {
@@ -294,19 +340,54 @@ function deleteRecord(id) {
 }
 
 // ===== 录入成绩 =====
+
+/** 可选的年级（与国标 1~6 年级一致） */
+const FITNESS_GRADE_OPTIONS = ['一年级', '二年级', '三年级', '四年级', '五年级', '六年级'];
+
+/**
+ * 录入单条成绩。
+ * 没有学生名单了 → 老师直接填姓名 / 性别 / 年级 / 班级，
+ * 系统用「姓名+班级+年级」算出内部 id，同一个学生多次录入会自动归到同一个人。
+ */
 function openAddRecord() {
-  const studentOptions = students.map(s => ({
-    id: s.id, label: `${s.name} (${s.grade}${s.class})`, gender: s.gender
-  }));
+  const knownStudents = DB.getFitnessStudents();
+  const knownClasses = [...new Set(knownStudents.map(student => student.class).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, 'zh-CN', { numeric: true }));
 
   const bodyHTML = `
     <form id="recordForm" onsubmit="return false;">
-      <div class="form-group">
-        <label>学生 <span class="required">*</span></label>
-        <select class="form-control" name="studentId" id="studentSelect" required onchange="onStudentChange()">
-          <option value="">请选择学生</option>
-          ${studentOptions.map(s => `<option value="${s.id}">${s.label}</option>`).join('')}
-        </select>
+      <div class="form-row">
+        <div class="form-group">
+          <label>姓名 <span class="required">*</span></label>
+          <input class="form-control" type="text" name="studentName" id="studentNameInput"
+            list="fitnessKnownStudents" required placeholder="输入学生姓名" autocomplete="off">
+          <datalist id="fitnessKnownStudents">
+            ${knownStudents.map(student => `<option value="${escapeFitnessHTML(student.name)}">${escapeFitnessHTML(student.grade)}${escapeFitnessHTML(student.class)}</option>`).join('')}
+          </datalist>
+        </div>
+        <div class="form-group">
+          <label>性别 <span class="required">*</span></label>
+          <select class="form-control" name="gender" id="studentGenderInput" required>
+            <option value="男">男</option>
+            <option value="女">女</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>年级 <span class="required">*</span></label>
+          <select class="form-control" name="grade" id="studentGradeInput" required>
+            ${FITNESS_GRADE_OPTIONS.map(grade => `<option value="${grade}">${grade}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>班级 <span class="required">*</span></label>
+          <input class="form-control" type="text" name="className" id="studentClassInput"
+            list="fitnessKnownClasses" required placeholder="如：1班" autocomplete="off">
+          <datalist id="fitnessKnownClasses">
+            ${knownClasses.map(className => `<option value="${escapeFitnessHTML(className)}"></option>`).join('')}
+          </datalist>
+        </div>
       </div>
       <div class="form-group">
         <label>测试项目 <span class="required">*</span></label>
@@ -350,10 +431,11 @@ function openAddRecord() {
 }
 
 function openQuickEntry() {
-  const grades = [...new Set(DB.getStudents().map(student => student.grade))].sort((a, b) =>
-    a.localeCompare(b, 'zh-CN', { numeric: true }));
+  const knownStudents = DB.getFitnessStudents();
+  const grades = [...new Set(knownStudents.map(student => student.grade).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, 'zh-CN', { numeric: true }));
   const gradeOptions = grades.map(grade => `<option value="${escapeFitnessHTML(grade)}">${escapeFitnessHTML(grade)}</option>`).join('');
-  const classOptions = [...new Set(DB.getStudents().map(student => student.class))]
+  const classOptions = [...new Set(knownStudents.map(student => student.class))]
     .filter(Boolean).sort((a, b) => a.localeCompare(b, 'zh-CN', { numeric: true }))
     .map(className => `<option value="${escapeFitnessHTML(className)}">${escapeFitnessHTML(className)}</option>`).join('');
   const today = new Date();
@@ -426,22 +508,23 @@ function renderQuickEntryRoster() {
   const className = document.getElementById('quickEntryClass').value;
   const root = document.getElementById('quickEntryRoster');
   if (!grade || !className) {
-    root.innerHTML = '<div class="empty-state"><p>请选择年级和班级以载入学生名单。</p></div>';
+    root.innerHTML = '<div class="empty-state"><p>请选择年级和班级以载入该班学生。</p></div>';
     return;
   }
-  const studentsInClass = DB.getStudents().filter(student => student.grade === grade && student.class === className);
+  // 名单来源：已录入过体测成绩的学生（不再有独立的学生信息表）
+  const studentsInClass = DB.getFitnessStudents()
+    .filter(student => student.grade === grade && student.class === className);
   if (!studentsInClass.length) {
-    root.innerHTML = '<div class="empty-state"><p>该班级暂无学生信息。</p></div>';
+    root.innerHTML = `<div class="empty-state"><p>该班级还没有任何体测成绩。<br>先用「📥 批量录入」导入一次名单，就可以在这里快速录成绩了。</p></div>`;
     return;
   }
   root.innerHTML = `
     <div class="table-wrapper fitness-quick-entry-table-wrap">
       <table class="data-table fitness-quick-entry-table">
-        <thead><tr><th>序号</th><th>学号</th><th>学生</th><th>性别</th><th>原始成绩</th><th>国标分 / 等级</th></tr></thead>
+        <thead><tr><th>序号</th><th>学生</th><th>性别</th><th>原始成绩</th><th>国标分 / 等级</th></tr></thead>
         <tbody>${studentsInClass.map((student, index) => `
           <tr>
             <td>${index + 1}</td>
-            <td>${escapeFitnessHTML(student.id)}</td>
             <td>${escapeFitnessHTML(student.name)}</td>
             <td>${escapeFitnessHTML(student.gender)}</td>
             <td><input class="form-control quick-fitness-value" data-student-id="${escapeFitnessHTML(student.id)}"
@@ -456,7 +539,7 @@ function renderQuickEntryRoster() {
 }
 
 function updateQuickEntryPreview(input) {
-  const student = DB.getStudentById(input.dataset.studentId);
+  const student = DB.getFitnessStudentById(input.dataset.studentId);
   const testType = document.getElementById('quickEntryTestType').value;
   const value = Number(input.value);
   const cell = input.closest('tr').querySelector('.quick-fitness-preview');
@@ -487,13 +570,15 @@ function saveQuickEntry() {
     entries = [...document.querySelectorAll('.quick-fitness-value')]
       .filter(input => input.value.trim())
       .map(input => {
-        const student = DB.getStudentById(input.dataset.studentId);
+        const student = DB.getFitnessStudentById(input.dataset.studentId);
         const value = Number(input.value);
         if (!student || !isFitnessValueValid(value, testType)) {
-          throw new Error(`${student?.name || input.dataset.studentId} 成绩格式不正确`);
+          // 兜底不能吐内部 id（那是「姓名+班级+年级」的哈希），否则报错信息又是一串乱码
+          throw new Error(`${student?.name || '该学生'} 成绩格式不正确`);
         }
         return {
-          studentId: student.id, studentName: student.name, grade: student.grade, class: student.class,
+          studentId: student.id, studentName: student.name, gender: student.gender,
+          grade: student.grade, class: student.class,
           testType, testName: item.name, unit: item.unit, value, testDate, semester,
           ...getFitnessScoringFields(value, testType, student),
         };
@@ -524,39 +609,43 @@ function onTestTypeChange() {
   updateGradePreview();
 }
 
-function onStudentChange() {
-  updateGradePreview();
-}
-
 function updateGradePreview() {
-  const studentId = document.getElementById('studentSelect').value;
+  const name = document.getElementById('studentNameInput')?.value.trim() || '';
+  const gender = document.getElementById('studentGenderInput')?.value || '';
+  const grade = document.getElementById('studentGradeInput')?.value || '';
   const testType = document.getElementById('testTypeSelect').value;
   const value = parseFloat(document.getElementById('valueInput').value);
 
   const preview = document.getElementById('gradePreview');
-  if (!studentId || !testType || isNaN(value)) {
+  if (!name || !gender || !grade || !testType || isNaN(value)) {
     preview.style.display = 'none';
     return;
   }
 
-  const student = DB.getStudentById(studentId);
-  if (!student) return;
-  const g = DB.getGrade(value, testType, student.gender, student.grade);
-  const score = DB.getFitnessScore(value, testType, student.gender, student.grade);
+  const g = DB.getGrade(value, testType, gender, grade);
+  const score = DB.getFitnessScore(value, testType, gender, grade);
   preview.style.display = 'block';
   document.getElementById('gradeBadge').innerHTML = `${score ? `<strong>${score.score}${score.bonus ? ` + ${score.bonus} 加分` : ''} 分</strong> · ` : ''}<span class="badge ${g.class}">${g.level}</span>`;
 }
 
 // 监听输入实时预览
 document.addEventListener('input', function(e) {
-  if (e.target.id === 'valueInput') updateGradePreview();
+  if (e.target.id === 'valueInput' || e.target.id === 'studentNameInput') updateGradePreview();
 });
 
 function saveRecord() {
   const form = document.getElementById('recordForm');
   const data = Object.fromEntries(new FormData(form));
 
-  if (!data.studentId) { showToast('请选择学生', 'error'); return; }
+  const studentName = String(data.studentName || '').trim();
+  const gender = String(data.gender || '').trim();
+  const grade = String(data.grade || '').trim();
+  const className = String(data.className || '').trim();
+
+  if (!studentName) { showToast('请填写学生姓名', 'error'); return; }
+  if (!gender) { showToast('请选择性别', 'error'); return; }
+  if (!grade) { showToast('请选择年级', 'error'); return; }
+  if (!className) { showToast('请填写班级', 'error'); return; }
   if (!data.testType) { showToast('请选择测试项目', 'error'); return; }
   if (data.value === '') { showToast('请输入成绩', 'error'); return; }
   if (!data.testDate) { showToast('请选择测试日期', 'error'); return; }
@@ -566,16 +655,17 @@ function saveRecord() {
     return;
   }
 
-  const student = DB.getStudentById(data.studentId);
-  if (!student) { showToast('学生不存在', 'error'); return; }
-
   const item = DB.FITNESS_ITEMS.find(t => t.key === data.testType);
+  // 内部 id 由「姓名 + 班级 + 年级」算出：同一个学生多次录入会自动归并
+  const studentId = DB.makeFitnessStudentId({ name: studentName, grade, class: className });
+  const student = { id: studentId, name: studentName, gender, grade, class: className };
 
   DB.addFitnessRecord({
-    studentId: data.studentId,
-    studentName: student.name,
-    grade: student.grade,
-    class: student.class,
+    studentId,
+    studentName,
+    gender,
+    grade,
+    class: className,
     testType: data.testType,
     testName: item.name,
     unit: item.unit,
@@ -590,503 +680,10 @@ function saveRecord() {
   showToast('体测成绩录入成功');
 }
 
-// ===== 批量录入成绩 =====
-function openBatchImport() {
-  const today = new Date();
-  const todayStr = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
-
-  const bodyHTML = `
-    <div class="batch-step" id="batchStep1">
-      <div class="form-row">
-        <div class="form-group">
-          <label>测试项目 <span class="required">*</span></label>
-          <select class="form-control" id="batchTestType">
-            ${DB.FITNESS_ITEMS.map(t => `<option value="${t.key}">${t.icon} ${t.name}${t.unit ? ' (' + t.unit + ')' : ''}</option>`).join('')}
-          </select>
-        </div>
-        <div class="form-group">
-          <label>测试日期 <span class="required">*</span></label>
-          <input class="form-control" type="date" id="batchTestDate" value="${todayStr}">
-        </div>
-      </div>
-      <div class="form-group">
-        <label>学期</label>
-        <select class="form-control" id="batchSemester">
-          <option value="2026秋">2026秋</option>
-          <option value="2027春">2027春</option>
-        </select>
-      </div>
-      <div style="display:flex;gap:10px;margin-top:20px;">
-        <button class="btn btn-secondary" onclick="downloadTemplate()" style="flex:1;">
-          <span>📥</span> 下载成绩模板
-        </button>
-        <button class="btn btn-primary" onclick="triggerUpload()" style="flex:1;">
-          <span>📤</span> 上传填好的模板
-        </button>
-      </div>
-      <input type="file" id="batchFileInput" accept=".xlsx,.xls" style="display:none;" onchange="handleFileUpload(event)">
-      <div style="margin-top:16px;padding:12px;background:var(--bg-hover);border-radius:var(--radius-sm);font-size:13px;color:var(--text-secondary);line-height:1.7;">
-        <strong>使用步骤：</strong><br>
-        1. 先选择测试项目和日期<br>
-        2. 点击"下载成绩模板"获取 Excel 文件<br>
-        3. 用 Excel 打开，在成绩列填入数据（不要改学号和姓名）<br>
-        4. 点击"上传填好的模板"导入数据
-      </div>
-    </div>
-
-    <!-- 预览区 -->
-    <div class="batch-step" id="batchStep2" style="display:none;">
-      <div id="batchPreviewInfo" style="margin-bottom:12px;font-size:14px;"></div>
-      <div class="table-wrapper" style="max-height:300px;overflow-y:auto;">
-        <table class="data-table" id="batchPreviewTable">
-          <thead><tr><th>学号</th><th>姓名</th><th>成绩</th><th>等级</th></tr></thead>
-          <tbody id="batchPreviewBody"></tbody>
-        </table>
-      </div>
-      <div style="display:flex;gap:10px;margin-top:16px;">
-        <button class="btn btn-ghost" onclick="backToStep1()">返回修改</button>
-        <button class="btn btn-primary" onclick="confirmBatchImport()" style="flex:1;">确认导入</button>
-      </div>
-    </div>
-
-    <!-- 结果区 -->
-    <div class="batch-step" id="batchStep3" style="display:none;">
-      <div id="batchResultInfo" style="text-align:center;padding:20px 0;"></div>
-    </div>
-  `;
-
-  const footerHTML = `
-    <button class="btn btn-ghost" onclick="closeModal(this)">关闭</button>
-  `;
-
-  showModal('批量录入成绩', bodyHTML, footerHTML);
-}
-
-// 下载模板（XLSX 格式）
-function downloadTemplate() {
-  const testType = document.getElementById('batchTestType').value;
-  const item = DB.FITNESS_ITEMS.find(t => t.key === testType);
-  if (!item) return;
-
-  const allStudents = DB.getStudents();
-
-  // 构建 sheet 数据
-  const header = ['学号', '姓名', '性别', `${item.name}${item.unit ? '(' + item.unit + ')' : ''}`];
-  const data = [header];
-  allStudents.forEach(s => {
-    data.push([s.id, s.name, s.gender, '']);
-  });
-
-  // 创建 worksheet
-  const ws = XLSX.utils.aoa_to_sheet(data);
-  // 设置列宽
-  ws['!cols'] = [{ wch: 12 }, { wch: 12 }, { wch: 6 }, { wch: 20 }];
-
-  // 创建 workbook
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, '成绩录入');
-
-  const fileName = `体测成绩模板_${item.name}_${new Date().toISOString().slice(0,10)}.xlsx`;
-  XLSX.writeFile(wb, fileName);
-  showToast('模板已下载，请填写后上传');
-}
-
-// 触发文件上传
-function triggerUpload() {
-  const testType = document.getElementById('batchTestType').value;
-  const testDate = document.getElementById('batchTestDate').value;
-  if (!testDate) {
-    showToast('请先选择测试日期', 'error');
-    return;
-  }
-  document.getElementById('batchFileInput').click();
-}
-
-// 处理上传文件
-let batchPendingData = [];
-
-function handleFileUpload(event) {
-  const file = event.target.files[0];
-  if (!file) return;
-
-  const reader = new FileReader();
-  reader.onload = function(e) {
-    try {
-      const data = new Uint8Array(e.target.result);
-      const wb = XLSX.read(data, { type: 'array' });
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json(ws, { header: 1 }); // aoa 格式
-
-      if (rows.length < 2) {
-        showToast('文件内容为空或格式不对', 'error');
-        return;
-      }
-
-      // 解析
-      const testType = document.getElementById('batchTestType').value;
-      const item = DB.FITNESS_ITEMS.find(t => t.key === testType);
-      const testDate = document.getElementById('batchTestDate').value;
-      const semester = document.getElementById('batchSemester').value;
-
-      const results = [];
-      const errors = [];
-      const allStudents = DB.getStudents();
-
-      // 跳过表头，从第二行开始
-      for (let i = 1; i < rows.length; i++) {
-        const row = rows[i];
-        const sid = String(row[0] || '').trim();
-        const sname = String(row[1] || '').trim();
-        const valueStr = String(row[3] || '').trim(); // 第4列是成绩
-        const value = parseFloat(valueStr);
-
-        if (!sid || !valueStr) continue;
-
-        const student = allStudents.find(s => s.id === sid);
-        if (!student) {
-          errors.push(`第${i+1}行：学号 ${sid} 未找到学生`);
-          continue;
-        }
-
-        if (isNaN(value)) {
-          errors.push(`第${i+1}行：成绩 "${valueStr}" 不是数字`);
-          continue;
-        }
-        if (!isFitnessValueValid(value, testType)) {
-          errors.push(`第${i+1}行：成绩 "${valueStr}" 不符合该项目的取值要求`);
-          continue;
-        }
-
-        results.push({
-          studentId: student.id,
-          studentName: student.name,
-          grade: student.grade,
-          class: student.class,
-          testType: testType,
-          testName: item.name,
-          unit: item.unit,
-          value: value,
-          testDate: testDate,
-          semester: semester,
-          ...getFitnessScoringFields(value, testType, student),
-        });
-      }
-
-      if (results.length === 0) {
-        let errMsg = '没有可导入的数据';
-        if (errors.length > 0) errMsg += '：\n' + errors.join('\n');
-        showToast(errMsg, 'error');
-        return;
-      }
-
-      batchPendingData = results;
-
-      // 显示预览
-      document.getElementById('batchStep1').style.display = 'none';
-      document.getElementById('batchStep2').style.display = 'block';
-      document.getElementById('batchStep3').style.display = 'none';
-
-      document.getElementById('batchPreviewInfo').innerHTML = `
-        解析成功 <strong style="color:var(--primary);">${results.length}</strong> 条记录${errors.length > 0 ? '，<span style="color:var(--danger);">' + errors.length + ' 条错误被跳过</span>' : ''}，请确认后导入。
-        ${errors.length > 0 ? '<details style="margin-top:8px;font-size:12px;color:var(--danger);"><summary>查看错误明细</summary>' + errors.map(e => '<div>' + e + '</div>').join('') + '</details>' : ''}
-      `;
-
-      document.getElementById('batchPreviewBody').innerHTML = results.map(r => `
-        <tr>
-          <td>${r.studentId}</td>
-          <td><strong>${r.studentName}</strong></td>
-          <td><strong style="color:var(--primary);">${r.value}</strong> ${r.unit}</td>
-          <td>${r.score !== null ? `<strong>${r.score}${r.scoreBonus ? ` + ${r.scoreBonus} 加分` : ''} 分</strong> · ` : ''}<span class="badge ${r.gradeClass}">${r.gradeLevel}</span></td>
-        </tr>
-      `).join('');
-    } catch (err) {
-      showToast('文件解析失败：' + err.message, 'error');
-    }
-  };
-  reader.readAsArrayBuffer(file);
-}
-
-// 返回第一步
-function backToStep1() {
-  document.getElementById('batchStep1').style.display = 'block';
-  document.getElementById('batchStep2').style.display = 'none';
-  document.getElementById('batchStep3').style.display = 'none';
-  // 清空文件选择
-  document.getElementById('batchFileInput').value = '';
-}
-
-// 确认导入
-function confirmBatchImport() {
-  let success = 0;
-  batchPendingData.forEach(r => {
-    DB.addFitnessRecord({
-      studentId: r.studentId,
-      studentName: r.studentName,
-      grade: r.grade,
-      class: r.class,
-      testType: r.testType,
-      testName: r.testName,
-      unit: r.unit,
-      value: r.value,
-      testDate: r.testDate,
-      semester: r.semester,
-      score: r.score,
-      scoreBonus: r.scoreBonus,
-      gradeLevel: r.gradeLevel,
-      gradeClass: r.gradeClass,
-      standardVersion: r.standardVersion,
-    });
-    success++;
-  });
-
-  // 显示结果
-  document.getElementById('batchStep1').style.display = 'none';
-  document.getElementById('batchStep2').style.display = 'none';
-  document.getElementById('batchStep3').style.display = 'block';
-
-  document.getElementById('batchResultInfo').innerHTML = `
-    <div style="font-size:48px;margin-bottom:8px;">✅</div>
-    <h3 style="font-size:18px;font-weight:700;">导入完成</h3>
-    <p style="color:var(--text-secondary);margin-top:4px;">成功导入 <strong style="color:var(--primary);">${success}</strong> 条成绩记录</p>
-  `;
-
-  refreshFitnessDataViews();
-  batchPendingData = [];
-  showToast(`成功导入 ${success} 条成绩`);
-}
-
-// ===== 统计分析视图 =====
-function renderStatsView() {
-  destroyFitnessCharts();
-  const filterArea = document.getElementById('filterArea');
-  filterArea.innerHTML = `
-    <select class="form-control" style="width:auto;" id="statsGradeFilter" aria-label="筛选统计年级" onchange="updateStatsGrade()">
-      <option value="all">全部年级</option>
-      ${['一年级', '二年级', '三年级', '四年级', '五年级', '六年级'].map(grade =>
-    `<option value="${grade}" ${statsGradeFilter === grade ? 'selected' : ''}>${grade}</option>`).join('')}
-    </select>
-    <select class="form-control" style="width:auto;" id="statsGenderFilter" aria-label="筛选统计性别" onchange="updateStatsGender()">
-      <option value="all" ${statsGenderFilter === 'all' ? 'selected' : ''}>全部性别</option>
-      <option value="男" ${statsGenderFilter === '男' ? 'selected' : ''}>男</option>
-      <option value="女" ${statsGenderFilter === '女' ? 'selected' : ''}>女</option>
-    </select>
-    <select class="form-control" style="width:auto;" id="statsClassFilter" aria-label="筛选统计班级" onchange="updateStatsClass()">
-      <option value="all">全部班级</option>
-    </select>
-  `;
-
-  const container = document.getElementById('fitnessContent');
-  container.innerHTML = `
-    <section class="fitness-national-overview">
-      <div class="fitness-overview-heading">
-        <div><h2>班级体测总览</h2><p id="fitnessOverviewScope"></p></div>
-        <span class="badge badge-info">2014 年修订版国标</span>
-      </div>
-      <div class="grid grid-3 fitness-overview-summary" id="fitnessOverviewSummary"></div>
-      <div class="grid fitness-overview-charts">
-        <div class="card fade-in">
-        <div class="card-header">
-          <div class="card-title"><span>📊</span> 各项目及格率 / 优秀率</div>
-        </div>
-        <div class="card-body">
-          <div class="fitness-chart-container"><canvas id="chartFitnessRates"></canvas></div>
-        </div>
-      </div>
-      <div class="card fade-in fade-in-delay-1">
-        <div class="card-header">
-          <div class="card-title"><span>📈</span> 各项目平均国标分</div>
-        </div>
-        <div class="card-body">
-          <div class="fitness-chart-container"><canvas id="chartFitnessAverage"></canvas></div>
-        </div>
-      </div>
-      </div>
-      <p class="fitness-overview-note">年度及格率和优秀率仅统计同一学年内必测项目齐全的学生（秋季与次年春季合并；未填写学期时按测试年份）；项目图表按每名学生每个项目的最新有效成绩统计。校内扩展项目不计入国标成绩。</p>
-    </section>
-    <div class="card fade-in" style="margin-top:24px;">
-      <div class="card-header">
-        <div class="card-title"><span>📋</span> 项目成绩汇总</div>
-      </div>
-      <div class="card-body" style="padding:0;">
-        <div class="table-wrapper">
-          <table class="data-table">
-            <thead>
-              <tr><th>学生</th><th>年级班级</th><th>项目</th><th>原始成绩</th><th>单项得分</th><th>等级</th><th>日期</th></tr>
-            </thead>
-            <tbody id="statTableBody"></tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-  `;
-
-  populateStatsClassFilter();
-  renderFitnessOverview();
-  renderStatRecords();
-}
-
+/* ===== Chart.js 实例清理（通用小工具）=====
+   体测模块现在只用 ECharts（统计分析看板 / 成绩排名 / 弱项分布图），
+   成绩排名视图进来时仍会调它做一次兜底清理，所以留着这个工具函数。 */
 function destroyFitnessCharts() {
   Object.values(fitnessCharts).forEach(chart => chart?.destroy());
   fitnessCharts = {};
-}
-
-function populateStatsClassFilter() {
-  const select = document.getElementById('statsClassFilter');
-  const classes = [...new Set(DB.getStudents()
-    .filter(student => statsGradeFilter === 'all' || student.grade === statsGradeFilter)
-    .map(student => student.class).filter(Boolean))]
-    .sort((a, b) => a.localeCompare(b, 'zh-CN', { numeric: true }));
-  select.innerHTML = '<option value="all">全部班级</option>' +
-    classes.map(className => `<option value="${escapeFitnessHTML(className)}">${escapeFitnessHTML(className)}</option>`).join('');
-  if (classes.includes(statsClassFilter)) select.value = statsClassFilter;
-  else statsClassFilter = 'all';
-}
-
-function updateStatsGrade() {
-  statsGradeFilter = document.getElementById('statsGradeFilter').value;
-  statsClassFilter = 'all';
-  populateStatsClassFilter();
-  renderFitnessOverview();
-  renderStatRecords();
-}
-
-function updateStatsGender() {
-  statsGenderFilter = document.getElementById('statsGenderFilter').value;
-  renderFitnessOverview();
-  renderStatRecords();
-}
-
-function updateStatsClass() {
-  statsClassFilter = document.getElementById('statsClassFilter').value;
-  renderFitnessOverview();
-  renderStatRecords();
-}
-
-function getStatsStudents() {
-  return DB.getStudents().filter(student =>
-    (statsGradeFilter === 'all' || student.grade === statsGradeFilter) &&
-    (statsGenderFilter === 'all' || student.gender === statsGenderFilter) &&
-    (statsClassFilter === 'all' || student.class === statsClassFilter));
-}
-
-function getLatestFitnessRecords(selectedStudents) {
-  const selectedIds = new Set(selectedStudents.map(student => student.id));
-  const latest = new Map();
-  DB.getFitnessRecords().forEach(record => {
-    if (!selectedIds.has(record.studentId)) return;
-    const key = `${record.studentId}|${record.testType}`;
-    const existing = latest.get(key);
-    if (!existing || `${record.testDate || ''}|${record.createdAt || ''}` > `${existing.testDate || ''}|${existing.createdAt || ''}`) {
-      latest.set(key, record);
-    }
-  });
-  return [...latest.values()];
-}
-
-function renderFitnessOverview() {
-  const selectedStudents = getStatsStudents();
-  const latest = getLatestFitnessRecords(selectedStudents);
-  const studentById = new Map(selectedStudents.map(student => [student.id, student]));
-  const nationalRows = latest.map(record => {
-    const student = studentById.get(record.studentId);
-    const score = student && DB.getFitnessScore(record.value, record.testType, student.gender, student.grade);
-    const grade = student && DB.getGrade(record.value, record.testType, student.gender, student.grade);
-    return score && grade ? { record, student, score: score.score, grade: grade.level } : null;
-  }).filter(Boolean);
-  const annualSummaries = selectedStudents.map(student =>
-    DB.getAnnualFitnessSummary(DB.getRecordsByStudent(student.id), student.grade, student.gender));
-  const completeAnnualSummaries = annualSummaries.filter(summary => summary?.complete);
-  const passed = completeAnnualSummaries.filter(summary => summary.totalScore >= 60).length;
-  const excellent = completeAnnualSummaries.filter(summary => summary.totalScore >= 90).length;
-  const passRate = completeAnnualSummaries.length ? Math.round(passed / completeAnnualSummaries.length * 100) : 0;
-  const excellentRate = completeAnnualSummaries.length ? Math.round(excellent / completeAnnualSummaries.length * 100) : 0;
-  const scope = `${statsGradeFilter === 'all' ? '全部年级' : statsGradeFilter}${statsGenderFilter === 'all' ? '' : ` · ${statsGenderFilter}生`}${statsClassFilter === 'all' ? '' : ` · ${statsClassFilter}`} · ${selectedStudents.length} 名学生`;
-  document.getElementById('fitnessOverviewScope').textContent = `${scope}（年度总评需同一周期内必测项目齐全）`;
-  document.getElementById('fitnessOverviewSummary').innerHTML = `
-    <div class="stat-card"><div class="stat-icon" style="background:var(--success-light);color:var(--success);">✅</div><div class="stat-content"><h3>${passRate}%</h3><p>年度总评及格率 · ${passed}/${completeAnnualSummaries.length}</p></div></div>
-    <div class="stat-card"><div class="stat-icon" style="background:var(--primary-100);color:var(--primary);">🏆</div><div class="stat-content"><h3>${excellentRate}%</h3><p>年度总评优秀率 · ${excellent}/${completeAnnualSummaries.length}</p></div></div>
-    <div class="stat-card"><div class="stat-icon" style="background:var(--info-light);color:#0288D1;">📋</div><div class="stat-content"><h3>${completeAnnualSummaries.length}/${selectedStudents.length}</h3><p>年度必测项目完整学生</p></div></div>
-  `;
-
-  const byTest = new Map(DB.FITNESS_ITEMS.map(item => [item.key, { item, rows: [] }]));
-  nationalRows.forEach(row => byTest.get(row.record.testType)?.rows.push(row));
-  const testRows = [...byTest.values()].filter(group => group.rows.length);
-  if (!testRows.length) {
-    setFitnessChartEmptyState('chartFitnessRates', '所选范围暂无可用于国标统计的成绩。');
-    setFitnessChartEmptyState('chartFitnessAverage', '录入国标项目成绩后，这里将显示各项目平均分。');
-    destroyFitnessCharts();
-    return;
-  }
-  if (typeof Chart === 'undefined') {
-    throw new Error('体测图表组件未加载，无法展示班级统计图表');
-  }
-  destroyFitnessCharts();
-  clearFitnessChartEmptyState('chartFitnessRates');
-  clearFitnessChartEmptyState('chartFitnessAverage');
-  const labels = testRows.map(group => group.item.name);
-  const passRates = testRows.map(group => Math.round(group.rows.filter(row => row.score >= 60).length / group.rows.length * 100));
-  const excellentRates = testRows.map(group => Math.round(group.rows.filter(row => row.score >= 90).length / group.rows.length * 100));
-  const averages = testRows.map(group => Number((group.rows.reduce((sum, row) => sum + row.score, 0) / group.rows.length).toFixed(1)));
-  fitnessCharts.rates = new Chart(document.getElementById('chartFitnessRates'), {
-    type: 'bar',
-    data: { labels, datasets: [
-      { label: '及格率', data: passRates, backgroundColor: '#06A77D' },
-      { label: '优秀率', data: excellentRates, backgroundColor: '#E85D04' },
-    ] },
-    options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, max: 100, ticks: { callback: value => `${value}%` } } } },
-  });
-  fitnessCharts.average = new Chart(document.getElementById('chartFitnessAverage'), {
-    type: 'bar',
-    data: { labels, datasets: [{ label: '平均国标单项分', data: averages, backgroundColor: 'rgba(3,83,164,0.72)', borderColor: '#0353A4', borderWidth: 1, borderRadius: 5 }] },
-    options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, max: 100, title: { display: true, text: '分' } } } },
-  });
-}
-
-function setFitnessChartEmptyState(canvasId, message) {
-  const canvas = document.getElementById(canvasId);
-  canvas.style.display = 'none';
-  let empty = canvas.parentElement.querySelector('.fitness-chart-empty');
-  if (!empty) {
-    empty = document.createElement('div');
-    empty.className = 'fitness-chart-empty';
-    canvas.parentElement.appendChild(empty);
-  }
-  empty.textContent = message;
-}
-
-function clearFitnessChartEmptyState(canvasId) {
-  const canvas = document.getElementById(canvasId);
-  canvas.style.display = '';
-  canvas.parentElement.querySelector('.fitness-chart-empty')?.remove();
-}
-
-function renderStatRecords() {
-  const selectedStudents = getStatsStudents();
-  const studentById = new Map(selectedStudents.map(student => [student.id, student]));
-  const rows = getLatestFitnessRecords(selectedStudents).map(record => {
-    const student = studentById.get(record.studentId);
-    if (!student) return null;
-    const grade = DB.getGrade(record.value, record.testType, student.gender, student.grade);
-    const score = DB.getFitnessScore(record.value, record.testType, student.gender, student.grade);
-    return { record, student, grade, score };
-  }).filter(Boolean).sort((a, b) =>
-    a.student.grade.localeCompare(b.student.grade, 'zh-CN', { numeric: true }) ||
-    a.student.class.localeCompare(b.student.class, 'zh-CN', { numeric: true }) ||
-    a.student.name.localeCompare(b.student.name, 'zh-CN'));
-  const tbody = document.getElementById('statTableBody');
-  if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="7"><div class="empty-state"><div class="empty-icon">📭</div><p>当前筛选范围暂无体测记录</p></div></td></tr>';
-    return;
-  }
-  tbody.innerHTML = rows.map(({ record, student, grade, score }) => `
-      <tr>
-        <td><strong>${escapeFitnessHTML(student.name)}</strong><br><span class="fitness-record-subtext">${escapeFitnessHTML(student.id)}</span></td>
-        <td>${escapeFitnessHTML(student.grade)}${escapeFitnessHTML(student.class)}</td>
-        <td>${escapeFitnessHTML(record.testName)}</td>
-        <td><strong style="color:var(--primary);">${escapeFitnessHTML(record.value)}</strong> ${escapeFitnessHTML(record.unit)}</td>
-        <td>${score ? `${score.score}${score.bonus ? ` + ${score.bonus} 加分` : ''} 分` : '<span class="fitness-record-subtext">校内参考</span>'}</td>
-        <td><span class="badge ${grade.class}">${escapeFitnessHTML(grade.level)}</span></td>
-        <td>${escapeFitnessHTML(record.testDate)}</td>
-      </tr>
-    `).join('');
 }

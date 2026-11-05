@@ -8,7 +8,7 @@
 'use strict';
 
 const MIGRATE_KEY_LABELS = {
-  pe_students: '学生信息',
+  pe_students: '学生信息（旧模块，已废弃）',
   pe_fitness_records: '体测数据',
   pe_attendance: '考勤记录',
   pe_lesson_plans: '教案',
