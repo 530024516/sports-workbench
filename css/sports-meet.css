@@ -2390,6 +2390,69 @@
 .ud2-form-field > span { display: block; margin-bottom: 6px; font-size: 12px; font-weight: 600; }
 .ud2-form-field textarea { width: 100%; resize: vertical; line-height: 1.6; }
 
+/* 教学目标：合并成一个大文本框，占满整行（省级教研教案的段落式写法） */
+.ud2-objectives-box { margin-bottom: 4px; }
+.ud2-objectives-tip { margin: 0 0 8px; font-size: 12px; line-height: 1.6; }
+.ud2-objectives-tip b { color: var(--text-primary, #0f172a); }
+.ud2-objectives-input {
+  width: 100%;
+  min-height: 220px;
+  line-height: 1.9;
+  font-size: 14px;
+  white-space: pre-wrap;
+}
+
+/* ============ 模块 10：单元学习评价表（量规表） ============ */
+.ud2-rubric { margin-bottom: 12px; }
+.ud2-rubric-weights {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.ud2-rubric-weights-label { font-size: 12px; font-weight: 600; color: var(--text-secondary, #475569); }
+.ud2-rubric-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 10px;
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 999px;
+  background: var(--bg-hover, #f8fafc);
+  font-size: 12px;
+  color: var(--text-secondary, #475569);
+}
+.ud2-rubric-chip b { color: var(--text-primary, #0f172a); }
+.ud2-rubric-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 12px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.ud2-rubric-table th,
+.ud2-rubric-table td {
+  border: 1px solid var(--border, #e2e8f0);
+  padding: 7px 9px;
+  vertical-align: top;
+  text-align: left;
+}
+.ud2-rubric-table thead th {
+  background: var(--bg-hover, #f8fafc);
+  font-weight: 600;
+  color: var(--text-secondary, #475569);
+  white-space: nowrap;
+}
+.ud2-rubric-level { white-space: nowrap; font-weight: 700; }
+.ud2-rubric-range { white-space: nowrap; text-align: center; }
+.ud2-rubric-points { text-align: center; white-space: nowrap; font-weight: 600; }
+.ud2-rubric-lit { white-space: nowrap; }
+.ud2-rubric-sub { display: block; font-size: 11px; font-weight: 400; color: var(--text-tertiary, #94a3b8); }
+.ud2-rubric-total { background: var(--bg-hover, #f8fafc); font-weight: 700; }
+.ud2-rubric-note { display: block; margin-top: 4px; }
+.ud2-rubric-note textarea { line-height: 1.6; }
+
 .ud2-structure-head {
   display: flex;
   align-items: center;
@@ -2400,37 +2463,124 @@
 }
 .ud2-warn-tag { padding: 2px 8px; border-radius: 4px; background: #fef3c7; color: #b45309; font-weight: 600; }
 .ud2-ok-tag { padding: 2px 8px; border-radius: 4px; background: #dcfce7; color: #15803d; font-weight: 600; }
-.ud2-tree { display: grid; gap: 10px; }
-.ud2-tree-root {
-  justify-self: center;
-  padding: 8px 18px;
-  border-radius: 999px;
-  background: var(--primary, #e85d04);
-  color: #fff;
-  font-weight: 700;
-  font-size: 13px;
-}
-.ud2-tree-branches { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
-@media (max-width: 900px) { .ud2-tree-branches { grid-template-columns: 1fr 1fr; } }
-@media (max-width: 560px) { .ud2-tree-branches { grid-template-columns: 1fr; } }
-.ud2-tree-branch { border: 1px solid var(--border, #e2e8f0); border-radius: 8px; padding: 8px; background: #f8fafc; }
-.ud2-tree-branch-title { margin-bottom: 6px; font-size: 12px; font-weight: 700; text-align: center; }
-.ud2-tree-nodes { display: grid; gap: 6px; }
-.ud2-tree-node { display: flex; align-items: center; gap: 6px; }
-.ud2-tree-node-no {
-  flex: 0 0 auto;
-  width: 22px; height: 22px;
-  display: grid; place-items: center;
-  border-radius: 50%;
-  background: #fff;
+/* ---------- 结构图：维度 × 课次 矩阵泳道图 ----------
+   极简教材排版：4 条维度泳道（行）× 18 个课次（列）+ 底部并一行「主要项目」。
+   横向可滚动，节点不会被挤压变形。 */
+.ud2-project-tag { padding: 2px 8px; border-radius: 4px; background: #e0f2fe; color: #0369a1; font-weight: 600; }
+.ud2-project-tag.is-empty { background: #f1f5f9; color: var(--text-tertiary, #94a3b8); font-weight: 400; }
+
+.ud2-mx { margin-top: 2px; }
+.ud2-mx-scroll {
+  overflow-x: auto;
+  overflow-y: hidden;
   border: 1px solid var(--border, #e2e8f0);
-  font-size: 11px;
-  font-weight: 700;
+  border-radius: 8px;
+  background: #fff;
 }
-.ud2-tree-node input { font-size: 12px; padding: 4px 6px; }
+.ud2-mx-inner { position: relative; min-width: 1400px; }
+
+/* 连线层：画在节点下面，卡片不透明，所以线永远不会压住文字 */
+.ud2-mx-links { position: absolute; left: 0; top: 0; z-index: 0; pointer-events: none; overflow: visible; }
+.ud2-mx-link { fill: none; stroke: #94a3b8; stroke-width: 1.4; }
+.ud2-mx-link.is-cross { stroke: #b6c2d2; stroke-dasharray: 5 3; }
+
+.ud2-mx-table { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; }
+.ud2-mx-table th, .ud2-mx-table td { border-right: 1px solid #e8edf3; border-bottom: 1px solid #e8edf3; padding: 0; }
+.ud2-mx-table tr > *:last-child { border-right: 0; }
+.ud2-mx-table tbody tr:last-child > * { border-bottom: 0; }
+
+.ud2-mx-corner {
+  position: sticky; left: 0; z-index: 3;
+  width: 96px; height: 30px;
+  background: #fff;
+  border-right: 1px solid #d8dee7 !important;
+  font-size: 11px; font-weight: 600;
+  color: var(--text-secondary, #64748b);
+  text-align: center;
+}
+.ud2-mx-colhead {
+  height: 30px;
+  background: #fbfcfd;
+  font-size: 11px; font-weight: 600;
+  color: var(--text-secondary, #64748b);
+  text-align: center;
+}
+.ud2-mx-rowhead {
+  position: sticky; left: 0; z-index: 2;
+  width: 96px;
+  border-right: 1px solid #d8dee7 !important;
+  font-size: 12px; font-weight: 700;
+  color: #334155;
+  text-align: center;
+  padding: 6px 4px !important;
+}
+
+/* 交替浅色行（浅灰 / 浅绿）—— 教材排版的常见做法，扫读时不串行 */
+.ud2-mx-row.is-odd { background: #fafbfc; }
+.ud2-mx-row.is-even { background: #f2f8f4; }
+.ud2-mx-row.is-odd .ud2-mx-rowhead { background: #fafbfc; }
+.ud2-mx-row.is-even .ud2-mx-rowhead { background: #f2f8f4; }
+.ud2-mx-row-main { background: #fdf7ec !important; }
+.ud2-mx-row-main .ud2-mx-rowhead { background: #fdf7ec; }
+
+/* 单元格留够横向间隙：相邻课次之间要放得下"→"箭头 */
+.ud2-mx-cell { height: 78px; padding: 4px 9px !important; vertical-align: middle; }
+
+/* 节点卡片：白底 + 深色边框，像印在纸上的小方块 */
+.ud2-mx-node {
+  position: relative; z-index: 1;
+  background: #fff;
+  border: 1px solid #475569;
+  border-radius: 6px;
+  padding: 4px 5px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, .06);
+}
+.ud2-mx-node-no { display: block; font-size: 10px; font-weight: 700; color: #64748b; line-height: 1.2; }
+.ud2-mx-node-title {
+  display: block; width: 100%;
+  border: 0; padding: 1px 0; margin: 0;
+  background: transparent;
+  font-family: inherit;
+  font-size: 11px; line-height: 1.3;
+  color: #0f172a;
+  resize: none;
+  overflow: hidden;
+  min-height: 28px;
+}
+.ud2-mx-node-title:focus { outline: none; border-bottom: 1px dashed var(--primary, #e85d04); }
+/* 换维度（下拉）：默认隐形，鼠标移上去才浮出来 —— 保持"印在纸上"的观感 */
+.ud2-mx-node-dim {
+  width: 100%; margin-top: 2px;
+  border: 0; padding: 0;
+  background: transparent;
+  font-size: 10px; color: #64748b;
+  opacity: 0; cursor: pointer;
+  transition: opacity .12s ease;
+}
+.ud2-mx-node:hover .ud2-mx-node-dim, .ud2-mx-node-dim:focus { opacity: 1; }
+
+.ud2-mx-main { text-align: center; padding: 8px !important; }
+.ud2-mx-main-items { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+.ud2-mx-main-input {
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  padding: 3px 12px;
+  min-width: 108px;
+  font-size: 12px; text-align: center;
+  background: #fff;
+}
+.ud2-mx-main-text { font-size: 13px; font-weight: 700; color: #0f172a; }
+.ud2-mx-main-text.is-empty { color: var(--text-tertiary, #94a3b8); font-weight: 400; }
+.ud2-mx-tip { margin: 6px 0 0; font-size: 11px; color: var(--text-tertiary, #94a3b8); }
 
 .ud2-table-wrap { overflow-x: auto; }
-.ud2-lesson-table textarea { width: 100%; min-width: 140px; resize: vertical; font-size: 12px; line-height: 1.5; }
+/* 课时表的三格现在是长文本：给足高度，内容超了就在框内滚动，
+   页面既不会被撑成无限长，文字也不会被遮住（配合 autoSizeUnitLessonTextareas） */
+.ud2-lesson-table textarea {
+  width: 100%; min-width: 140px; resize: vertical;
+  font-size: 12px; line-height: 1.6;
+  min-height: 170px; max-height: 340px; overflow-y: auto;
+}
 .ud2-mini-field > span { display: block; font-size: 11px; font-weight: 600; color: var(--text-tertiary, #94a3b8); }
 .ud2-mini-field { display: block; margin-bottom: 4px; }
 .ud2-detail-btn { white-space: nowrap; font-size: 12px; padding: 6px 10px; }
@@ -2859,6 +3009,8 @@
     min-width: 0;
     width: 100%;
     font-size: 16px;      /* iOS 聚焦不放大页面 */
+    min-height: 190px;
+    max-height: 340px;
   }
 
   .ud2-detail-btn {

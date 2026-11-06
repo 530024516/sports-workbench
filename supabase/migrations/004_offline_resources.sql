@@ -8,7 +8,7 @@
 --   category      教材大类（球类 / 田径类 / …）
 --   level         水平（水平一（1–2 年级）…）
 --   content       教学内容（即所选的具体条目标题）
---   modules_json  完整大单元数据：11 个模块 + 18 课时计划表 + 选题 meta
+--   modules_json  完整大单元数据：10 个模块 + 18 课时计划表 + 选题 meta
 --   created_at    首次保存时间
 --   updated_at    最后编辑时间
 --   ord           排序位（写入时按列表顺序回写，便于列表保持稳定）

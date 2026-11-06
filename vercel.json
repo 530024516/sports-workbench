@@ -1,10 +1,10 @@
 {
   "functions": {
     "api/ai.js": {
-      "maxDuration": 60
+      "maxDuration": 120
     },
     "api/data.js": {
-      "maxDuration": 30
+      "maxDuration": 60
     },
     "api/admin.js": {
       "maxDuration": 10

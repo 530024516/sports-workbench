@@ -62,13 +62,45 @@ const MEET_DATA_KEYS = [
   'sportsMeetTitle',
 ];
 
+/** 大单元设计主键 */
+const UNIT_DESIGN_KEY = 'pe_big_unit_design_v1';
+/** 大单元「核心模块」字段：云端少任何一个、本地却有内容 → 绝不允许覆盖 */
+const UNIT_DESIGN_CORE_FIELDS = [
+  'objectives', 'textbookAnalysis', 'studentAnalysis', 'teachingContent',
+  'keyDifficulties', 'structure_nodes', 'main_projects', 'lessons',
+  'assessment', 'reflection', 'rubric',
+];
+/** 生成期间的全局冻结信号（写进 localStorage，所有同源页面 / iframe 都认） */
+const UNIT_GENERATING_KEY = 'pe_unit_generating_v1';
+/** 冻结信号的有效期：生成再慢也不会超过它；页面崩溃后到点自动解冻，绝不永久卡死 */
+const UNIT_GENERATING_TTL_MS = 60 * 60 * 1000;
+
 /**
  * 版本标记：排障第一步就是在控制台确认浏览器跑的是不是这一版。
  * ⚠️ 老版本（没有时光机备份 / 云端 0 条防污染 / forceRecover）会把云端返回的 null 直接写回
  *    localStorage，表现就是"刷新一下主键立刻变 0 条"，日志还会打"本次无差异"。
  *    如果你的控制台里看不到下面这行，说明浏览器还在用缓存里的旧 store.js —— 先硬刷（Cmd+Shift+R）。
  */
-const STORE_BUILD = 'v4-单键彻底清空（clearKey + 清空防复活 + 反推自愈闸门）2026-11-02';
+const STORE_BUILD = 'v9-终极清理 hardResetAll + 视图优先级锁 2026-11-06';
+/**
+ * 「静默本地模式」持续时间：载入离线资源等纯本地操作期间，
+ * 不发 GET、不重连、云端失败也不弹超时，时间一到自动恢复（无需定时器，惰性判断）。
+ */
+const QUIET_LOCAL_MS = 10000;
+
+/**
+ * 网络不通类错误：断网 / DNS / 连接被拒 / 超时 / 后端写 Supabase 的 `fetch failed`。
+ * 这类不是「表结构冲突」等业务错误 —— 不弹红色弹窗、不计入熔断次数，
+ * 数据只要安静留在本地待写队列，联网后自动续传即可。
+ */
+function isNetworkFailure(error) {
+  if (!error) return false;
+  if (error.networkFailure === true || error.timeout === true) return true;
+  if (error.name === 'AbortError' || error.name === 'StoreRequestTimeout'
+    || error.name === 'SupabaseReadTimeout') return true;
+  const message = String(error.message || error || '').toLowerCase();
+  return /fetch failed|failed to fetch|networkerror|network error|load failed|signal is aborted|超时|timed?\s*out|econn|enotfound|eai_again|socket hang up|连接被|放弃本次读取|不可达/.test(message);
+}
 
 // 所有接口请求的统一超时上限
 // 20 秒：Vercel（尤其免费版）冷启动 + Supabase 首次连接经常超过 5 秒，
@@ -112,14 +144,42 @@ const CLEAR_LOCK_TTL_MS = 10 * 60 * 1000;
  * 的同步结果，它带着旧数据回来也不会被复活到本地。
  */
 const CLEAR_SETTLE_MS = 10000;
-// 重要表单云端确认失败后的后台续传节奏（毫秒）
+// 重要表单云端确认失败后的后台续传节奏（毫秒）：仅网络正常时使用
 const CRITICAL_RETRY_DELAYS = [1500, 5000, 15000, 30000];
+/**
+ * 🌐 断网退避：判定网络不通后，所有后台续传 / 重连统一拉长到 1 分钟一次。
+ * 断网时 1.5s→5s→15s 的短节奏会在几分钟内打出几十发请求，把本地 Node 服务器卡死。
+ */
+const OFFLINE_RETRY_MS = 60000;
+/** 连续多少次网络失败才显示「离线模式」标签（一次抖动不打扰用户） */
+const OFFLINE_BADGE_THRESHOLD = 2;
 /**
  * 「本地已写入、云端未确认」保护锁的前缀：刷新后靠它挡住云端旧数据覆盖。
  * ⚠️ 每个存储键一条独立记录（前缀 + 键名），不是整体一个 JSON ——
  *    多个 iframe / 标签页共享同一份 localStorage，整体覆盖会让别人的锁被空队列抹掉。
  */
 const UNCONFIRMED_LOCK_PREFIX = 'pe_store_unconfirmed_v1::';
+/**
+ * 🔒 「视图优先级锁」：用户主动点击【从离线资源库加载】之后，刚载入的这份数据就是
+ *    当前视图的唯一可信副本，优先级高于云端旧快照、后台同步队列、其它 iframe 的旧缓存。
+ *    锁只存摘要（epoch / at / reason），真正的数据仍在主键里；摘要落到 localStorage，
+ *    刷新后同域页面都能认得，直到 TTL 到期或用户手动解除。
+ */
+const VIEW_PIN_KEY = 'pe_store_view_pin_v1';
+/** 视图优先级锁有效期：30 分钟后自动放行云端同步，不会把某个键永久冻住 */
+const VIEW_PIN_TTL_MS = 30 * 60 * 1000;
+/** 视图优先级锁生效期间挂上的后台推送暂停原因（online 事件 / 解除锁时释放） */
+const VIEW_PIN_PUSH_HOLD = '视图优先级锁：等待用户确认';
+/** 管理员登录凭据：hardResetAll() 默认保留，传 { includeAuth: true } 才一起清 */
+const HARD_RESET_AUTH_KEYS = ['isAdmin', 'pe_admin_password'];
+/** 兜底前缀（pe_ / sportsMeet*）覆盖不到的零散键 */
+const HARD_RESET_MISC_KEYS = ['meetPurgeNotice'];
+/**
+ * localhost 开发环境：启动时盘上残留的保护锁（= 刷新后要重推的待写队列）超过这个数量，
+ * 一律判定为「旧 502 反复失败留下的脏队列」，直接清空，不再自动补推。
+ * 这些锁的业务数据本身仍在 localStorage 主键里，清的只是「后台重推」这件事。
+ */
+const LOCAL_QUEUE_DIRTY_LIMIT = 10;
 // 运动会数据里"写空 = 可能把别人的数据冲掉"的关键数组（合并时保留本地已有值）
 const MEET_ARRAY_FIELDS = ['athletes', 'registrations', 'heats'];
 // ⛔ 绝对防御字段：从"有"写成"无"直接抛异常终止写入，除非调用方显式 force: true
@@ -130,6 +190,21 @@ const MEET_CRITICAL_FIELDS = ['athletes', 'registrations'];
 const MEET_BACKUP_KEY = 'pe_sports_meet_backup_v1';
 // 主数据键：报名 / 预分组 / 赛程 / 成绩排名 全在这一个键里，判断"有没有数据"只看报名条数
 const MEET_MAIN_KEY = 'pe_sports_meet_v1';
+/**
+ * 🕒 时光机备份的格式版本与有效期。
+ * ⛔ 旧备份会「反噬」：清空主键后刷新，_restoreFromBackup() 不分青红皂白把几天前的
+ *    181KB 旧报名数据塞回去，直接盖掉用户刚载入的新数据。
+ *    现在：备份必须带合法时间戳、结构必须匹配、版本必须一致，且不超过 24 小时；
+ *    不合格的一律【删掉备份键】并拒绝恢复。
+ */
+const BACKUP_SCHEMA_VERSION = 2;
+const BACKUP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+/** __local_backup 一次性快照的元数据：没有时间戳 / 超期 → 启动时整批清掉 */
+const LOCAL_BACKUP_META_KEY = 'pe_store_local_backup_meta_v1';
+/** 单个 __local_backup 的体积上限：超大的资源库镜像不再复制一份 */
+const LOCAL_BACKUP_MAX_BYTES = 256 * 1024;
+/** 视图优先级锁摘要的格式版本 */
+const VIEW_PIN_SCHEMA_VERSION = 2;
 /**
  * 「一键清空」意图的跨文档通道。
  * 兄弟 iframe 收到"主数据被清空"的消息时，必须能区分两件事：
@@ -211,6 +286,37 @@ const Store = {
   _cloudPaused: false,
   // 时光机自愈的重入保护（自愈内部会反推云端，可能绕回 read）
   _healing: false,
+  // 「大单元生成中」：本页在生成时置 true，同时往 localStorage 写信号冻结所有同源文档
+  _generating: false,
+  /**
+   * 后台上传重试的「暂停原因」集合（支持多个原因叠加，A 恢复不会误放 B）。
+   * 非空时：刷新恢复的待写队列、后台续传、_flushPending 补推一律不发 POST，
+   * 只保留本地数据与保护锁。生成大单元 / 从离线资源库载入时由调用方挂上。
+   */
+  _backgroundSyncHolds: new Set(),
+  /** 当前在飞的 GET 请求控制器：进入静默本地模式时逐个 abort，立刻掐断后台同步 */
+  _inFlightReads: new Set(),
+  /** 静默本地模式截止时间戳 / 原因 / 对应的暂停 hold 键 */
+  _quietLocalUntil: 0,
+  _quietReason: '',
+  _quietHoldKey: '',
+  /** 连续网络失败计数 / 是否已进入离线模式（供顶栏灰色标签读取） */
+  _networkFailures: 0,
+  _offlineMode: false,
+  _offlineSince: 0,
+  /**
+   * 🌐 延期区：加载离线资源时从「自动重推队列」隔离出来的历史脏数据。
+   * 业务数据与 localStorage 保护锁都完整保留，只是不参与任何后台 POST；
+   * 网络恢复（online 事件 / Store.handleOnline()）后自动放回 _pendingWrites。
+   */
+  _deferredWrites: new Map(),
+  /**
+   * 🔒 视图优先级锁：key → { epoch, at, reason }。
+   * 用户主动载入离线资源后用。有锁的键：内存缓存 / localStorage 主键一律以刚载入的
+   * 那份为准，_applyCloud、_mirrorLocal、storage 事件、历史保护锁、后台补推全部绕开它。
+   */
+  _viewPins: new Map(),
+  _viewPinEpoch: 0,
 
   async start() {
     console.log(`[Store] 载入 store.js ${STORE_BUILD}`);
@@ -218,14 +324,26 @@ const Store = {
     // 先认下当前世代号：之后 storage 事件里只要世代号前进了，就说明别人执行了明确的一键清空
     this._purgeEpochSeen = this._storedPurgeSignal().epoch;
     const hasCache = this._loadLocal();
+    /* 🧹 启动就清掉历史遗留 / 超期的 __local_backup 镜像，别让它们无限期堆积 */
+    this._clearStaleLocalBackups();
     /* ① 启动第一原则：无条件检查备份。
        只要主键是空的，立刻【同步】从 pe_sports_meet_backup_v1 拉数据覆盖主键，
        不等云端、不看差异、不看有没有缓存 —— 这是备份存在的唯一意义。
        恢复成功就立刻派发 store:sync，让页面马上用 216 条重绘。 */
     const restored = this._restoreFromBackup({ reason: 'start() 启动' });
+    /* 🔒 「用户主动载入的资源」优先于一切备份 / 旧缓存：
+       恢复视图优先级锁，把主键那份（就是刚载入的资源）重新压回内存缓存，
+       并拔掉这些键的历史保护锁。必须排在 _restoreUnconfirmed() 前面。 */
+    this._restoreViewPins();
+    /* 🧹 localhost：先按【盘上锁的数量】清掉旧 502 留下的脏待写队列。
+       必须在 _restoreUnconfirmed() 之前做 —— 否则刚清完内存，锁又被扫回来重新排续传。
+       业务数据留在 localStorage 主键里，这里只丢「后台自动重推」这件事。 */
+    this._autoClearDirtyQueue();
     // 刷新后接续：把上一次「已写入本地、云端未确认」的标记恢复回来，
     // 否则新页面一同步，云端旧数据就会把用户刚保存的数据冲掉
     this._restoreUnconfirmed();
+    /* 注册 online 自愈：网络恢复后把延期隔离的历史队列放回并重新排续传 */
+    this._bindOnlineRecovery();
     try {
       if (hasCache || restored) {
         // ① 有缓存：先让页面用本地数据立即渲染
@@ -283,8 +401,434 @@ const Store = {
     }
   },
 
+  /**
+   * 「生成期间全局冻结同步」开关。
+   * 从点【一键生成】到流水线跑完，后台 SWR / 重连 / 兄弟 iframe 的同步都不许拉云端，
+   * 否则云端那份旧的（缺模块 4/5/6 的）大单元会把刚生成的模块整份盖掉。
+   * 信号写进 localStorage 是让【所有同源文档】一起冻结（不只是当前这一页）。
+   */
+  setGenerating(active, reason = '') {
+    this._generating = active === true;
+    try {
+      if (this._generating) {
+        localStorage.setItem(UNIT_GENERATING_KEY, JSON.stringify({
+          active: true, at: Date.now(), reason, ttl: UNIT_GENERATING_TTL_MS,
+        }));
+      } else {
+        localStorage.removeItem(UNIT_GENERATING_KEY);
+      }
+    } catch (error) {
+      console.warn('[Store] 写入生成冻结信号失败', error);
+    }
+    /* ⏸ 生成期间把「后台补推 / 断点续传」也一起停：它们同样会 POST /api/data，
+       和 SSE 生成抢同一个串行请求闸门，前一手卡住就会连锁超时（signal is aborted）。
+       队列与保护锁原样保留，流水线结束后再重新排队续传，不丢数据。 */
+    if (this._generating) this._pauseCriticalTimers();
+    else this._resumeBackgroundPushes();
+    console.log(`[Store] ${this._generating ? '⏸ 大单元生成中：已冻结全部云端同步与后台补推' : '▶ 生成结束：恢复云端同步与后台补推'}${reason ? `（${reason}）` : ''}`);
+    return this._generating;
+  },
+
+  /** 本页或任一同源页面是否正在生成（带 TTL，页面崩溃也不会永久冻结） */
+  isGenerating() {
+    if (this._generating) return true;
+    try {
+      const raw = localStorage.getItem(UNIT_GENERATING_KEY);
+      if (!raw) return false;
+      const flag = JSON.parse(raw);
+      if (flag?.active !== true) return false;
+      const ttl = Number(flag.ttl) > 0 ? Number(flag.ttl) : UNIT_GENERATING_TTL_MS;
+      if (Date.now() - Number(flag.at || 0) > ttl) {
+        localStorage.removeItem(UNIT_GENERATING_KEY);       // 过期信号自动清理
+        return false;
+      }
+      return true;
+    } catch (error) {
+      return false;
+    }
+  },
+
+  /* ---------------- 静默本地模式（纯本地操作的绝对隔离） ---------------- */
+
+  /** 是否处于静默本地模式；到期自动解除（惰性判断，不留定时器） */
+  isQuietLocalMode() {
+    if (this._quietLocalUntil && Date.now() >= this._quietLocalUntil) this.exitQuietLocalMode();
+    return this._quietLocalUntil > 0;
+  },
+
+  /**
+   * 🤫 进入静默本地模式：载入离线资源等纯本地操作的「绝对隔离」。
+   * ① 立刻 abort 所有在飞的 GET /api/data（不等 20 秒超时）
+   * ② 停掉重连定时器与后台续传
+   * ③ 期间 sync / _syncOnce / 补推一律不发请求，云端失败也安静回退本地缓存
+   * ④ 到期自动恢复，无需调用方记得解锁
+   */
+  enterQuietLocalMode(reason = '本地操作', durationMs = QUIET_LOCAL_MS) {
+    if (this._quietHoldKey) this._backgroundSyncHolds.delete(this._quietHoldKey);
+    this._quietLocalUntil = Date.now() + Math.max(0, durationMs);
+    this._quietReason = reason;
+    this._quietHoldKey = `静默本地模式：${reason}`;
+    this._backgroundSyncHolds.add(this._quietHoldKey);
+    this._pauseCriticalTimers();
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+    const aborted = this.abortInFlightReads(reason);
+    console.log(`[Store] 🤫 静默本地模式（${reason}）：取消 ${aborted} 个在飞 GET，`
+      + `${Math.round(durationMs / 1000)} 秒内不发云端请求、不报超时，数据全部走本地缓存`);
+    return { ok: true, aborted, until: this._quietLocalUntil };
+  },
+
+  exitQuietLocalMode() {
+    if (!this._quietLocalUntil && !this._quietHoldKey) return;
+    if (this._quietHoldKey) this._backgroundSyncHolds.delete(this._quietHoldKey);
+    this._quietHoldKey = '';
+    this._quietLocalUntil = 0;
+    this._quietReason = '';
+    // 解冻后把暂停期间挂起的队列重新排队（延期区的数据不动，等 online 事件）
+    this._resumeBackgroundPushes();
+  },
+
+  /** 立刻掐断所有在飞的 GET（POST 不动：正在写的数据不能半途打断） */
+  abortInFlightReads(reason = '') {
+    let count = 0;
+    this._inFlightReads.forEach(controller => {
+      try { controller.abort(); count += 1; } catch (error) { /* 忽略 */ }
+    });
+    this._inFlightReads.clear();
+    return count;
+  },
+
+  /* ---------------- 🔒 视图优先级锁（用户主动载入的数据最高优先） ---------------- */
+
+  /** 清掉过期锁；返回仍生效的锁数量 */
+  _expireViewPins() {
+    let expired = 0;
+    for (const [key, pin] of [...this._viewPins]) {
+      /* userModified 是用户亲手载入的最高级别标记：不因时间过期，
+         只有 clearViewPins() / hardResetAll() / nukeAllStorage() / 亲手清空才解除。 */
+      if (pin && (pin.userModified === true
+        || Date.now() - Number(pin.at || 0) <= VIEW_PIN_TTL_MS)) continue;
+      this._viewPins.delete(key);
+      expired += 1;
+    }
+    if (expired) {
+      this._persistViewPins();
+      console.log(`[Store] 🔒 ${expired} 个视图优先级锁已到期，恢复正常云端同步`);
+    }
+    if (!this._viewPins.size) {
+      /* 最后一个锁到期：解除后台暂停并重排被挂起的续传，别把其它表单的写入永久冻住 */
+      if (expired) this._releaseViewPinHold();
+      else this._backgroundSyncHolds.delete(VIEW_PIN_PUSH_HOLD);
+    }
+    return this._viewPins.size;
+  },
+
+  /** 这个键正被「用户主动载入」的视图优先级锁保护？ */
+  isViewPinned(key) {
+    if (!this._viewPins.has(key)) return false;
+    this._expireViewPins();
+    return this._viewPins.has(key);
+  },
+
+  /** 用户亲手载入的最高级别标记：刷新后备份 / 云端一律不许覆盖 */
+  isUserModified(key) {
+    return this.isViewPinned(key) && this._viewPins.get(key)?.userModified === true;
+  },
+
+  /** 排障：列出所有带 userModified 标记的键 */
+  getUserModifiedKeys() {
+    return [...this._viewPins.entries()]
+      .filter(([, pin]) => pin?.userModified === true)
+      .map(([key]) => key);
+  },
+
+  /** 当前是否存在任一视图优先级锁（供离线资源库跳过 store:sync 对账） */
+  hasViewPin() {
+    return this._expireViewPins() > 0;
+  },
+
+  /**
+   * 🔒 把用户刚载入的数据钉成当前视图的最高优先级。
+   * ① 该键的历史待写队列 / 续传定时器 / 保护锁 / 熔断 / 清空标记全部拔掉；
+   * ② 内存缓存 + localStorage 主键立刻写成这份新数据（不推云端）；
+   * ③ 挂上后台推送暂停，旧队列一条 POST 都发不出去；
+   * ④ 摘要持久化，刷新后所有同源页面继续认这份数据。
+   */
+  pinLocalView(key, value, reason = '用户主动载入本地数据', options = {}) {
+    if (!STORE_KEYS.includes(key)) return { ok: false, reason: `未知存储键 ${key}` };
+    /* 🔒 userModified=true：用户亲手载入的数据，最高级别标记。
+       刷新后不被 TTL 淘汰，任何备份 / 云端都不许覆盖（直到手动解除或终极清理）。 */
+    const userModified = options.userModified === true;
+    this._expireViewPins();
+    const criticalTimer = this._criticalTimers.get(key);
+    if (criticalTimer) { clearTimeout(criticalTimer); this._criticalTimers.delete(key); }
+    const clearTimer = this._clearRetryTimers.get(key);
+    if (clearTimer) { clearTimeout(clearTimer); this._clearRetryTimers.delete(key); }
+    this._pendingWrites.delete(key);
+    this._failedWrites.delete(key);
+    this._deferredWrites.delete(key);
+    this._pendingClearKeys.delete(key);
+    this._localWrites.delete(key);
+    try { localStorage.removeItem(this._lockKeyOf(key)); } catch (error) { /* 忽略 */ }
+    this.cache.set(key, value);
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch (error) {
+      console.warn(`[Store] 🔒 写入视图数据失败：${key}`, error);
+    }
+    const epoch = ++this._viewPinEpoch;
+    this._viewPins.set(key, {
+      epoch, at: Date.now(), reason, userModified, version: VIEW_PIN_SCHEMA_VERSION,
+    });
+    this._persistViewPins();
+    this._backgroundSyncHolds.add(VIEW_PIN_PUSH_HOLD);
+    this._pauseCriticalTimers();
+    console.log(`[Store] 🔒 视图优先级锁 #${epoch}（${reason}）：${key} 以刚载入的数据为最高优先级`
+      + `${userModified ? '，已打上 userModified:true（刷新后备份与云端都不许覆盖）' : ''}`
+      + '；解除用 Store.clearViewPins()');
+    return { ok: true, epoch, key, userModified };
+  },
+
+  /**
+   * ✅ 保存成功后把当前视图的最新值【硬写】进内存缓存 + localStorage 主键。
+   * 不走 write() 的合并 / 未确认锁 / 云端推送，也不派发 store:sync ——
+   * 保证下一次 read()（尤其是切回页面重新初始化时）读到的绝对是这一版。
+   * 🔒 同时让视图优先级锁继续保持锁定：保存成功绝不解锁，切页时任何后台同步都盖不掉。
+   */
+  commitView(key, value, options = {}) {
+    if (!STORE_KEYS.includes(key)) return { ok: false, reason: `未知存储键 ${key}` };
+    this.cache.set(key, value);
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch (error) {
+      console.warn(`[Store] ✅ 保存视图数据失败：${key}`, error);
+      return { ok: false, reason: error?.message || String(error) };
+    }
+    this._dropLocalBackup(key);
+    const pin = this._viewPins.get(key);
+    if (pin) {
+      pin.at = Date.now();
+      pin.version = VIEW_PIN_SCHEMA_VERSION;
+      if (options.userModified === true) pin.userModified = true;
+      this._persistViewPins();
+      this._backgroundSyncHolds.add(VIEW_PIN_PUSH_HOLD);
+    } else if (options.userModified === true) {
+      // 锁若因排障被解除过，只要本页确实载入过资源，保存成功就把它补回来
+      this.pinLocalView(key, value, options.reason || '用户保存的当前视图', { userModified: true });
+    }
+    return {
+      ok: true, key, pinned: Boolean(pin || this._viewPins.has(key)),
+      userModified: this._viewPins.get(key)?.userModified === true,
+    };
+  },
+
+  /** 解除某个键的视图优先级锁 */
+  unpinLocalView(key, reason = '') {
+    const removed = this._viewPins.delete(key);
+    this._persistViewPins();
+    if (!this._viewPins.size) this._releaseViewPinHold();
+    if (removed) console.log(`[Store] 🔓 已解除 ${key} 的视图优先级锁${reason ? `（${reason}）` : ''}`);
+    return removed;
+  },
+
+  /** 一次性解除全部视图优先级锁（控制台：window.clearViewPriority()） */
+  clearViewPins(reason = '控制台手动解除') {
+    const keys = [...this._viewPins.keys()];
+    this._viewPins.clear();
+    try { localStorage.removeItem(VIEW_PIN_KEY); } catch (error) { /* 忽略 */ }
+    this._releaseViewPinHold();
+    console.log(`[Store] 🔓 已解除 ${keys.length} 个视图优先级锁（${reason}）`);
+    return { ok: true, keys };
+  },
+
+  _releaseViewPinHold() {
+    const removed = this._backgroundSyncHolds.delete(VIEW_PIN_PUSH_HOLD);
+    if (removed) this._resumeBackgroundPushes();
+    return removed;
+  },
+
+  /** 只存摘要，不存整份大单元（避免占满 localStorage 配额） */
+  _persistViewPins() {
+    try {
+      const pins = {};
+      this._viewPins.forEach((pin, key) => { pins[key] = pin; });
+      if (Object.keys(pins).length) localStorage.setItem(VIEW_PIN_KEY, JSON.stringify(pins));
+      else localStorage.removeItem(VIEW_PIN_KEY);
+    } catch (error) { /* 忽略 */ }
+  },
+
+  /** 刷新后恢复：主键那份就是用户刚载入的资源，强制压回缓存并清掉历史锁 */
+  _restoreViewPins() {
+    let pins = {};
+    try { pins = JSON.parse(localStorage.getItem(VIEW_PIN_KEY) || '{}') || {}; } catch (error) { pins = {}; }
+    let restored = 0;
+    Object.entries(pins).forEach(([key, info]) => {
+      if (!STORE_KEYS.includes(key) || !info) return;
+      /* 摘要格式版本不符：丢弃，避免旧版本标记诈尸 */
+      if (info.version !== undefined && Number(info.version) !== VIEW_PIN_SCHEMA_VERSION) return;
+      const userModified = info.userModified === true;
+      const at = Number(info.at || 0);
+      // userModified 标记刷新后依然有效，不受 30 分钟 TTL 限制
+      if (!at || (!userModified && Date.now() - at > VIEW_PIN_TTL_MS)) return;
+      /* 主键可能已被清空：此时仍要恢复锁本身。
+         否则 userModified 保护会跟着主键一起消失，旧备份立刻反噬回来。 */
+      let value = null;
+      try {
+        const raw = localStorage.getItem(key);
+        if (raw !== null) value = JSON.parse(raw);
+      } catch (error) { value = null; }
+      const epoch = Number(info.epoch || 0) || ++this._viewPinEpoch;
+      this._viewPinEpoch = Math.max(this._viewPinEpoch, epoch);
+      this._viewPins.set(key, {
+        epoch, at, reason: info.reason || '刷新后续延',
+        userModified, version: VIEW_PIN_SCHEMA_VERSION,
+      });
+      if (value !== null) this.cache.set(key, value);   // 备份 / 旧缓存一律靠边站
+      try { localStorage.removeItem(this._lockKeyOf(key)); } catch (error) { /* 忽略 */ }
+      this._pendingWrites.delete(key);
+      this._failedWrites.delete(key);
+      this._deferredWrites.delete(key);
+      restored += 1;
+    });
+    if (this._viewPins.size) this._backgroundSyncHolds.add(VIEW_PIN_PUSH_HOLD);
+    else this._backgroundSyncHolds.delete(VIEW_PIN_PUSH_HOLD);
+    if (restored) {
+      this._persistViewPins();       // 顺手清掉已过期的条目
+      console.log(`[Store] 🔒 刷新后恢复 ${restored} 个视图优先级锁：优先使用本机刚载入的数据，`
+        + '历史保护锁已作废，后台旧队列不参与补推');
+    }
+    return restored;
+  },
+
+  /* ---------------- 离线状态（顶栏灰色标签的数据源） ---------------- */
+
+  isOfflineMode() { return this._offlineMode === true; },
+
+  /** 记一次网络失败：连续达到阈值才点亮离线标签；主动静默取消不算断网 */
+  _noteNetworkFailure(reason = '') {
+    if (this.isQuietLocalMode()) return;
+    this._networkFailures += 1;
+    if (!this._offlineSince) this._offlineSince = Date.now();
+    if (this._networkFailures >= OFFLINE_BADGE_THRESHOLD) this._setOfflineMode(true, reason);
+  },
+
+  /** 任意一次云端请求成功就立刻复位，标签随之消失 */
+  _noteNetworkSuccess() {
+    if (this._networkFailures === 0 && !this._offlineMode) return;
+    this._networkFailures = 0;
+    this._offlineSince = 0;
+    this._setOfflineMode(false, '云端请求已恢复');
+  },
+
+  /** 状态变化才派发 store:network（同页 / iframe 父页都能收到），避免高频刷事件 */
+  _setOfflineMode(on, reason = '') {
+    if (this._offlineMode === on) return;
+    this._offlineMode = on;
+    console.log(`[Store] ${on ? '🌐 进入离线模式（数据保存在本机），后台重试降为 1 分钟一次'
+      : '▶ 网络恢复，退出离线模式'}：${reason}`);
+    if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function') return;
+    const fire = target => {
+      try {
+        const Ctor = typeof target.CustomEvent === 'function' ? target.CustomEvent : CustomEvent;
+        target.dispatchEvent(new Ctor('store:network', { detail: { offline: on, reason } }));
+      } catch (error) { /* 跨域 iframe 忽略 */ }
+    };
+    fire(window);
+    try {
+      if (window.parent && window.parent !== window) fire(window.parent);
+      if (window.top && window.top !== window && window.top !== window.parent) fire(window.top);
+    } catch (error) { /* 忽略 */ }
+  },
+
+  /* ---------------- 历史脏队列延期 / 网络恢复自愈 ---------------- */
+
+  /**
+   * 🌐 把历史积压的待写队列「延期隔离」：只移出自动重推队列，
+   * 业务数据 + localStorage 保护锁一个都不动，连定时器也全部停掉。
+   * olderThanMs > 0 时只延期超过该时长的旧条目（0 = 全部）。
+   * 恢复方式：online 事件 / 手动执行 Store.handleOnline()。
+   */
+  deferPendingQueue(reason = '本地离线操作', olderThanMs = 0) {
+    const cutoff = olderThanMs > 0 ? Date.now() - olderThanMs : Infinity;
+    let deferred = 0;
+    for (const [key, entry] of [...this._pendingWrites]) {
+      if (entry?.at && entry.at > cutoff) continue;
+      this._pendingWrites.delete(key);
+      this._deferredWrites.set(key, { ...entry, deferredAt: Date.now(), deferredReason: reason });
+      const timer = this._criticalTimers.get(key);
+      if (timer) { clearTimeout(timer); this._criticalTimers.delete(key); }
+      /* 盘上保护锁打 deferred 标记：刷新后 _restoreUnconfirmed 仍认得它，
+         不会又放回待写队列疯狂重推；锁本身必须留着保护本地数据。 */
+      try {
+        const lockKey = this._lockKeyOf(key);
+        const raw = localStorage.getItem(lockKey);
+        const info = raw ? JSON.parse(raw) : {};
+        localStorage.setItem(lockKey, JSON.stringify({ ...info, deferred: true, deferredReason: reason }));
+      } catch (error) { /* 忽略 */ }
+      deferred += 1;
+    }
+    console.log(`[Store] 🌐 ${reason}：已延期隔离 ${deferred} 条历史待写数据`
+      + '（数据与保护锁完整保留，不再自动 POST；网络恢复 / online 事件后自动回到队列）');
+    return deferred;
+  },
+
+  /**
+   * ▶ 网络恢复自愈（window 的 online 事件 / 手动执行 Store.handleOnline()）
+   * ① 解除离线模式与静默本地模式（它们会挡住补推）
+   * ② 延期区的历史数据放回待写队列，并清掉盘上 deferred 标记
+   * ③ 重新排队续传；请求成功后 _doFetch 会自动复位离线标签
+   */
+  handleOnline(reason = '浏览器 online 事件') {
+    this._setOfflineMode(false, `${reason}，开始自愈`);
+    this.exitQuietLocalMode();
+    /* 🔒 视图优先级锁的推送暂停也要让位给「网络恢复自愈」：
+       本地视图仍被 pin 保护（云端覆盖不进来），但延期队列必须能重新回队续传。 */
+    this._releaseViewPinHold();
+    let restored = 0;
+    for (const [key, entry] of [...this._deferredWrites]) {
+      const original = { ...entry };
+      delete original.deferredAt;
+      delete original.deferredReason;
+      if (!this._pendingWrites.has(key)) {
+        this._pendingWrites.set(key, original);
+        restored += 1;
+      }
+      this._deferredWrites.delete(key);
+      try {
+        const lockKey = this._lockKeyOf(key);
+        const raw = localStorage.getItem(lockKey);
+        if (raw) {
+          const info = JSON.parse(raw);
+          delete info.deferred;
+          delete info.deferredReason;
+          localStorage.setItem(lockKey, JSON.stringify(info));
+        }
+      } catch (error) { /* 忽略 */ }
+    }
+    const scheduled = this._resumeBackgroundPushes({ force: true, all: true });
+    console.log(`[Store] ▶ 网络恢复自愈（${reason}）：延期数据回队 ${restored} 条，重排续传 ${scheduled} 个`);
+    return { ok: true, restored, scheduled, deferred: this._deferredWrites.size };
+  },
+
+  /** 幂等注册 online 监听：即使 Layout 没加载，Store 自己也能完成自愈 */
+  _bindOnlineRecovery() {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
+    if (window.__storeOnlineRecoveryBound) return;
+    window.__storeOnlineRecoveryBound = true;
+    window.addEventListener('online', () => {
+      try { this.handleOnline('online 事件'); }
+      catch (error) { console.warn('[Store] 网络恢复自愈失败', error); }
+    });
+  },
+
   /** 后台静默同步（对外：手动刷新数据用）。失败会自动重试一次。 */
   async sync({ attempts = MAX_SYNC_ATTEMPTS } = {}) {
+    // 🤫 静默本地模式：一个 GET 都不发，安静用本地缓存
+    if (this.isQuietLocalMode()) return { ok: false, changed: [], reason: 'quiet' };
+    if (this.isGenerating()) {
+      console.warn('[Store] ⏸ 大单元生成中，本次同步已跳过（绝不拉取云端覆盖本地）');
+      return { ok: false, changed: [], reason: 'generating' };
+    }
     if (this._cloudPaused) return { ok: false, changed: [], reason: 'paused' };
     if (this.syncing) return { ok: false, changed: [], reason: 'syncing' };
     this.syncing = true;
@@ -305,7 +849,15 @@ const Store = {
       try {
         return await this._syncOnce({ timeout });
       } catch (error) {
+        // 🤫 静默取消：不重试、不标记未连接、不弹任何超时提示
+        if (error?.quiet) return { ok: false, changed: [], reason: 'quiet', failed: false };
         lastError = error;
+        if (isNetworkFailure(error)) {
+          /* 断网时不做 1.2 秒后的第二次尝试：两发各等 20 秒超时纯属浪费，
+             重连统一交给 1 分钟级的 _scheduleReconnect。 */
+          console.warn('[Store] 🌐 网络不通，跳过本次同步的短间隔重试（避免断网时高频打后端）');
+          break;
+        }
         if (attempt < attempts) {
           // 注意：上一发请求此时已经彻底结束（_doFetch 内部等过 _settle），
           // 再等 RETRY_DELAY 才发下一发，串行且不堆积
@@ -367,8 +919,24 @@ const Store = {
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
     let timer = null;
     let request = null;
+    let timedOut = false;
+    const startedAt = Date.now();
+    const method = String(options?.method || 'GET').toUpperCase();
+    const isRead = method === 'GET' || method === 'HEAD';
+    // 登记在飞 GET：进入静默本地模式时能立刻 abort，而不是干等 20 秒超时
+    if (isRead && controller) this._inFlightReads.add(controller);
+    let bodyBytes = 0;
+    try {
+      if (typeof options?.body === 'string') {
+        bodyBytes = typeof Blob !== 'undefined'
+          ? new Blob([options.body]).size
+          : (typeof Buffer !== 'undefined' ? Buffer.byteLength(options.body, 'utf8') : options.body.length);
+      }
+    } catch (error) { /* 体积只是诊断信息，算不出来不影响请求 */ }
+    const payloadKB = (bodyBytes / 1024).toFixed(1);
     const timeoutRace = new Promise((_, reject) => {
       timer = setTimeout(() => {
+        timedOut = true;
         if (controller) controller.abort();
         reject(new Error(`请求 ${url} 超时（${timeout}ms）`));
       }, timeout);
@@ -379,21 +947,71 @@ const Store = {
       if (!response.ok) {
         /* 把服务端返回的错误体读出来：
            403 + code=ADMIN_REQUIRED 是"游客没登录管理员"，不是"写入失败" ——
-           带上 adminRequired 标记，让上层安静处理，别报成同步失败。 */
+           带上 adminRequired 标记，让上层安静处理，别报成同步失败。
+           502 的响应体里带着服务端写 Supabase 的真实原因，必须挂到 error 上供 catch 打印。 */
         let detail = null;
         try { detail = await response.json(); } catch (parseError) { /* 响应体不是 JSON，忽略 */ }
         const error = new Error(detail?.error || `${url} 返回 HTTP ${response.status}`);
         error.status = response.status;
         error.code = detail?.code || '';
+        error.hint = detail?.hint || '';
+        error.detail = detail;
         if (detail?.adminRequired === true) error.adminRequired = true;
         throw error;
       }
-      return await response.json();
+      const payload = await response.json();
+      this._noteNetworkSuccess();   // 任意一次云端请求成功，立刻复位离线状态与顶栏标签
+      return payload;
     } catch (error) {
       // 等 abort 真正生效、这一发结束，再让上层重试
       await this._settle(request);
+      const message = error?.message || String(error);
+      const aborted = timedOut || error?.name === 'AbortError' || /signal is aborted/i.test(message);
+      const netFail = aborted || isNetworkFailure(error);
+      /* 🤫 静默本地模式：被我们主动取消 / 因云端慢而超时的 GET，一律安静回退本地缓存。
+         不打印红色错误、不归一化成「超时」、不抛给 _syncWithRetry 触发 toast 和重连。 */
+      if (isRead && this.isQuietLocalMode() && (aborted || !error?.status || error?.status >= 500)) {
+        console.log(`[Store] 🤫 静默本地模式（${this._quietReason}）：${method} ${url} 已取消/超时，`
+          + '安静回退本地缓存，不弹超时提示');
+        const quietError = new Error('后台同步已静默取消');
+        quietError.quiet = true;
+        throw quietError;
+      }
+      /* 把「网络不通」标记透传给上层：POST 失败只 warn、不弹红色弹窗、不计熔断。 */
+      if (error && typeof error === 'object') error.networkFailure = netFail;
+      if (netFail) this._noteNetworkFailure(`${method} ${url}：${message}`);
+      const requestDetail = {
+        url, method, timeoutMs: timeout, elapsedMs: Date.now() - startedAt,
+        payloadKB, status: error?.status || '', code: error?.code || '',
+        name: error?.name || '', message,
+        serverError: error?.detail?.error || '', serverHint: error?.hint || '',
+        cause: error?.cause?.message || '', stack: error?.stack || '',
+      };
+      if (netFail) {
+        /* 🌐 断网：只打一条警告，不再 console.error 制造满屏红色失败。
+           数据由上层静默留在本地待写队列，联网后续传。 */
+        console.warn(`[Store] 🌐 网络不可用（${method} ${url}）：${message}`
+          + '；本次数据静默保留在本机，后台重试已降为 1 分钟一次', requestDetail);
+      } else {
+        /* 业务错误才打完整明细：服务端 error/hint/code 用于定位表结构冲突等问题。 */
+        console.error('[Store] ❌ 请求失败明细（HTTP 或业务错误）', requestDetail);
+      }
+      /* abort 一触发，fetch 自己抛的 AbortError 会抢先赢过 Promise.race 里的超时错误，
+         上层只看到 "signal is aborted"。归一化成明确的超时错误，并带上排障指引。 */
+      if (aborted && !error?.status) {
+        const timeoutError = new Error(
+          `请求 ${method} ${url} 超时/被中断（上限 ${timeout}ms，耗时 ${Date.now() - startedAt}ms，payload ${payloadKB}KB）；`
+          + '多半是服务端 /api/data 写 Supabase 卡住或进程崩溃，请看 server.js 控制台的崩溃栈',
+        );
+        timeoutError.timeout = true;
+        timeoutError.networkFailure = true;
+        timeoutError.name = 'StoreRequestTimeout';
+        timeoutError.cause = error;
+        throw timeoutError;
+      }
       throw error;
     } finally {
+      if (isRead && controller) this._inFlightReads.delete(controller);
       if (timer) clearTimeout(timer);
     }
   },
@@ -407,6 +1025,13 @@ const Store = {
 
   /** 单次同步：失败一律 throw，由 _syncWithRetry 负责重试与降级 */
   async _syncOnce({ timeout = REQUEST_TIMEOUT } = {}) {
+    // 🤫 静默本地模式：一个 GET 都不发，安静用本地缓存
+    if (this.isQuietLocalMode()) return { ok: false, changed: [], reason: 'quiet' };
+    // ⏸ 生成期间：连 GET 都不发 —— 云端旧数据一点机会都没有
+    if (this.isGenerating()) {
+      console.warn('[Store] ⏸ 大单元生成中，_syncOnce 空转（未发出任何云端请求）');
+      return { ok: false, changed: [], reason: 'generating' };
+    }
     // ⏸ 排障 / 强行恢复期间：连请求都不发，云端 0 条一点机会都没有
     if (this._cloudPaused) return { ok: false, changed: [], reason: 'paused' };
     const epoch = this._purgeEpoch;      // 发出请求时记下世代号
@@ -414,6 +1039,8 @@ const Store = {
     try {
       payload = await this._fetchJSON('/api/data', { headers: { Accept: 'application/json' } }, timeout);
     } catch (error) {
+      // 🤫 被静默取消的请求：不当成同步失败，安静回退本地缓存
+      if (error?.quiet) return { ok: false, changed: [], reason: 'quiet' };
       this.lastError = error;
       throw error;
     }
@@ -447,7 +1074,9 @@ const Store = {
       ])];
       this._mirrorLocal(toMirror);
       this._logOverwrite(changed, before);
-      if (!this._backedUp) { this._backupLocal(); this._backedUp = true; }
+      /* 🧹 不再每次会话生成 17 份 __local_backup（那正是几百 KB 冗余镜像堆积的源头）。
+         正常同步成功后只清掉历史上没有时间戳 / 超过 24 小时的遗留镜像。 */
+      if (!this._backedUp) { this._clearStaleLocalBackups(); this._backedUp = true; }
       this.lastSyncAt = Date.now();
 
         // 个别表结构异常（缺列等）时明确提示，避免"以为同步了其实没有"
@@ -534,6 +1163,14 @@ const Store = {
 
   /** 标记为未连接：清空云端状态 + 派发事件让页面（含迁移页）立刻显示"未连接" */
   _markDisconnected(error, silent = true) {
+    /* 🤫 静默本地模式：云端连不上也安静用本地缓存，绝不派发 failed 事件弹超时、不排重连 */
+    if (this.isQuietLocalMode()) {
+      console.log(`[Store] 🤫 静默本地模式（${this._quietReason}）：云端不可用，已安静回退本地缓存`);
+      return;
+    }
+    /* 一次完整 sync 失败 = 底层一发 + 判定未连接，合计两次网络失败 → 点亮离线标签。
+       断网时不再做短重试，这里补齐阈值，用户第一屏就能看到真实网络状态。 */
+    if (isNetworkFailure(error) && !this.isOfflineMode()) this._noteNetworkFailure('同步连续超时');
     this.cloudState = 'off';
     this.mode = 'local';
     if (silent) console.warn('[Store] 云端不可用，已回退本地存储：', error?.message || error);
@@ -543,11 +1180,15 @@ const Store = {
 
   /** 判定未连接后定时重连（最多 MAX_RECONNECT 次），网络恢复后自动用云端数据覆盖本地 */
   _scheduleReconnect() {
+    if (this.isQuietLocalMode()) return;   // 🤫 静默期间别排重连，否则 8 秒后又来一次超时
     if (typeof window === 'undefined' || this._reconnectTimer) return;
     if (this._reconnectAttempts >= MAX_RECONNECT) return;
     this._reconnectAttempts += 1;
-    const delay = RECONNECT_DELAY * this._reconnectAttempts;
-    console.warn(`[Store] 将在 ${delay / 1000} 秒后第 ${this._reconnectAttempts}/${MAX_RECONNECT} 次尝试重连云端…`);
+    /* 🌐 断网：重连从 8/16/24 秒拉长到 1/2/3 分钟，绝不把本地服务器打成筛子 */
+    const offline = this.isOfflineMode();
+    const delay = (offline ? OFFLINE_RETRY_MS : RECONNECT_DELAY) * this._reconnectAttempts;
+    console.warn(`[Store] ${offline ? '🌐 离线模式：' : ''}将在 ${delay / 1000} 秒后`
+      + `第 ${this._reconnectAttempts}/${MAX_RECONNECT} 次尝试重连云端…`);
     this._reconnectTimer = setTimeout(async () => {
       this._reconnectTimer = null;
       const result = await this.sync();
@@ -597,7 +1238,21 @@ const Store = {
       console.warn('[Store] ⏸ 云端同步已暂停，本次云端数据未落到本地（forceRecover 期间保护本地数据）');
       return changed;
     }
+    /* ⏸ 生成期间：即使有请求在冻结【之前】就发出去了，回来也一律作废 ——
+       这是"生成到一半被云端旧快照盖掉模块 4/5/6"的最后一道闸门。 */
+    if (this.isGenerating()) {
+      console.warn('[Store] ⏸ 大单元生成中，_applyCloud 空转：云端返回的旧数据一律不落本地');
+      return changed;
+    }
     STORE_KEYS.forEach(key => {
+      /* 🔒 视图优先级锁（最高优先，连 force:true 也绕不过）：
+         用户刚主动从离线资源库载入的这份数据是【当前视图的唯一可信副本】，
+         云端旧快照、后台同步结果、未确认锁、反推自愈一律不许碰它。
+         解除方式：Store.clearViewPins() / 锁到期 / hardResetAll()。 */
+      if (this.isViewPinned(key)) {
+        protectedKeys.push(key);
+        return;
+      }
       const current = this.cache.get(key);
       /* ⛔ 空值锁作废：
          这把锁护的是一份【空】数据（多半是页面初始化时把空快照写回了共享存储）。
@@ -650,6 +1305,23 @@ const Store = {
       const next = data[key] === undefined ? null : data[key];
       const cloudEmpty = this._isEmptyValue(next);
       const localHasData = !this._isEmptyValue(current);
+      /* 🛑 大单元「防覆盖强锁」：
+         云端那份 pe_big_unit_design_v1 缺了核心模块（objectives / textbookAnalysis / …），
+         而本地这些模块是有内容的 → 直接拒绝覆盖并报警。
+         典型现场：生成到模块 6 时，云端还停留在只有模块 1–3 的旧快照，
+         一次静默同步就把刚生成的模块 4、5、6 整份洗掉。
+         force=true 是用户在排障界面【亲手】点的"以云端为准"，才放行。 */
+      if (key === UNIT_DESIGN_KEY && !force && this._isPlainObject(current)) {
+        const missing = UNIT_DESIGN_CORE_FIELDS.filter(field =>
+          this._unitFieldHasData(current[field]) && !this._unitFieldHasData(next?.[field]));
+        if (missing.length) {
+          console.warn(`[Store] ⛔ 云端 ${key} 缺少核心模块 ${missing.join('、')}，本地有内容 → `
+            + '拒绝覆盖本地，并把本地这份反推回云端');
+          report.refused.push(key);
+          this._pushBackToCloud(key, current);
+          return;
+        }
+      }
       /* ⛔ 「清空中」的键：云端回来的旧数据一律【不复活到本地】，
          也绝不触发"反推自愈"（把这份旧数据又推回云端）。
          这是"用户亲手清空体测数据"必须绝对可靠的最后一道闸门：
@@ -739,6 +1411,10 @@ const Store = {
       this.cache.set(key, next);
       changed.push(key);
     });
+    const pinnedKeys = [...this._viewPins.keys()].filter(key => STORE_KEYS.includes(key));
+    if (pinnedKeys.length) {
+      console.log(`[Store] 🔒 视图优先级锁保护中（云端一律不覆盖、也不反推）：${pinnedKeys.join('、')}`);
+    }
     if (protectedKeys.length) {
       console.warn(`[Store] ⛔ 云端数据未覆盖这些键（本地刚写入、云端还没确认，稍后自动补推）：${protectedKeys.join('、')}`);
     }
@@ -752,12 +1428,31 @@ const Store = {
   _pushBackToCloud(key, value) {
     if (this._readOnlyPull) return;                // ⛔ 纯拉取模式：绝不向云端发送任何修改
     if (this._cloudPaused) return;                 // ⏸ 暂停期间不上锁、不推送
+    if (this._backgroundPushBlocked()) return;     // ⏸ 生成 / 载入期间「反杀云端」也不许发 POST
     if (this.cloudState === 'off') return;         // 明确没配云端 / 服务端 503，不做无谓重试
     if (this._pendingWrites.has(key)) return;      // 已经有写入在飞/待推，不重复排队
     this._localWrites.add(key);
     this._markUnconfirmed(key, value);             // 同步上锁（防推进过程中被云端空数据反扑）
     this._persistSafely(key, value);               // 立即推一次，失败由 _scheduleCriticalRetry 接力
     this._scheduleCriticalRetry(key);
+  },
+
+  /**
+   * 大单元某个模块里是否【真的有内容】。
+   * 注意 createEmptyUnit() 会造出 18 条空课时 / 18 个空节点，
+   * 所以不能只看数组 length —— 必须看里面的文字，否则强锁会永远不触发。
+   */
+  _unitFieldHasData(value) {
+    if (value === null || value === undefined) return false;
+    if (typeof value === 'string') return value.trim().length > 0;
+    if (typeof value === 'number' || typeof value === 'boolean') return Boolean(value);
+    if (Array.isArray(value)) return value.some(item => this._unitFieldHasData(item));
+    if (this._isPlainObject(value)) {
+      // 只认内容字段，跳过 no / dimension / id 这类结构性字段
+      return Object.entries(value).some(([field, item]) =>
+        !['no', 'id', 'dimension'].includes(field) && this._unitFieldHasData(item));
+    }
+    return false;
   },
 
   /** 判断一个值算不算"空"（null / 空数组 / 空对象）；字符串与数字不算空，避免误判标题等标量 */
@@ -778,6 +1473,9 @@ const Store = {
    */
   _mirrorLocal(keys = STORE_KEYS) {
     keys.forEach(key => {
+      /* 🔒 视图优先级锁：本地镜像已经由 pinLocalView() 写成刚载入的资源，
+         云端同步 / 其它页面的旧缓存一律不许再回写覆盖它。 */
+      if (this.isViewPinned(key)) return;
       if (this._pendingWrites.has(key)) return;   // 有锁：这个键的本地镜像由写入方负责
       try {
         const value = this.cache.get(key);
@@ -841,6 +1539,7 @@ const Store = {
       const purgedKeys = this._consumeForeignPurge(key);
       if (purgedKeys && purgedKeys.length) {
         purgedKeys.forEach(purgeKey => {
+          this.unpinLocalView(purgeKey, '其它页面明确清空');   // 用户亲手清空优先于视图锁
           this.cache.delete(purgeKey);
           this._localWrites.delete(purgeKey);
           this._failedWrites.delete(purgeKey);
@@ -849,6 +1548,12 @@ const Store = {
         });
         console.log(`[Store] 🧨 检测到其它页面执行了清空指令，已同步清空：${purgedKeys.join('、')}（不再从备份复活）`);
         this._dispatchSync(purgedKeys, { reason: 'purgeKeys', crossDocument: true });
+        return;
+      }
+      /* 🔒 用户刚主动载入的资源是最高优先级：其它 iframe / 标签页的旧缓存一律不接收，
+         也不派发 store:sync 让页面拿旧数据重绘。 */
+      if (this.isViewPinned(key)) {
+        console.log(`[Store] 🔒 ${key} 处于视图优先级锁保护中，忽略其它页面传来的旧数据`);
         return;
       }
       // 本页这份键还有「云端未确认」的写入 → 保留本地，绝不让别人（或云端旧值）覆盖
@@ -968,6 +1673,15 @@ const Store = {
 
   /** 页面渲染前调用一次（或直接把渲染函数交给 onReady） */
   read(key, fallback = null) {
+    /* 🔒 视图优先级锁：当前视图以用户刚载入、已落到主键的那份数据为准。
+       就算有谁把内存缓存改回了旧快照，read() 也一律重新对齐主键 ——
+       unit-design.js 的 loadUnitData() / Store.onReady 重绘因此拿不到旧数据。 */
+    if (this.isViewPinned(key)) {
+      try {
+        const raw = localStorage.getItem(key);
+        this.cache.set(key, raw === null ? null : JSON.parse(raw));
+      } catch (error) { /* 忽略 */ }
+    }
     /* 缓存还没灌（页面脚本常在 Store.start() 之前就 read()）：
        先把 localStorage 镜像灌进缓存，绝不能因为"缓存里没有"就返回空 ——
        报名页 pageData = loadMeetData() 就是这么拿到 0 条、渲染出空页面的。 */
@@ -975,7 +1689,9 @@ const Store = {
     /* ⛔ 自愈底线：只要主数据是空的，就【无条件、同步】试一次时光机备份。
        不看云同步走到哪一步、不看有没有差异 —— 备份在，任何页面任何时刻读到的都必须是 216 条。
        这是"三个页面（报名 / 赛程 / 成绩）表现绝对一致"的最后保证。 */
-    if (this._isMeetKey(key) && !this._isClearPending(key)) this._healMeetDataFromBackup(key);
+    if (this._isMeetKey(key) && !this.isViewPinned(key) && !this._isClearPending(key)) {
+      this._healMeetDataFromBackup(key);
+    }
     const value = this.cache.get(key);
     const result = value === undefined ? fallback : value;
     if (this._isMeetKey(key)) {
@@ -1021,6 +1737,12 @@ const Store = {
     const before = this._isMeetKey(key) ? this.cache.get(key) : undefined;
     const previousValue = this._isMeetKey(key) ? before : this._readLocalValue(key);
     const merged = this._mergeMeetData(key, value, options);   // ⛔ 空覆盖在这里抛异常
+    /* 🔒 用户载入资源后继续编辑：编辑结果仍属于「当前视图」，刷新锁的有效期，
+       后台依旧不能用编辑之前的旧快照反盖回来。 */
+    if (this.isViewPinned(key)) {
+      const pin = this._viewPins.get(key);
+      if (pin) { pin.at = Date.now(); this._persistViewPins(); }
+    }
     this._traceEmptyWrite(key, before, merged, 'write()');      // 🚨 看门狗：谁把主数据写成 0 条
     /* ⛔ 游客模式（只读身份）：一份写请求都不发。
        ① 不写云端（不发请求 → 不会 403 → 不会弹任何窗）；
@@ -1057,6 +1779,9 @@ const Store = {
     } catch (error) {
       console.warn(`[Store] 写入本地镜像失败：${key}`, error);
     }
+    /* 🧹 正常保存成功后立刻清掉这个键的旧 __local_backup 镜像：
+       主键已经是最新数据，旧镜像留着只会被误当成"可恢复的旧数据"，还会越堆越大。 */
+    this._dropLocalBackup(key);
     if (this._isMeetKey(key)) this._updateBackup(key, merged, options);
     if (options.push === false) return merged;
     // 云端可用才需要"未确认保护"（纯本地模式没有云端数据来覆盖）；
@@ -1243,7 +1968,8 @@ const Store = {
   _updateBackup(key, value, options = {}) {
     if (this._hasContent(key, value)) {
       const payload = JSON.stringify({
-        savedAt: Date.now(), key, count: this._countOf(value), data: value,
+        savedAt: Date.now(), version: BACKUP_SCHEMA_VERSION,
+        key, count: this._countOf(value), data: value,
       });
       try {
         localStorage.setItem(this._backupKeyOf(key), payload);
@@ -1262,21 +1988,53 @@ const Store = {
     }
   },
 
-  /** 读某个键的备份槽：优先自己的分槽，退回老版本的裸备份（且必须是同一个键） */
+  /**
+   * 🕒 备份合法性：返回空串 = 可用；'foreign' = 属于别的键（不能用，但别删）；
+   * 其它字符串 = 不合格原因（必须丢弃这份备份，禁止恢复）。
+   * 旧格式（没有 version）只在「有合法时间戳 + 24 小时内」时兼容；
+   * 没有时间戳、超时、版本不符、结构不符、内容为空的一律判死。
+   */
+  _validateBackupSlot(key, slot) {
+    if (!slot || typeof slot !== 'object' || Array.isArray(slot)) return '格式不是备份对象';
+    if (slot.key && slot.key !== key) return 'foreign';
+    if (slot.version !== undefined && Number(slot.version) !== BACKUP_SCHEMA_VERSION) {
+      return `版本 ${slot.version} 与当前版本 ${BACKUP_SCHEMA_VERSION} 不符`;
+    }
+    const savedAt = Number(slot.savedAt || 0);
+    if (!Number.isFinite(savedAt) || savedAt <= 0) return '缺少时间戳';
+    if (savedAt > Date.now() + 60 * 1000) return '时间戳来自未来';
+    if (Date.now() - savedAt > BACKUP_MAX_AGE_MS) return `备份已超过 ${Math.round(BACKUP_MAX_AGE_MS / 3600000)} 小时`;
+    if (!Object.prototype.hasOwnProperty.call(slot, 'data')) return '缺少 data';
+    if (!this._hasContent(key, slot.data)) return '备份内容为空';
+    if (this._isCountableMeetKey(key) && !this._isPlainObject(slot.data)) return '数据结构与当前版本不符';
+    return '';
+  },
+
+  /** 读某个键的备份槽：优先分槽，退回老版本裸备份；不合格的直接删掉，绝不让它复活 */
   _readBackupSlot(key) {
-    const parse = raw => {
+    const parse = (raw, slotKey) => {
       if (!raw) return null;
-      try {
-        const slot = JSON.parse(raw);
-        if (!slot || typeof slot !== 'object') return null;
-        if (slot.key && slot.key !== key) return null;      // 这份备份属于别的键，不能用
-        return slot;
-      } catch (error) {
+      let slot = null;
+      try { slot = JSON.parse(raw); } catch (error) {
+        this._dropBackupSlot(slotKey, '备份不是合法 JSON');
         return null;
       }
+      const invalid = this._validateBackupSlot(key, slot);
+      if (invalid) {
+        // 属于别的键的裸备份：留着给那个键用，这里只是不认
+        if (invalid !== 'foreign') this._dropBackupSlot(slotKey, invalid);
+        return null;
+      }
+      return slot;
     };
-    return parse(localStorage.getItem(this._backupKeyOf(key)))
-      || parse(localStorage.getItem(MEET_BACKUP_KEY));
+    return parse(localStorage.getItem(this._backupKeyOf(key)), this._backupKeyOf(key))
+      || parse(localStorage.getItem(MEET_BACKUP_KEY), MEET_BACKUP_KEY);
+  },
+
+  /** 丢弃一份不合格的备份（连键一起删，避免下次刷新又来一次反噬） */
+  _dropBackupSlot(slotKey, reason) {
+    try { localStorage.removeItem(slotKey); } catch (error) { /* 忽略 */ }
+    console.warn(`[Store] 🗑 已丢弃时光机备份 ${slotKey}：${reason}，禁止用它覆盖当前数据`);
   },
 
   /**
@@ -1295,6 +2053,12 @@ const Store = {
         if (this._isClearPending(key)) return;         // 正在清空：备份也不许复活旧数据
         const slot = this._readBackupSlot(key);
         if (!slot) return;
+        /* 🔒 用户主动从离线资源库载入的数据带 userModified 标记（最高优先级）：
+           刷新时任何备份都不许覆盖它。云端那条路由 _applyCloud 的视图优先级锁挡住。 */
+        if (this.isUserModified(key)) {
+          console.log(`[Store] 🔒 ${key} 带 userModified 标记，跳过时光机备份恢复（当前视图优先）`);
+          return;
+        }
         if (!this._hasContent(key, slot.data)) return;            // 备份本身就是空的，没得恢复
         const current = this._readLocalValue(key);
         if (this._hasContent(key, current)) {
@@ -1406,15 +2170,19 @@ const Store = {
       this._dispatchSync([key], { localWrite: true, cloudConfirmed: true, critical: true });
       return { ok: true, mode: this.mode, localSaved: true };
     } catch (error) {
+      const netFail = isNetworkFailure(error);
       const failed = this._pendingWrites.get(key);
       if (failed) {
-        failed.attempts = (failed.attempts || 0) + 1;
+        if (!netFail) failed.attempts = (failed.attempts || 0) + 1;   // 断网不计失败次数
         failed.lastError = error?.message || String(error);
         failed.critical = true;
         this._writeLock(key, failed);            // 锁保持（重要表单永不上交云端旧数据）
       }
-      this._scheduleCriticalRetry(key);          // 后台持续续传，绝不静默丢弃
-      this._onPersistError(key, error);
+      if (netFail) {
+        console.warn(`[Store] 🌐 网络不可用：重要数据 ${key} 已完整保留在本机，未写入云端；不弹窗，1 分钟后自动续传`);
+      }
+      this._scheduleCriticalRetry(key);          // 断网时这里自动变成 1 分钟一次的长间隔
+      if (!netFail) this._onPersistError(key, error);   // 网络失败完全静默，业务错误才提示
       this._dispatchSync([key], { localWrite: true, cloudConfirmed: false, critical: true });
       return {
         ok: false, mode: this.mode, localSaved: true, error: error?.message || String(error),
@@ -1431,6 +2199,7 @@ const Store = {
       } catch (error) {
         lastError = error;
         if (error?.status === 503) throw error;
+        if (isNetworkFailure(error)) throw error;   // 断网不做短间隔重试，交给 1 分钟级续传
         if (attempt < attempts) await this._delay(RETRY_DELAY);
       }
     }
@@ -1440,11 +2209,30 @@ const Store = {
   /** 重要表单云端确认失败后的后台续传：按 CRITICAL_RETRY_DELAYS 逐步退避，成功即解除保护 */
   _scheduleCriticalRetry(key) {
     if (typeof window === 'undefined') return;
+    /* ⛔ 彻底堵死：静默本地模式 / 加载离线资源 / 生成中 / 断网离线 期间，
+       _restoreUnconfirmed 恢复出来的历史积压一律【连定时器都不设】。
+       以前只在 runNext 里重排定时器，静默 10 秒一过期照样 POST 502。
+       解冻或 online 事件时由 _resumeBackgroundPushes() / handleOnline() 统一重新排队。 */
+    const blockedNow = this._backgroundPushBlocked();
+    if (blockedNow) {
+      this._criticalTimers.delete(key);
+      console.log(`[Store] ⏸ ${key} 的历史补推已忽略（${blockedNow}）：不排定时器、不发 POST`);
+      return;
+    }
     if (this._criticalTimers.has(key)) return;
     let step = 0;
     const runNext = async () => {
       const entry = this._pendingWrites.get(key);
       if (!entry) { this._criticalTimers.delete(key); return; }
+      /* ⏸ 生成大单元 / 载入离线资源 / 云端暂停 / 断网期间：一个 POST 都不发，
+         并且【不再重排定时器】—— 直接摘掉句柄，等解冻或 online 事件重新排队。 */
+      const blocked = this._backgroundPushBlocked();
+      if (blocked) {
+        this._criticalTimers.delete(key);
+        console.log(`[Store] ⏸ ${key} 的后台补推已中止：${blocked}`
+          + '（数据与保护锁保留，解冻或 online 事件后自动重新排队）');
+        return;
+      }
       try {
         const sent = await this._persistEntry(key, entry);
         if (sent === false) {               // 空数据：闸门已交出锁，别再无限续传
@@ -1460,9 +2248,15 @@ const Store = {
         this._dispatchSync([key], { localWrite: true, cloudConfirmed: true, retried: true });
         return;
       } catch (error) {
-        entry.attempts = (entry.attempts || 0) + 1;
+        const netFail = isNetworkFailure(error);
+        if (!netFail) entry.attempts = (entry.attempts || 0) + 1;
         entry.lastError = error?.message || String(error);
         this._writeLock(key, entry);
+        if (netFail) {
+          /* 断网：不消耗 step（不会 4 次就耗尽停摆），统一 1 分钟后再试一次 */
+          this._criticalTimers.set(key, setTimeout(runNext, OFFLINE_RETRY_MS));
+          return;
+        }
         step += 1;
         if (step >= CRITICAL_RETRY_DELAYS.length) {
           this._criticalTimers.delete(key);
@@ -1472,7 +2266,8 @@ const Store = {
         this._criticalTimers.set(key, setTimeout(runNext, CRITICAL_RETRY_DELAYS[step]));
       }
     };
-    this._criticalTimers.set(key, setTimeout(runNext, CRITICAL_RETRY_DELAYS[0]));
+    this._criticalTimers.set(key, setTimeout(runNext,
+      this.isOfflineMode() ? OFFLINE_RETRY_MS : CRITICAL_RETRY_DELAYS[0]));
   },
 
   async _persistSafely(key, value, options = {}) {
@@ -1498,6 +2293,18 @@ const Store = {
         this.cloudState = 'off';
         this.mode = 'local';
         this._clearUnconfirmed(key);
+        return;
+      }
+      /* 🌐 断网：数据静默留在本地待写队列 —— 不计失败次数、不熔断、不弹窗，
+         只排 1 分钟一次的长间隔续传。 */
+      if (isNetworkFailure(error)) {
+        const queued = this._pendingWrites.get(key) || { value, at: Date.now(), attempts: 0 };
+        queued.lastError = error?.message || String(error);
+        this._pendingWrites.set(key, queued);
+        this._writeLock(key, queued);
+        console.warn(`[Store] 🌐 网络不可用：${key} 已静默保存在本地待写队列`
+          + `（共 ${this._pendingWrites.size} 条），不弹窗、不计数、不熔断`);
+        if (queued.critical) this._scheduleCriticalRetry(key);
         return;
       }
       const entry = this._pendingWrites.get(key) || { value, at: Date.now(), attempts: 0 };
@@ -1585,6 +2392,15 @@ const Store = {
     }
     locks.forEach(lockKey => {
       const key = lockKey.slice(UNCONFIRMED_LOCK_PREFIX.length);
+      /* 🔒 用户刚主动载入的资源是最高优先级：这个键的历史保护锁全部作废，
+         绝不允许「旧缓存 + 未确认锁」在刷新后诈尸、把新资源顶掉。 */
+      if (this.isViewPinned(key)) {
+        try { localStorage.removeItem(lockKey); } catch (error) { /* 忽略 */ }
+        this._pendingWrites.delete(key);
+        this._deferredWrites.delete(key);
+        console.log(`[Store] 🔒 ${key} 有视图优先级锁，历史保护锁已作废（不会重新排队补推）`);
+        return;
+      }
       let info = null;
       try {
         info = JSON.parse(localStorage.getItem(lockKey) || '{}');
@@ -1629,7 +2445,29 @@ const Store = {
         console.warn(`[Store] ⛔ ${key} 上次写入云端失败已熔断，本地数据继续保留，刷新后不再自动重试（需要时执行 Store.retryFailedKeys()）`);
         return;
       }
-      console.warn(`[Store] ⛔ 检测到「${key}」上次写入云端未确认（${Math.round((Date.now() - (info?.at || Date.now())) / 1000)} 秒前），本地数据已上锁保护，云端不得覆盖，将自动补推`);
+      console.warn(`[Store] ⛔ 检测到「${key}」上次写入云端未确认（${Math.round((Date.now() - (info?.at || Date.now())) / 1000)} 秒前），本地数据已上锁保护，云端不得覆盖`);
+      /* 🌐 之前被 deferPendingQueue() 延期隔离的历史队列：刷新后仍回延期区，
+         不立刻重推，等 online 事件 / Store.handleOnline() 才放回待写队列。 */
+      if (info?.deferred) {
+        this._pendingWrites.delete(key);
+        this._deferredWrites.set(key, {
+          value, at: info?.at || Date.now(), critical: Boolean(info?.critical),
+          clear: Boolean(info?.clear), attempts: info?.attempts || 0,
+          label: info?.label || '', deferredAt: Date.now(),
+          deferredReason: info?.deferredReason || '刷新后续延',
+        });
+        console.warn(`[Store] 🌐 ${key} 仍处于延期隔离（本地离线查看优先），不自动补推；online 事件后恢复`);
+        return;
+      }
+      /* ⏸ 页面一启动就把整批旧队列重推出去，正是「满屏 _restoreUnconfirmed +
+         _scheduleCriticalRetry 把本地 Node 服务器打挂」的源头。
+         生成中 / 载入中 / 静默本地 / 断网离线时只上锁保护，不补推；
+         解冻或 online 事件后由 _resumeBackgroundPushes() / handleOnline() 重新排队。 */
+      const blocked = this._backgroundPushBlocked();
+      if (blocked) {
+        console.warn(`[Store] ⏸ ${key} 本次只上锁保护、不自动补推：${blocked}`);
+        return;
+      }
       // 只有云端还连着才排续传，避免"根本没配云端"时每次开页面都空转重试
       if (this.cloudState !== 'off') this._scheduleCriticalRetry(key);
     });
@@ -1645,6 +2483,9 @@ const Store = {
         const lockKey = localStorage.key(i);
         if (!lockKey || !lockKey.startsWith(UNCONFIRMED_LOCK_PREFIX)) continue;
         const key = lockKey.slice(UNCONFIRMED_LOCK_PREFIX.length);
+        /* 🔒 视图优先级锁：别的页面残留的历史锁不许把旧数据重新挂回待写队列。
+           这里只跳过重建（用户本会话新写入的锁仍在内存队列里，不会被误删）。 */
+        if (this.isViewPinned(key)) continue;
         if (this._pendingWrites.has(key)) continue;         // 本实例已知道，不重复
         let info = {};
         try { info = JSON.parse(localStorage.getItem(lockKey) || '{}'); } catch (error) { info = {}; }
@@ -1763,17 +2604,32 @@ const Store = {
     const snapshotAt = typeof rawAt === 'number'
       ? new Date(rawAt).toISOString()
       : (rawAt || new Date().toISOString());
+    // deletedIds：本次"明确要删掉"的 id —— 服务端只删这些，
+    //   绝不按"这次 payload 里没带的"去推断旧行（旧快照会误删别人的新数据）。
+    const body = JSON.stringify({
+      key,
+      value,
+      deletedIds: Array.isArray(options.deletedIds) ? options.deletedIds : [],
+      snapshotAt,
+    });
+    /* ④ 诊断日志：每个 POST 发出前都把体积打出来，方便在控制台定位 502。
+       Blob.size 是真实 UTF-8 字节数；Node / 老环境回退到字符数（中文会低估，仅作参考）。 */
+    let bodyBytes = body.length;
+    if (typeof Blob !== 'undefined') {
+      try {
+        const size = new Blob([body]).size;
+        if (typeof size === 'number' && size > 0) bodyBytes = size;
+      } catch (error) { /* 忽略，用字符数 */ }
+    }
+    console.log(`[Store] Payload 大小: ${(bodyBytes / 1024).toFixed(1)} KB`, `（key=${key}）`);
+    if (bodyBytes > 4 * 1024 * 1024) {
+      console.warn(`[Store] ⚠️ ${key} 的 Payload 超过 4MB，可能被网关/Vercel 拒绝（502/413）。`
+        + ' 数据仍完整保留在本机；请精简数据后重试，或在控制台执行 Store.retryFailedKeys()。');
+    }
     await this._fetchJSON('/api/data', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      // deletedIds：本次"明确要删掉"的 id —— 服务端只删这些，
-      //   绝不按"这次 payload 里没带的"去推断旧行（旧快照会误删别人的新数据）。
-      body: JSON.stringify({
-        key,
-        value,
-        deletedIds: Array.isArray(options.deletedIds) ? options.deletedIds : [],
-        snapshotAt,
-      }),
+      body,
     });
     return true;
   },
@@ -1853,6 +2709,13 @@ const Store = {
    */
   async _flushPending() {
     if (!this._pendingWrites.size) return;
+    /* ⏸ 生成中 / 载入离线资源 / 云端暂停：整批补推直接跳过，一个 POST 都不发。
+       队列与锁原样保留，解冻后 _resumeBackgroundPushes() 会重新排队，不会丢数据。 */
+    const blocked = this._backgroundPushBlocked();
+    if (blocked) {
+      console.log(`[Store] ⏸ 跳过本次待写队列补推：${blocked}（${this._pendingWrites.size} 条原样保留）`);
+      return;
+    }
     /* ⛔ 游客模式：整个补推队列直接跳过。
        这是"每切一个页面就弹一次登录框"的直接来源：
        每次同步结束都会调 _flushPending 补推盘上残留的待写记录，
@@ -1873,6 +2736,14 @@ const Store = {
         if (error?.adminRequired) {
           console.warn(`[Store] ⛔ ${key} 补推未执行：未登录管理员（游客只读）`);
           this._clearUnconfirmed(key);
+          continue;
+        }
+        /* 🌐 断网：不计失败次数、不熔断、不弹窗，数据留在本地队列等联网续传 */
+        if (isNetworkFailure(error)) {
+          entry.lastError = error?.message || String(error);
+          this._writeLock(key, entry);
+          console.warn(`[Store] 🌐 网络不可用：${key} 补推暂缓，数据保留在本地队列（1 分钟后再试）`);
+          if (entry.critical) this._scheduleCriticalRetry(key);
           continue;
         }
         entry.attempts = (entry.attempts || 0) + 1;
@@ -1898,6 +2769,15 @@ const Store = {
    */
   _markPersistFailed(key, entry, error) {
     const message = error?.message || String(error);
+    /* 🌐 断网不是「数据结构冲突」，绝不能熔断锁死这个键：
+       把数据放回待写队列、重写不带 failed 标记的保护锁，等联网后自动续传。 */
+    if (isNetworkFailure(error)) {
+      this._pendingWrites.set(key, entry);
+      this._writeLock(key, { ...entry, attempts: 0, failed: false });
+      console.warn(`[Store] 🌐 网络不可用：${key} 不熔断、不弹窗，数据留在本地待写队列（1 分钟后重试）`);
+      this._scheduleCriticalRetry(key);
+      return;
+    }
     this._failedWrites.set(key, {
       attempts: entry.attempts || 0,
       lastError: message,
@@ -2129,6 +3009,8 @@ const Store = {
     if (!STORE_KEYS.includes(key)) {
       throw new Error(`未知的存储键：${key}（只允许清空 Store 管理的键）`);
     }
+    /* 用户亲手清空是明确的更高优先级指令：先解除视图优先级锁，别让清空失效 */
+    this.unpinLocalView(key, '用户明确清空该键');
     const label = options.label || key;
     const attempts = options.attempts ?? 2;
 
@@ -2228,7 +3110,317 @@ const Store = {
     return count;
   },
 
+  /* ---------------- 脏队列清理 / 后台上传暂停 ---------------- */
+
+  /** 是不是本地开发环境（只有 localhost 才允许自动丢弃旧队列，线上绝不自动清） */
+  _isLocalDevHost() {
+    try {
+      const loc = (typeof window !== 'undefined' && window.location)
+        || (typeof location !== 'undefined' ? location : null);
+      const host = String(loc?.hostname || '').toLowerCase();
+      return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
+    } catch (error) {
+      return false;
+    }
+  },
+
+  /**
+   * 🧹 localhost 启动自清：盘上残留保护锁 > LOCAL_QUEUE_DIRTY_LIMIT 条时，
+   * 说明是之前 502 反复失败攒下来的脏队列（每次刷新都会重推，把本地 Node 服务器打挂）。
+   * 必须在 _restoreUnconfirmed() 之前调用，否则刚清完又被盘上的锁恢复回来。
+   */
+  _autoClearDirtyQueue() {
+    if (!this._isLocalDevHost()) return 0;
+    let locks = 0;
+    try {
+      for (let i = 0; i < localStorage.length; i += 1) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith(UNCONFIRMED_LOCK_PREFIX)) locks += 1;
+      }
+    } catch (error) {
+      return 0;
+    }
+    if (locks <= LOCAL_QUEUE_DIRTY_LIMIT) return 0;
+    console.warn(`[Store] 🧹 localhost 启动检测到 ${locks} 条残留保护锁（阈值 ${LOCAL_QUEUE_DIRTY_LIMIT}）`
+      + '，判定为旧 502 留下的脏待写队列，全部丢弃，不再自动补推');
+    this.clearPendingQueue(`localhost 脏队列 ${locks} 条`, { allLocks: true });
+    return locks;
+  },
+
+  /**
+   * 清空后台重推队列（控制台：Store.clearPendingQueue()）。
+   * ⚠️ 只丢「队列 / 续传定时器 / 保护锁 / 熔断记录」；
+   *    业务数据（localStorage 主键、cache、物理备份）一个字节都不动。
+   * allLocks=true 时连盘上所有未确认锁一起删（启动自清用，防止刷新后复活）。
+   */
+  clearPendingQueue(reason = 'manual', { allLocks = false } = {}) {
+    const count = this._pendingWrites.size;
+    const timers = this._pauseCriticalTimers();
+    [...this._pendingWrites.keys()].forEach(key => this._clearUnconfirmed(key));
+    this._pendingWrites.clear();
+    /* 熔断记录里装的就是这批旧失败数据；不清的话，页面初始化的
+       autoRecoverStoreCircuit() 会立刻 retryFailedKeys() 又把它们推一遍。 */
+    const failed = this._failedWrites.size;
+    this._failedWrites.clear();
+    const locks = allLocks ? this._clearLocksFromStorage() : 0;
+    console.warn(`[Store] 🧹 已清空待写队列（原因：${reason}）：队列 ${count} 条、续传定时器 ${timers} 个、`
+      + `熔断 ${failed} 条、盘上锁 ${locks} 个。业务数据仍完整保留在本机，只是不再自动重推；`
+      + '需要时手动点保存，或执行 Store.retryPendingWrites()。');
+    return count;
+  },
+
+  /* ---------------- 🧨 终极清理（控制台一键重置） ---------------- */
+
+  /**
+   * 🧨 一键把本机「旧缓存 + 未确认锁 + 后台队列」连根拔起，然后刷新页面。
+   *
+   * 典型现场：Supabase 后台已经清空，本机却因为断网进了离线模式，
+   * localStorage 里的旧缓存 + 历史未确认锁反复把新导入的离线资源顶掉（脏数据诈尸）。
+   * 执行 window.hardResetAll() 后：
+   *   ① 冻结一切云端同步 / 反推自愈 / 后台补推，并 abort 所有在飞 GET；
+   *   ② 停掉全部续传、重连、提示定时器；
+   *   ③ 清空内存缓存、待写队列、熔断记录、延期区、清空锁、视图优先级锁；
+   *   ④ 洗掉所有相关 localStorage（含 __local_backup、锁、备份分槽、世代号、
+   *      生成冻结信号、离线资源小票、分步物理备份、布局/侧栏/待办等）与 sessionStorage；
+   *   ⑤ 刷新页面，让 Store 从干净状态重新 start()。
+   *
+   * 默认保留管理员登录凭据（清掉会导致后续写云端 403）；要连登录态一起清传
+   * hardResetAll({ includeAuth: true })。调试时可用 hardResetAll({ reload: false })。
+   */
+  hardResetAll(options = {}) {
+    const { reload = true, includeAuth = false, reason = '控制台 hardResetAll()' } = options || {};
+
+    /* ① 先冻结：在飞的同步结果、后台补推、反推自愈一律不许再落地 */
+    this._cloudPaused = true;
+    this.syncing = false;
+    this._readOnlyPull = false;
+    this._healing = false;
+    this._generating = false;
+    const aborted = this.abortInFlightReads(reason);
+
+    /* ② 停掉所有定时器句柄 */
+    let timers = 0;
+    this._criticalTimers.forEach(timer => { clearTimeout(timer); timers += 1; });
+    this._criticalTimers.clear();
+    this._clearRetryTimers.forEach(timer => { clearTimeout(timer); timers += 1; });
+    this._clearRetryTimers.clear();
+    if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; timers += 1; }
+    if (this._slowHintTimer) { clearTimeout(this._slowHintTimer); this._slowHintTimer = null; timers += 1; }
+
+    /* ③ 清空内存缓存与全部锁 / 队列 / 状态 */
+    const before = {
+      cache: this.cache.size,
+      pending: this._pendingWrites.size,
+      failed: this._failedWrites.size,
+      deferred: this._deferredWrites.size,
+      clearLocks: this._pendingClearKeys.size,
+      viewPins: this._viewPins.size,
+    };
+    this.cache.clear();
+    this._pendingWrites.clear();
+    this._failedWrites.clear();
+    this._deferredWrites.clear();
+    this._pendingClearKeys.clear();
+    this._localWrites.clear();
+    this._viewPins.clear();
+    this._viewPinEpoch = 0;
+    this._backgroundSyncHolds.clear();
+    this._inFlightReads.clear();
+    this._quietLocalUntil = 0;
+    this._quietReason = '';
+    this._quietHoldKey = '';
+    this._offlineMode = false;
+    this._networkFailures = 0;
+    this._offlineSince = 0;
+    this._reconnectAttempts = 0;
+    this._purgeEpoch = 0;
+    this._purgeEpochSeen = 0;
+    this._lastSyncReport = null;
+    this._backedUp = false;
+    this._loadingNode = null;
+    this._syncPromise = null;
+    this.schema = null;
+    this.lastSyncAt = null;
+    this.lastError = null;
+    this.mode = 'local';
+    this.cloudState = 'unknown';
+    if (typeof window !== 'undefined') {
+      try { window.__offlineFromEvent = undefined; } catch (error) { /* 忽略 */ }
+    }
+
+    /* ④ 洗地：业务主键 / 备份 / 锁 / 世代号 / 生成信号 / 小票 / 布局 … 一个不留 */
+    const removedKeys = this._hardClearLocalStorage({ includeAuth });
+    const removedSession = this._hardClearSessionStorage();
+
+    console.warn(`[Store] 🧨 终极清理完成（${reason}）：localStorage ${removedKeys.length} 个键、`
+      + `sessionStorage ${removedSession} 个键、内存缓存 ${before.cache} 项、`
+      + `待写 ${before.pending} 条 / 熔断 ${before.failed} 条 / 延期 ${before.deferred} 条 / `
+      + `清空锁 ${before.clearLocks} 个 / 视图锁 ${before.viewPins} 个、`
+      + `定时器 ${timers} 个、在飞 GET ${aborted} 个。`
+      + (includeAuth ? '登录凭据也已清除。'
+        : '登录凭据已保留（要连登录态一起清用 hardResetAll({includeAuth:true})）。'));
+
+    /* ⑤ 刷新页面：新页面重新 start()，只认云端（或干净的本地）数据 */
+    const canReload = reload && typeof window !== 'undefined'
+      && typeof window.location?.reload === 'function';
+    if (canReload) {
+      setTimeout(() => {
+        try { window.location.reload(); }
+        catch (error) { console.warn('[Store] 页面刷新失败，请手动按 Cmd+Shift+R', error); }
+      }, 0);
+    }
+    return { ok: true, removedKeys, removedSession, cleared: before, timers, aborted, willReload: Boolean(canReload) };
+  },
+
+  /**
+   * 💥 核弹级清空：控制台执行 window.nukeAllStorage()
+   * 与 hardResetAll() 的区别：这里直接 localStorage.clear()，连登录凭据、第三方键、
+   * 任何历史备份 / 锁 / 摘要都一个不留，然后刷新页面。
+   * 先冻结同步 + abort 在飞 GET 再 clear —— 否则在飞的旧请求结果会把脏数据又写回来。
+   */
+  nukeAllStorage(options = {}) {
+    const { reload = true, reason = '控制台 nukeAllStorage()' } = options || {};
+    const pre = this.hardResetAll({ reload: false, includeAuth: true, reason: `${reason}（预清理）` });
+    let cleared = 0;
+    try {
+      cleared = localStorage.length;
+      localStorage.clear();
+    } catch (error) {
+      console.warn('[Store] 💥 localStorage.clear() 失败（可能是隐私模式）', error);
+    }
+    /* sessionStorage 里的运动会清空提示刷新后也会诈尸，一并清掉 */
+    try { if (typeof sessionStorage !== 'undefined') sessionStorage.clear(); } catch (error) { /* 忽略 */ }
+    const canReload = reload && typeof window !== 'undefined'
+      && typeof window.location?.reload === 'function';
+    if (canReload) {
+      setTimeout(() => {
+        try { window.location.reload(); }
+        catch (error) { console.warn('[Store] 页面刷新失败，请手动按 Cmd+Shift+R', error); }
+      }, 0);
+    }
+    console.warn(`[Store] 💥 nukeAllStorage：localStorage.clear() 已执行（约 ${cleared} 个键全部清空，`
+      + '含登录凭据与所有历史备份），页面即将刷新');
+    return { ok: true, clearedKeys: cleared, preCleared: pre.removedKeys.length, willReload: Boolean(canReload) };
+  },
+
+  /** 洗掉所有与本项目相关的 localStorage 键（枚举 + 内置键兜底） */
+  _hardClearLocalStorage({ includeAuth = false } = {}) {
+    const candidates = new Set([
+      ...STORE_KEYS, VIEW_PIN_KEY, UNIT_GENERATING_KEY, MEET_BACKUP_KEY, PURGE_SIGNAL_KEY,
+      'pe_offline_resources_pending_v1', `${UNIT_DESIGN_KEY}__step_backup`,
+      'pe_sidebar_collapsed', 'pe_sports_meet_sheet_layout', 'pe_todo_v1',
+      ...HARD_RESET_MISC_KEYS, ...HARD_RESET_AUTH_KEYS,
+    ]);
+    STORE_KEYS.forEach(key => candidates.add(`${key}__local_backup`));
+    try {
+      if (typeof localStorage.key === 'function' && typeof localStorage.length === 'number') {
+        for (let i = 0; i < localStorage.length; i += 1) {
+          const key = localStorage.key(i);
+          if (key) candidates.add(key);
+        }
+      }
+    } catch (error) { /* 枚举失败时用内置清单继续 */ }
+    const removed = [];
+    candidates.forEach(key => {
+      if (!includeAuth && HARD_RESET_AUTH_KEYS.includes(key)) return;
+      const ours = STORE_KEYS.includes(key)
+        || key.startsWith('pe_') || key.startsWith('sportsMeet')
+        || key.includes('sportsMeet') || key.includes('__local_backup')
+        || HARD_RESET_MISC_KEYS.includes(key)
+        || (includeAuth && HARD_RESET_AUTH_KEYS.includes(key));
+      if (!ours) return;
+      try {
+        if (localStorage.getItem(key) === null) return;
+        localStorage.removeItem(key);
+        removed.push(key);
+      } catch (error) { /* 隐私模式下可能抛 SecurityError，跳过这一个键 */ }
+    });
+    return removed;
+  },
+
+  /** 洗掉 sessionStorage 里的运动会清空提示等本项目状态 */
+  _hardClearSessionStorage() {
+    if (typeof sessionStorage === 'undefined') return 0;
+    const candidates = new Set(HARD_RESET_MISC_KEYS);
+    try {
+      for (let i = 0; i < sessionStorage.length; i += 1) {
+        const key = sessionStorage.key(i);
+        if (key) candidates.add(key);
+      }
+    } catch (error) { /* 忽略 */ }
+    let removed = 0;
+    candidates.forEach(key => {
+      const ours = HARD_RESET_MISC_KEYS.includes(key) || key.startsWith('pe_')
+        || key.includes('sportsMeet');
+      if (!ours) return;
+      try {
+        if (sessionStorage.getItem(key) === null) return;
+        sessionStorage.removeItem(key);
+        removed += 1;
+      } catch (error) { /* 隐私模式下可能抛 SecurityError，跳过这一个键 */ }
+    });
+    return removed;
+  },
+
+  /** 后台上传是否被暂停：返回原因字符串（空串 = 可以发 POST） */
+  _backgroundPushBlocked() {
+    if (this._cloudPaused) return '云端同步已暂停';
+    if (this.isGenerating()) return '大单元生成中';
+    if (this._backgroundSyncHolds.size) return `后台上传已暂停（${[...this._backgroundSyncHolds].join('、')}）`;
+    return '';
+  },
+
+  /** 停掉所有即将触发的后台续传定时器（队列与锁原样保留，恢复后重排） */
+  _pauseCriticalTimers() {
+    let stopped = 0;
+    this._criticalTimers.forEach(timer => { clearTimeout(timer); stopped += 1; });
+    this._criticalTimers.clear();
+    return stopped;
+  },
+
+  /**
+   * ⏸ 暂停所有后台上传重试（生成大单元 / 载入离线资源时用）。
+   * 返回一个 release 函数，调用方放在 finally 里保证一定恢复，绝不把 Store 永久冻住。
+   */
+  pauseBackgroundSync(reason = 'manual') {
+    this._backgroundSyncHolds.add(reason);
+    const stopped = this._pauseCriticalTimers();
+    console.log(`[Store] ⏸ 后台上传重试已暂停（${reason}）：停掉 ${stopped} 个续传定时器，`
+      + `待写队列 ${this._pendingWrites.size} 条原样保留`);
+    return () => this.resumeBackgroundSync(reason);
+  },
+
+  /** ▶ 解除一层暂停；所有原因都解除后才重新排队补推（不丢数据） */
+  resumeBackgroundSync(reason = 'manual') {
+    const removed = this._backgroundSyncHolds.delete(reason);
+    const blocked = this._backgroundPushBlocked();
+    console.log(`[Store] ▶ 后台上传重试恢复（${reason}）${blocked ? `，仍被「${blocked}」挡住` : ''}`);
+    if (!blocked) this._resumeBackgroundPushes();
+    return { ok: removed, blocked };
+  },
+
+  /** 解冻后给队列里的重要写入重新排续传（已熔断的、已在排队的都不重复排） */
+  _resumeBackgroundPushes({ force = false, all = false } = {}) {
+    if (this._backgroundPushBlocked()) return 0;
+    // online 自愈时 force=true：此时 cloudState 可能还是 off，但正需要那一发探测请求
+    if (!force && this.cloudState === 'off') return 0;
+    let scheduled = 0;
+    this._pendingWrites.forEach((entry, key) => {
+      if (!all && !entry?.critical) return;
+      if (this._failedWrites.has(key) || this._criticalTimers.has(key)) return;
+      this._scheduleCriticalRetry(key);
+      scheduled += 1;
+    });
+    return scheduled;
+  },
+
   _onPersistError(key, error) {
+    /* 🌐 断网：绝不弹红色报错弹窗。只警告，数据已由调用方静默留在本地待写队列，
+       联网后 _scheduleCriticalRetry / _flushPending 会自动续传。 */
+    if (isNetworkFailure(error)) {
+      console.warn(`[Store] 🌐 网络不可用：${key} 本次未写入云端；数据已静默保存在本地待写队列，联网后自动续传（不打扰用户）`);
+      return;
+    }
     console.error(`[Store] 保存 ${key} 失败`, error);
     const message = error?.message ? String(error.message) : '';
     if (typeof window !== 'undefined' && typeof window.showToast === 'function') {
@@ -2236,15 +3428,59 @@ const Store = {
     }
   },
 
-  // 首次连上云端时把本地数据改名备份，避免误读旧数据，同时保留回滚能力
+  /**
+   * 一次性回滚快照：只在 forceSyncCloud() 强制拉云端【之前】调用。
+   * ⚠️ 不再每次同步都写 17 份（那是冗余镜像堆积的源头）；带时间戳元数据，24 小时后自动清。
+   */
   _backupLocal() {
+    let saved = 0;
     STORE_KEYS.forEach(key => {
       const raw = localStorage.getItem(key);
-      if (raw === null) return;
-      try {
-        localStorage.setItem(`${key}__local_backup`, raw);
-      } catch {}
+      if (raw === null || raw.length > LOCAL_BACKUP_MAX_BYTES) return;
+      try { localStorage.setItem(`${key}__local_backup`, raw); saved += 1; } catch (error) { /* 忽略 */ }
     });
+    try {
+      localStorage.setItem(LOCAL_BACKUP_META_KEY, JSON.stringify({
+        at: Date.now(), version: BACKUP_SCHEMA_VERSION, keys: saved,
+      }));
+    } catch (error) { /* 忽略 */ }
+    return saved;
+  },
+
+  /** 正常保存成功后删掉这一个键的冗余镜像（主键本身就是最新数据） */
+  _dropLocalBackup(key) {
+    try { localStorage.removeItem(`${key}__local_backup`); } catch (error) { /* 忽略 */ }
+  },
+
+  /** 清空全部 __local_backup 镜像 + 时间戳元数据，返回删掉的镜像条数 */
+  _clearLocalBackups() {
+    let removed = 0;
+    try {
+      const keys = [];
+      for (let i = 0; i < localStorage.length; i += 1) {
+        const key = localStorage.key(i);
+        if (key && key.includes('__local_backup')) keys.push(key);
+      }
+      keys.forEach(key => { localStorage.removeItem(key); removed += 1; });
+      localStorage.removeItem(LOCAL_BACKUP_META_KEY);
+    } catch (error) { /* 忽略 */ }
+    return removed;
+  },
+
+  /** 启动时清理：没有时间戳 / 版本不符 / 超过 24 小时的镜像一律整批删掉 */
+  _clearStaleLocalBackups() {
+    let meta = {};
+    try { meta = JSON.parse(localStorage.getItem(LOCAL_BACKUP_META_KEY) || '{}') || {}; } catch (error) { meta = {}; }
+    const at = Number(meta.at || 0);
+    const fresh = at > 0 && Date.now() - at <= BACKUP_MAX_AGE_MS
+      && (meta.version === undefined || Number(meta.version) === BACKUP_SCHEMA_VERSION);
+    if (fresh) return 0;
+    const removed = this._clearLocalBackups();
+    if (removed) {
+      console.warn(`[Store] 🧹 已清理 ${removed} 份过期 / 历史遗留 __local_backup 镜像`
+        + '（没有时间戳或超过 24 小时），不再无限期堆积');
+    }
+    return removed;
   },
 
   /** 冷启动加载动画 */
@@ -2304,6 +3540,8 @@ const Store = {
       this.syncing = false;
     }
     if (result.ok && this.mode === 'supabase') {
+      /* 云端重建成功 → 一次性回滚快照没用了，立刻清掉，别又变成一堆长期驻留的旧镜像 */
+      this._clearLocalBackups();
       this._dispatchSync(result.changed || [], { forced: true, reason: 'forceSyncCloud' });
       console.log(`[Store] ✅ forceSyncCloud 完成：已用云端数据重建本地（${(result.changed || []).length} 个键写入）`);
     } else {
@@ -2410,6 +3648,11 @@ const Store = {
     const restored = [];
     const missing = [];
     keys.forEach(key => {
+      /* 🔒 带 userModified 标记的数据是用户亲手载入的，连手动 forceRecover 也不许用备份盖掉 */
+      if (this.isUserModified(key)) {
+        console.warn(`[Store] 🔒 ${key} 带 userModified 标记，forceRecover 跳过（当前视图优先）`);
+        return;
+      }
       const slot = this._readBackupSlot(key);
       if (!slot || !this._hasContent(key, slot.data)) { missing.push(key); return; }
       const data = slot.data;
@@ -2471,6 +3714,8 @@ const Store = {
         key,
         backupCount: slot ? this._countOf(slot.data) : 0,
         backupSavedAt: slot?.savedAt ? new Date(slot.savedAt).toLocaleString('zh-CN') : '（无备份）',
+        backupVersion: slot?.version ?? '旧格式',
+        userModified: this.isUserModified(key),
         currentCount: this._countOf(current),
         hasContent: this._hasContent(key, current),
       };
@@ -2683,4 +3928,13 @@ if (typeof window !== 'undefined') {
        await pullCloudOnly(['pe_lesson_plans']) 只拉某个键 */
   window.pullCloudOnly = (keys) => Store.pullCloudOnly(keys);
   window.forcePullCloud = (keys) => Store.pullCloudOnly(keys);
+  /* 🧨 终极清理：云端删了、本地旧缓存还在打架时，控制台直接敲 hardResetAll()
+       hardResetAll()                       清空一切本机状态并刷新（保留登录态）
+       hardResetAll({includeAuth:true})     连登录态一起清
+       hardResetAll({reload:false})         只清理、不刷新（调试用）
+     🔓 只想恢复云端同步、不动数据：clearViewPriority() */
+  window.hardResetAll = options => Store.hardResetAll(options || {});
+  window.clearViewPriority = reason => Store.clearViewPins(reason || '控制台手动解除');
+  /* 💥 最狠的一键：localStorage.clear() + 刷新（连登录态都不留，刷新后需重新登录） */
+  window.nukeAllStorage = options => Store.nukeAllStorage(options || {});
 }

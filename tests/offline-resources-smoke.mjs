@@ -231,25 +231,24 @@ const { createEmptyUnit } = BASE.api;
 function makeUnit({ title = '水平三篮球大单元', source = 'ai' } = {}) {
   const unit = createEmptyUnit();
   unit.unitTitle = title;
-  unit.objectives = { ability: '能力目标', health: '健康目标', character: '品德目标' };
+  unit.objectives = '运动能力：能力目标\n\n健康行为：健康目标\n\n体育品德：品德目标';
   unit.textbookAnalysis = '教材分析';
   unit.studentAnalysis = '学情分析';
   unit.teachingContent = '教学内容';
   unit.keyDifficulties = { learning: 'L', content: 'C', organization: 'O', method: 'M' };
   unit.assessment = '考核与作业';
-  unit.evaluation = { process: '过程性', summative: '终结性', integration: '一体化' };
   unit.reflection = '反思模板';
-  unit.resources = '资源清单';
+  unit.rubric = { ...unit.rubric, note: '评价说明：师评 60% + 自评 20% + 互评 20%' };
   unit.lessons = unit.lessons.map((lesson, index) => ({
     ...lesson, content: `第${index + 1}课内容`, method: `第${index + 1}课组织教法`,
-    objectives: { ability: `能力${index + 1}`, health: `健康${index + 1}`, character: `品德${index + 1}` },
+    objectives: `1.运动能力：能力${index + 1}\n2.健康行为：健康${index + 1}\n3.体育品德：品德${index + 1}`,
   }));
-  unit.structure = {
-    basic: [{ no: 1, title: '第1课次：认识篮球（球性练习）' }, { no: 2, title: '第2课次：规则与安全' }],
-    technique: Array.from({ length: 8 }, (_, i) => ({ no: i + 3, title: `第${i + 3}课次：技术` })),
-    tactics: Array.from({ length: 5 }, (_, i) => ({ no: i + 11, title: `第${i + 11}课次：战术` })),
-    fitness: Array.from({ length: 3 }, (_, i) => ({ no: i + 16, title: `第${i + 16}课次：体能` })),
-  };
+  unit.structure_nodes = Array.from({ length: 18 }, (_, index) => ({
+    id: index + 1,
+    dimension: index < 2 ? '基础知识' : (index < 10 ? '基本技术' : (index < 16 ? '技战术运用' : '展示或比赛')),
+    title: index === 0 ? '认识篮球（球性练习）' : `第${index + 1}课次内容`,
+  }));
+  unit.main_projects = ['篮球运球', '传切配合'];
   unit.meta = {
     ...unit.meta, unitTitle: title, source,
     categoryId: 'ball', category: '球类', itemId: 'basketball', item: '篮球',
@@ -274,24 +273,26 @@ await test('④ 断网也能存：云端 offline 时保存成功，本地立刻�
   equal(env.calls.length, 0, '离线时不发云端请求，但不影响本地使用');
 });
 
-await test('⑤ 完整往返：存档 → 取回，11 个模块与 18 课时一字不少', async () => {
+await test('⑤ 完整往返：存档 → 取回，10 个模块与 18 课时一字不少', async () => {
   const env = createEnv({ cloud: 'supabase' });
   const unit = makeUnit();
   const saved = env.api.R.saveUnit(unit, { source: 'ai' });
   const restored = env.api.R.unitFromRecord(env.api.R.get(saved.record.id));
   equal(restored.unitTitle, unit.unitTitle, '单元名');
-  equal(restored.objectives.ability, unit.objectives.ability, '模块1 运动能力');
+  equal(restored.objectives, unit.objectives, '模块1 教学目标（三段式）');
   equal(restored.textbookAnalysis, unit.textbookAnalysis, '模块2 教材分析');
   equal(restored.studentAnalysis, unit.studentAnalysis, '模块3 学情分析');
   equal(restored.teachingContent, unit.teachingContent, '模块4 教学内容');
   equal(restored.keyDifficulties.organization, unit.keyDifficulties.organization, '模块5 重难点·教学组织');
-  equal(restored.structure.basic[0].title, '第1课次：认识篮球（球性练习）', '模块6 结构图');
+  equal(restored.structure_nodes[0].title, '认识篮球（球性练习）', '模块6 结构图');
+  equal(restored.structure_nodes[0].dimension, '基础知识', '模块6 结构图维度');
+  equal(restored.main_projects[0], '篮球运球', '模块6 主要项目');
   equal(restored.lessons.length, 18, '模块7 课时表 18 行');
-  equal(restored.lessons[17].objectives.character, '品德18', '模块7 第18课三维目标');
+  assert(restored.lessons[17].objectives.includes('品德18'), '模块7 第18课三维目标');
   equal(restored.assessment, unit.assessment, '模块8 考核与作业');
-  equal(restored.evaluation.integration, unit.evaluation.integration, '模块9 学习评价');
-  equal(restored.reflection, unit.reflection, '模块10 教学反思');
-  equal(restored.resources, unit.resources, '模块11 教学资源');
+  equal(restored.reflection, unit.reflection, '模块9 教学反思');
+  equal(restored.rubric.levels.length, 4, '模块10 评价量规四等级');
+  equal(restored.rubric.note, unit.rubric.note, '模块10 评价说明');
   equal(restored.meta.resourceId, saved.record.id, '取回时必须记住自己属于哪条资源（后续编辑才不会存成副本）');
   assert(env.calls.length > 0, '联网时要把列表推给云端');
 });
@@ -328,11 +329,11 @@ await test('⑧ 脏数据兜底：无 id 的记录丢弃，残缺模块自动补
   equal(broken, null, '没有 id 的记录不能进库');
   const repaired = env.api.normalizeRecord({
     id: 'ur_1', category: '球类', level: '水平三', content: '运球',
-    modules_json: { unitTitle: '残的', lessons: [{ content: '只有一节' }], structure: '坏掉了' },
+    modules_json: { unitTitle: '残的', lessons: [{ content: '只有一节' }], structure_nodes: '坏掉了' },
     created_at: '2026-10-30T00:00:00.000Z',
   });
   equal(repaired.modules_json.lessons.length, 18, '课时不足必须补齐到 18 行');
-  equal(Array.isArray(repaired.modules_json.structure.basic), true, 'structure 坏了要还原成四个数组');
+  equal(Array.isArray(repaired.modules_json.structure_nodes), true, 'structure_nodes 坏了要还原成数组');
 });
 
 await test('⑨ 列表去重 + 按保存时间倒序', async () => {
@@ -392,20 +393,24 @@ await test('⑪ 管理页渲染 + 按大类筛选 + 关键词搜索', async () =
   assert(searched.includes('篮球A') && !searched.includes('田径B'), '按关键词搜索要生效');
 });
 
-await test('⑫ 查看弹窗：11 个模块齐全 + 18 行课时表 + 结构图四分支', async () => {
+await test('⑫ 查看弹窗：10 个模块齐全 + 18 行课时表 + 结构图矩阵', async () => {
   const env = createEnv({ cloud: 'supabase' });
   const record = env.api.R.saveUnit(makeUnit(), { source: 'ai' }).record;
   env.api.R.view(record.id);
   const overlay = env.overlays[env.overlays.length - 1];
   assert(overlay, '要打开查看弹窗');
-  for (let index = 1; index <= 11; index += 1) {
+  for (let index = 1; index <= 10; index += 1) {
     assert(overlay.bodyHTML.includes(`模块 ${index}`), `查看弹窗缺少模块 ${index}`);
   }
+  assert(!overlay.bodyHTML.includes('模块 11'), '精简到 10 个模块后不该再有模块 11');
+  assert(!overlay.bodyHTML.includes('学习评价</span>'), '模块 9「学习评价」已删除，弹窗里不该再有它');
   const rows = overlay.bodyHTML.match(/第 \d+ 课/g) || [];
   equal(rows.length, 18, '查看弹窗的课时表必须是 18 行');
-  ['基础知识', '基本技术', '技战术运用', '专项体能'].forEach(branch => {
-    assert(overlay.bodyHTML.includes(branch), `结构图缺少分支：${branch}`);
+  ['基础知识', '基本技术', '技战术运用', '展示或比赛'].forEach(lane => {
+    assert(overlay.bodyHTML.includes(lane), `结构图缺少维度泳道：${lane}`);
   });
+  assert(overlay.bodyHTML.includes('主要项目'), '结构图要有「主要项目」行');
+  assert(overlay.bodyHTML.includes('ud2-mx-table'), '结构图要是矩阵泳道表');
   assert(overlay.footerHTML.includes('导出 Word'), '弹窗要能导出');
 });
 
@@ -536,12 +541,31 @@ ${rows.join('\n')}
 ## 十、教学反思
 课后填写：目标达成情况 / 环节耗时 / 下次改进。
 
-## 十一、教学资源
-标志桶 40 个、篮球 20 个、战术板 1 块。
+## 十一、单元学习评价表
+### 核心素养占比
+| 核心素养 | 权重 |
+| --- | --- |
+| 运动能力 | 60 |
+| 健康行为 | 20 |
+| 体育品德 | 20 |
+
+### 等级评价量规
+| 等级 | 分值区间 | 运动能力 | 健康行为 | 体育品德 |
+| --- | --- | --- | --- | --- |
+| 优秀 | 85-100 | 动作规范熟练 | 主动锻炼 | 公平竞争 |
+| 良好 | 75-84 | 动作较规范 | 能坚持锻炼 | 遵守规则 |
+| 合格 | 60-74 | 掌握基本要领 | 能参与锻炼 | 在监督下守规则 |
+| 不合格 | 60以下 | 动作不熟练 | 不愿参与 | 不能遵守规则 |
+
+### 细分得分点
+| 核心素养 | 得分点 | 分值 | 评价要点 |
+| --- | --- | --- | --- |
+| 运动能力 | 运动知识 | 12 | 规则与技战术原理 |
+| 运动能力 | 运动技能 | 36 | 技术动作与比赛表现 |
 `;
 }
 
-await test('⑰ 模板下载：11 个模块标题 + 18 行课时表格都写死在 .md 里', async () => {
+await test('⑰ 模板下载：10 个模块标题 + 18 行课时表格都写死在 .md 里', async () => {
   const env = createEnv({ cloud: 'off' });
   equal(env.api.unitTemplateFileName({}), '大单元填写模板.md', '没有单元名时的模板文件名');
   assert(env.api.R.downloadTemplate(), '模板要能下载成功');
@@ -551,20 +575,21 @@ await test('⑰ 模板下载：11 个模块标题 + 18 行课时表格都写死�
   const md = blob.content;
   [
     '一、教学目标', '二、教材分析', '三、学情分析', '四、主要教学内容', '五、教学重难点',
-    '六、大单元设计结构图', '七、18 课时计划表', '八、考核与作业', '九、学习评价',
-    '十、教学反思', '十一、教学资源',
+    '六、大单元设计结构图', '七、18 课时计划表', '八、考核与作业',
+    '九、教学反思', '十、单元学习评价表',
   ].forEach(heading => assert(md.includes(`## ${heading}`), `模板缺少标题：${heading}`));
   const rows = md.split('\n').filter(line => /^\|\s*\d+\s*\|/.test(line));
   equal(rows.length, 18, '模板必须写死 18 行课时');
-  assert(md.includes('| 课时 | 维度 | 运动能力 | 健康行为 | 体育品德 | 教学内容 | 组织教学与方法 |'),
+  assert(md.includes('| 课次 | 维度 | 学习目标（三维段落） | 主要学习内容（结构化） | 教学策略/学练活动 |'),
     '课时表的表头要把每个字段都列出来');
+  assert(md.includes('### 核心素养占比') && md.includes('85-100'), '模板要带上评价量规表');
   ['单元名称', '教材大类', '教材细项', '水平', '教学内容'].forEach(label => {
     assert(md.includes(`- ${label}：`), `基本信息缺少：${label}`);
   });
   assert(md.includes('填写说明'), '模板要带填写说明，别让老师猜');
 });
 
-await test('⑱ 模板往返：单元 → .md → 解析回来，11 模块与 18 课时一字不少', async () => {
+await test('⑱ 模板往返：单元 → .md → 解析回来，10 模块与 18 课时一字不少', async () => {
   const env = createEnv({ cloud: 'off' });
   const source = makeUnit({ title: '往返测试单元' });
   source.lessons = source.lessons.map((lesson, index) => ({
@@ -579,22 +604,26 @@ await test('⑱ 模板往返：单元 → .md → 解析回来，11 模块与 18
   equal(report.lessonRows, 18, '18 课时要全部解析出来');
   const unit = report.unit;
   equal(unit.unitTitle, '往返测试单元', '单元名');
-  equal(unit.objectives.ability, source.objectives.ability, '模块1 运动能力');
+  equal(unit.objectives, source.objectives, '模块1 教学目标（三段式）');
   equal(unit.textbookAnalysis, source.textbookAnalysis, '模块2 教材分析');
   equal(unit.studentAnalysis, source.studentAnalysis, '模块3 学情分析');
   equal(unit.teachingContent, source.teachingContent, '模块4 主要教学内容');
   equal(unit.keyDifficulties.method, source.keyDifficulties.method, '模块5 重难点');
   equal(unit.assessment, source.assessment, '模块8 考核与作业');
-  equal(unit.evaluation.integration, source.evaluation.integration, '模块9 学习评价');
-  equal(unit.reflection, source.reflection, '模块10 教学反思');
-  equal(unit.resources, source.resources, '模块11 教学资源');
+  equal(unit.reflection, source.reflection, '模块9 教学反思');
+  equal(unit.rubric.levels.length, 4, '模块10 评价量规四等级');
+  equal(unit.rubric.literacyWeights[0].percent, 60, '模块10 运动能力占比 60%');
+  equal(unit.rubric.scoreItems[0].points, 12, '模块10 运动知识 12 分');
   unit.lessons.forEach((lesson, index) => {
     equal(lesson.content, source.lessons[index].content, `第 ${index + 1} 课教学内容`);
     equal(lesson.method, source.lessons[index].method, `第 ${index + 1} 课组织教法`);
-    equal(lesson.objectives.character, source.lessons[index].objectives.character, `第 ${index + 1} 课体育品德`);
+    assert(lesson.objectives.includes(source.lessons[index].objectives.split('\n')[0].replace(/^\d+\./, '').replace('：', '：')),
+      `第 ${index + 1} 课三维目标`);
     equal(lesson.dimension, source.lessons[index].dimension, `第 ${index + 1} 课维度`);
   });
-  equal(unit.structure.basic[0].title, source.structure.basic[0].title, '模块6 结构图节点');
+  equal(unit.structure_nodes[0].title, source.structure_nodes[0].title, '模块6 结构图节点');
+  equal(unit.structure_nodes[0].dimension, source.structure_nodes[0].dimension, '模块6 结构图维度');
+  equal(unit.main_projects.join('、'), source.main_projects.join('、'), '模块6 主要项目');
   equal(unit.meta.categoryId, 'ball', '选题的小类 id 也要跟着回来（能在设计页回填下拉）');
 });
 
@@ -606,12 +635,20 @@ await test('⑲ 手写文本的健壮解析：标题写法百花齐放、列顺�
   const unit = report.unit;
 
   // ① 标题变体：`# 一、教学目标` / `### 2. 教材分析` / `## 四、教学内容`（别名）/ `**教学重难点**`
-  equal(unit.objectives.ability, '能在对抗中完成变向运球与投篮衔接', '# + 中文序号');
+  assert(unit.objectives.includes('能在对抗中完成变向运球与投篮衔接'), '# + 中文序号');
   equal(unit.textbookAnalysis, '本单元选自球类·篮球，围绕球性与投篮衔接展开。', '### + 阿拉伯序号');
   equal(unit.teachingContent, '球性、变向运球、投篮衔接、战术配合、体能。', '别名「教学内容」');
   equal(unit.keyDifficulties.learning, '手脚协调配合', '加粗行当标题');
   equal(unit.studentAnalysis, '水平三学生协调性发展较快，但对抗意识不足。', '常规标题');
   equal(unit.undefined, undefined, '不该出现野字段');
+
+  // ①b 旧格式兼容：markdown 里还留着旧版的「## 九、学习评价」段 —— 必须整段忽略，
+  //    绝不能被「单元学习评价表」的别名吞进去（那两串字互相包含）。
+  equal(unit.evaluation, undefined, '旧数据的「学习评价」要被整个忽略');
+  assert(!JSON.stringify(unit).includes('课堂观察表'), '旧「学习评价」的内容不能进任何模块');
+  assert(!JSON.stringify(unit).includes('每节课 5 分钟互评'), '旧「学习评价」的内容不能进任何模块');
+  equal(unit.reflection, '课后填写：目标达成情况 / 环节耗时 / 下次改进。', '旧「十、教学反思」要落到模块 9');
+  equal(unit.rubric.levels.length, 4, '旧「十一、单元学习评价表」要落到模块 10');
 
   // ② 课时表：标题写成「课时计划」、课次号写成「第N课次」、维度混着中文别名与英文键
   //    （下面 markdown 里维度依次是 basic / technique / 战术 / 基本技术）
@@ -621,12 +658,14 @@ await test('⑲ 手写文本的健壮解析：标题写法百花齐放、列顺�
   equal(unit.lessons[1].dimension, 'technique', '英文键 technique');
   equal(unit.lessons[2].dimension, 'tactic', '「战术」→ tactic');
   equal(unit.lessons[3].dimension, 'technique', '「基本技术」→ technique');
-  equal(unit.lessons[17].objectives.ability, '能力18', '第 18 课运动能力');
+  assert(unit.lessons[17].objectives.includes('能力18'), '第 18 课运动能力');
   equal(unit.lessons[17].method, '第18课组织教法', '第 18 课组织教法');
 
-  // ③ 结构图两个分支
-  equal(unit.structure.basic.length, 2, '基础知识分支挂 2 个节点');
-  equal(unit.structure.technique.length, 1, '基本技术分支挂 1 个节点');
+  // ③ 结构图：节点按维度归到四条泳道
+  const nodesOf = lane => unit.structure_nodes.filter(node => node.dimension === lane).length;
+  equal(nodesOf('基础知识'), 2, '基础知识泳道挂 2 个节点');
+  equal(nodesOf('基本技术'), 1, '基本技术泳道挂 1 个节点');
+  assert(unit.structure_nodes.every(node => node.id >= 1 && node.id <= 18), '节点课次号必须在 1–18');
 
   // ④ 把导出模板的文本再灌回去（uHI 同一个方言）
   const again = env.api.parseUnitTemplate(env.api.buildUnitTemplate(unit));
@@ -656,18 +695,21 @@ await test('⑲b 纯文本 .txt（一个 # 都没有）：放宽规则也能认�
     '| --- | --- | --- | --- | --- | --- | --- |',
     '| 1 | 基本技术 | 能力1 | 健康1 | 品德1 | 内容1 | 教法1 |',
     '',
-    '十一、教学资源',
-    '篮球 20 个、标志桶 40 个',
+    '十、单元学习评价表',
+    '### 核心素养占比',
+    '| 核心素养 | 权重 |',
+    '| --- | --- |',
+    '| 运动能力 | 60 |',
   ].join('\n');
   const report = env.api.parseUnitTemplate(plain);
   assert(report.ok, `纯文本也要能解析：${report.errors.join('；')}`);
-  equal(report.unit.objectives.ability, '能完成变向运球', '教学目标');
+  assert(report.unit.objectives.includes('能完成变向运球'), '教学目标');
   equal(report.unit.textbookAnalysis, '本单元选自球类·篮球。', '教材分析');
-  equal(report.unit.resources, '篮球 20 个、标志桶 40 个', '教学资源');
+  equal(report.unit.rubric.literacyWeights[0].percent, 60, '评价量规·素养占比');
   equal(report.unit.lessons[0].content, '内容1', '课时表');
   equal(report.unit.lessons[0].dimension, 'technique', '维度');
   equal(report.found.length, 4, '写了 4 个模块');
-  equal(report.missing.length, 7, '没写的 7 个模块要如实报出来');
+  equal(report.missing.length, 6, '没写的 6 个模块要如实报出来');
   assert(report.problems.some(item => item.message === '未找到【学情分析】模块，请检查模板'),
     '缺失提示要具体到模块名');
 });
@@ -788,7 +830,7 @@ await test('㉑b 上传 .json：裸大单元 / 资源记录两种都能认，并
   assert(word.content.includes('JSON 导入的单元'), '导出的 Word 里要有标题');
 });
 
-await test('㉒ 全屏手填工作台：左目录 11 模块 + 右大文本框，保存直接入库且全程不碰 AI', async () => {
+await test('㉒ 全屏手填工作台：左目录 10 模块 + 右大文本框，保存直接入库且全程不碰 AI', async () => {
   const env = createEnv({ cloud: 'off' });
   env.node('resCreateTitle').value = '手写的篮球大单元';
 
@@ -806,14 +848,14 @@ await test('㉒ 全屏手填工作台：左目录 11 模块 + 右大文本框，
 
   // ① 填模块 1（三维目标）—— 文本框里出来的就是模板那套写法
   env.api.R.wbGo('objectives');
-  equal(env.node('resWbEditor').value.includes('- 运动能力：'), true, '文本框要给出可填写的分项骨架');
+  equal(env.node('resWbEditor').value.includes('运动能力'), true, '文本框要给出可填写的分项骨架');
   env.node('resWbEditor').value = '- 运动能力：能完成原地单手肩上投篮\n- 健康行为：坚持每周三次锻炼\n- 体育品德：尊重对手';
   assert(env.api.R._wb.unit.unitTitle === '手写的篮球大单元', '离开基本信息时要带上填好的单元名');
 
   // ② 切到模块 7（课时表）→ 内容必须留在目标里，同时铺开 18 行表格
   env.api.R.wbGo('lessons');
-  equal(env.api.R._wb.unit.objectives.ability, '能完成原地单手肩上投篮', '切换模块前要把编辑框内容写回单元');
-  equal(env.api.R._wb.unit.objectives.health, '坚持每周三次锻炼', '三维都要在');
+  assert(String(env.api.R._wb.unit.objectives).includes('能完成原地单手肩上投篮'), '切换模块前要把编辑框内容写回单元');
+  assert(String(env.api.R._wb.unit.objectives).includes('坚持每周三次锻炼'), '三维都要在');
   const table = env.node('resWbEditor').value;
   equal((table.match(/^\|\s*\d+\s*\|/gm) || []).length, 18, '课时表那屏要给出 18 行表格');
 
@@ -823,7 +865,7 @@ await test('㉒ 全屏手填工作台：左目录 11 模块 + 右大文本框，
   env.node('resWbEditor').value = rows.join('\n');
   env.api.R.wbGo('textbookAnalysis');
   equal(env.api.R._wb.unit.lessons[17].content, '内容18', '第 18 课内容要落到第 18 行');
-  equal(env.api.R._wb.unit.lessons[0].objectives.character, '品德1', '三维目标也要逐格落位');
+  assert(String(env.api.R._wb.unit.lessons[0].objectives).includes('品德1'), '三维目标也要逐格落位');
   equal(env.api.R._wb.unit.lessons[0].dimension, 'technique', '维度列要解析成维度键');
   env.node('resWbEditor').value = '教材分析：本单元选自球类·篮球。';
 

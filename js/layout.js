@@ -129,6 +129,8 @@ const Layout = {
           </div>
         </div>
         <div class="topbar-right">
+          <span class="tag topbar-offline-badge" id="offlineBadge" hidden
+                title="网络不可用：所有数据仍完整保存在本机，联网后自动同步">🌐 离线模式（数据保存在本机）</span>
           <button class="topbar-btn" type="button" aria-label="工作台显示设置" title="工作台显示设置" onclick="Layout.openDisplaySettings()">⚙️</button>
           <button class="topbar-btn admin-topbar-btn" type="button" id="adminToggleBtn"
                   aria-label="管理员登录" title="登录后可新增 / 编辑 / 删除数据"
@@ -140,6 +142,48 @@ const Layout = {
         </div>
       </header>
     `;
+  },
+
+  /** 🌐 离线状态标签：连续超时后由 Store 点亮，网络恢复后自动隐藏 */
+  syncOfflineBadge() {
+    if (typeof document === 'undefined' || typeof document.getElementById !== 'function') return;
+    const badge = document.getElementById('offlineBadge');
+    if (!badge) return;
+    /* 跨 iframe：父页自己的 Store 没记录过网络失败，但子页会把 store:network 转发上来，
+       所以优先用事件带来的真实网络状态，其次才看本页 Store。 */
+    const fromEvent = typeof window !== 'undefined' ? window.__offlineFromEvent : undefined;
+    const offline = typeof fromEvent === 'boolean'
+      ? fromEvent
+      : (typeof Store !== 'undefined' && typeof Store.isOfflineMode === 'function'
+        ? Store.isOfflineMode()
+        : (typeof Store !== 'undefined' && Store.cloudState === 'off'));
+    badge.hidden = !offline;
+  },
+
+  /** 幂等绑定：状态变化 / 同步事件 / 浏览器恢复网络 / 窗口重新聚焦都刷新标签 */
+  bindOfflineBadge() {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
+    if (window.__offlineBadgeBound) return;
+    window.__offlineBadgeBound = true;
+    const refresh = () => this.syncOfflineBadge();
+    window.addEventListener('store:network', event => {
+      if (event && typeof event.detail?.offline === 'boolean') {
+        window.__offlineFromEvent = event.detail.offline;
+      }
+      refresh();
+    });
+    window.addEventListener('store:sync', refresh);
+    window.addEventListener('focus', refresh);
+    window.addEventListener('online', () => {
+      /* 优先走 Store 的网络恢复自愈：延期队列回队 + 重排续传 + 撤离线标签 */
+      if (typeof Store !== 'undefined' && typeof Store.handleOnline === 'function') {
+        Store.handleOnline('online 事件（Layout）');
+      } else if (typeof Store !== 'undefined' && typeof Store.sync === 'function') {
+        Store.sync();
+      }
+      refresh();
+    });
+    this.syncOfflineBadge();
   },
 
   init(pageName, title, breadcrumb) {
@@ -171,6 +215,7 @@ const Layout = {
 
     this.bindMobileNav(root);
     this.bindSidebarTooltip(root);
+    this.bindOfflineBadge();          // 🌐 顶栏离线状态标签（断网时显示）
     this.applySidebarState(this.isSidebarCollapsed());
 
     this.applyDisplaySettings(root);
@@ -430,7 +475,11 @@ function showModal(title, bodyHTML, footerHTML = '', overlayClass = '') {
 }
 
 function closeModal(btn) {
-  const overlay = btn.closest('.modal-overlay');
+  // ⚠️ 空值保护：关闭时按钮可能已经被移除 / 还没插入 DOM，
+  //    直接 btn.closest() 会抛 "Cannot read properties of undefined (reading 'closest')"，
+  //    一次报错就打断整条流程（关弹窗失败 → 页面状态错乱）。
+  if (!btn) return;
+  const overlay = typeof btn.closest === 'function' ? btn.closest('.modal-overlay') : null;
   if (overlay) {
     overlay.classList.remove('show');
     setTimeout(() => overlay.remove(), 300);

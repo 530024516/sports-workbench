@@ -86,22 +86,68 @@ const OfflineResources = {
     return fromDirect();
   },
 
-  /** 写列表：先本地（Store.write 同步落盘），再异步推云端 */
+  /**
+   * 写列表：先本地（Store.write 同步落盘），再异步推云端。
+   *
+   * ⚠️ 这是【唯一】把整个 pe_offline_resources_v1 推给 Store / 云端的出口：
+   *    每条记录都带完整 10 模块 × 18 课时，存得越多 payload 越大 → 网关 502 + Store 熔断。
+   *    所以这里对所有记录统一做一次「极限裁剪」，无论从哪个入口写（一键保存 / 编辑防抖 /
+   *    手动添加 / 导入 / reconcile 补回）都瘦下去，历史的老大单元也一起受益。
+   */
   writeList(list) {
-    const rows = Array.isArray(list) ? list : [];
+    const original = Array.isArray(list) ? list : [];
+    const compact = typeof unitCompactForStorage === 'function';
+    const rows = original.map(record => {
+      if (!record || typeof record !== 'object' || !compact) return record;
+      if (!record.modules_json || typeof record.modules_json !== 'object') return record;
+      // 深拷贝：只换 modules_json，六列（id/category/level/content/created_at…）原样保留
+      return { ...record, modules_json: unitCompactForStorage(record.modules_json) };
+    });
+
+    /* ④ 诊断日志：POST 之前把体积打出来，超过 4MB 主动拦截。
+       Vercel 平台自身还有约 4.5MB 硬限制，代码绕不过去，只能在前端挡住。
+       拦截时【本地照常保存】（数据安全底线），仅不发这次云端请求，避免 502 和熔断。 */
+    const bytes = typeof unitPayloadBytes === 'function'
+      ? unitPayloadBytes(rows) : JSON.stringify(rows).length;
+    const limit = typeof UNIT_RESOURCE_PAYLOAD_LIMIT === 'number'
+      ? UNIT_RESOURCE_PAYLOAD_LIMIT : 4 * 1024 * 1024;
+    const before = typeof unitPayloadBytes === 'function'
+      ? unitPayloadBytes(original) : JSON.stringify(original).length;
+    console.log('[离线资源库] Payload 大小:', (bytes / 1024).toFixed(1), 'KB',
+      `（裁剪前 ${(before / 1024).toFixed(1)} KB，共 ${rows.length} 条资源）`);
+
+    const writeLocalOnly = () => {
+      if (typeof Store !== 'undefined' && typeof Store.write === 'function') {
+        // push:false = 只落本地、不进云端待写队列（不会触发重试，也就不会熔断）
+        Store.write(RESOURCES_KEY, rows, { label: '离线资源库', push: false });
+        return true;
+      }
+      try {
+        localStorage.setItem(RESOURCES_KEY, JSON.stringify(rows));
+        return true;
+      } catch (error) {
+        console.warn('[离线资源库] 写入本地失败', error);
+        return false;
+      }
+    };
+
+    if (bytes > limit) {
+      console.warn(`[离线资源库] ⛔ Payload ${(bytes / 1024 / 1024).toFixed(2)}MB 超过 `
+        + `${(limit / 1024 / 1024).toFixed(0)}MB，已主动拦截本次云端请求（本地数据完好）。`
+        + '请到「资源库管理」删掉不用的旧资源后重新保存；或在控制台执行 Store.retryFailedKeys()。');
+      if (typeof showToast === 'function') {
+        showToast('资源库数据超过 4MB，已只存本机；请删除旧资源后再同步', 'error');
+      }
+      return writeLocalOnly();
+    }
+
     if (typeof Store !== 'undefined' && typeof Store.write === 'function') {
       // 列表被删光 = 用户亲手清空 → 带上 clearIntent，云端那张表才会真的空掉；
       // 否则（页面初始化时的空快照）一律不推，绝不把云端洗成 0 条。
       Store.write(RESOURCES_KEY, rows, { label: '离线资源库', clearIntent: rows.length === 0 });
       return true;
     }
-    try {
-      localStorage.setItem(RESOURCES_KEY, JSON.stringify(rows));
-      return true;
-    } catch (error) {
-      console.warn('[离线资源库] 写入本地失败', error);
-      return false;
-    }
+    return writeLocalOnly();
   },
 
   /* ---------------- 记录整形 ---------------- */
@@ -153,16 +199,17 @@ const OfflineResources = {
     return this.list().find(record => record.id === id) || null;
   },
 
-  /** 大单元 → 资源记录（完整 11 模块塞进 modules_json，六列之外的一律放 modules_json 里） */
+  /** 大单元 → 资源记录（完整 10 模块塞进 modules_json，六列之外的一律放 modules_json 里） */
   recordFromUnit(unit, options = {}) {
     const normalized = normalizeUnit(unit);
     const meta = normalized.meta || {};
     const now = this._now();
     const source = options.source || meta.source || (meta.generatedAt ? 'ai' : 'manual');
-    const payload = {
-      ...normalized,
-      meta: { ...meta, source },
-    };
+    // 深拷贝清洗：只留成品文本，剔掉中间状态、空模块、结构图长描述。
+    // 读回来时 normalizeRecord → normalizeUnit 会自动补齐 18 课与模板量规，界面一字不少。
+    const payload = typeof unitCompactForStorage === 'function'
+      ? unitCompactForStorage({ ...normalized, meta: { ...meta, source } })
+      : { ...normalized, meta: { ...meta, source } };
     return {
       id: options.id || meta.resourceId || this.newId(),
       category: meta.category || '',
@@ -242,7 +289,11 @@ const OfflineResources = {
   markPending(record) {
     if (!record?.id) return;
     const map = this.readPendingMap();
-    map[record.id] = record;
+    // 小票最多 20 条，若每条都塞完整大单元会直接撑爆 localStorage 配额（约 5MB），
+    // 保存都可能失败。同样只留裁剪后的成品数据，reconcile 时 normalizeRecord 会补齐。
+    map[record.id] = (typeof unitCompactForStorage === 'function' && record.modules_json)
+      ? { ...record, modules_json: unitCompactForStorage(record.modules_json) }
+      : record;
     // 上限保护：太久的小票先丢（按 created_at 升序）
     const ids = Object.keys(map);
     if (ids.length > MAX_PENDING_RECORDS) {
@@ -269,6 +320,13 @@ const OfflineResources = {
    * 典型场景：A 机离线存了 3 条，B 机后来整表覆盖了云端 —— 没有这道防线，A 机一联网就被洗掉。
    */
   reconcile() {
+    /* 🔒 用户刚主动从离线资源库载入了一份资源：当前本地视图是最高优先级。
+       绝不能用旧小票 / 旧列表整份写回（writeList 会再触发一次 store:sync），
+       那会把刚载入的资源连带当前视图一起盖回旧数据。 */
+    if (typeof Store !== 'undefined' && typeof Store.hasViewPin === 'function' && Store.hasViewPin()) {
+      console.log('[离线资源库] 🔒 视图优先级锁生效，跳过本次 store:sync 对账');
+      return { restored: 0, cleared: 0, skipped: 'viewPin' };
+    }
     const map = this.readPendingMap();
     const ids = Object.keys(map);
     if (!ids.length) return { restored: 0, cleared: 0 };
@@ -559,7 +617,7 @@ const OfflineResources = {
     }
   },
 
-  /** 下载一份空白填写模板（11 个模块标题 + 18 行课时表格都已写死） */
+  /** 下载一份空白填写模板（10 个模块标题 + 18 行课时表格都已写死） */
   downloadTemplate() {
     if (typeof buildUnitTemplate !== 'function') return showToast('模板组件还没加载，请刷新页面', 'error');
     const markdown = buildUnitTemplate(null, { title: '' });
@@ -592,7 +650,7 @@ const OfflineResources = {
         <div class="res-import-head">
           <div>
             <h2>上传大单元文件</h2>
-            <p>把按模板填好的 <b>.md / .txt</b> 拖进来（或直接点开选择），系统按标题切成 11 个模块、把 18 行课时表逐格落库；<b>.json</b> 也认。<b>全程不调用 AI。</b></p>
+            <p>把按模板填好的 <b>.md / .txt</b> 拖进来（或直接点开选择），系统按标题切成 10 个模块、把 18 行课时表逐格落库；<b>.json</b> 也认。<b>全程不调用 AI。</b></p>
           </div>
           <button class="btn btn-secondary" type="button" onclick="OfflineResources.downloadTemplate()">⬇ 下载大单元模板</button>
         </div>
@@ -909,7 +967,7 @@ const OfflineResources = {
   /* ---------------- 全屏手填工作台 ---------------- */
 
   /**
-   * 打开全屏工作台：左边 11 个模块目录，右边一个巨大的文本框。
+   * 打开全屏工作台：左边 10 个模块目录，右边一个巨大的文本框。
    * 点哪个模块就在哪个模块里填写 —— 全程离线，保存直接落库，不调用任何 AI 接口。
    * @param {string} recordId 传资源 id 就是编辑已有资源；不传就是新建
    */
@@ -945,7 +1003,7 @@ const OfflineResources = {
     return `
       <div class="res-wb">
         <aside class="res-wb-nav">
-          <p class="res-wb-nav-title">大单元模块（共 11 个）</p>
+          <p class="res-wb-nav-title">大单元模块（共 10 个）</p>
           <div class="res-wb-nav-list" id="resWbNav">
             ${items.map(item => `
               <button type="button" class="res-wb-nav-item" data-res-mod="${this._escape(item.id)}"
@@ -1115,20 +1173,21 @@ const OfflineResources = {
 
   wbPlaceholder(moduleId) {
     if (moduleId === 'lessons') {
-      return '| 课时 | 维度 | 运动能力 | 健康行为 | 体育品德 | 教学内容 | 组织教学与方法 |\n| 1 | 基本技术 | …… | …… | …… | …… | …… |';
+      return '| 课次 | 学习目标（三维段落） | 主要学习内容（结构化） | 教学策略/学练活动 |\n| --- | --- | --- | --- |\n| 1 | 1.运动能力：……<br>2.健康行为：……<br>3.体育品德：…… | 1.热身小游戏：……；2.技术学练：……；3.展示与比赛：……；4.体能练习：…… | 情境导入：……；教与学的方法：……；比赛活动：……；教学评价：…… |';
     }
     if (moduleId === 'structure') return '- 基本技术：第3课次：原地运球；第4课次：行进间运球';
+    if (moduleId === 'rubric') return '### 核心素养占比\n| 核心素养 | 权重 |\n| --- | --- |\n| 运动能力 | 60 |\n| 健康行为 | 20 |\n| 体育品德 | 20 |';
     return '在这里直接写，写多长都行';
   },
 
   /** 每个模块文本框下方的常驻提示（把"该怎么写"讲清楚） */
   wbTip(moduleId) {
     switch (moduleId) {
-      case 'objectives': return '一行一项，冒号后面写内容（运动能力 / 健康行为 / 体育品德）。';
-      case 'lessons': return '一行一个课时，共 18 行；用 | 分隔，表头那一行别删。维度可以写：基础知识 / 基本技术 / 战术 / 体能 / 比赛 / 规则 / 观赏。';
+      case 'objectives': return '按段落写：运动能力、健康行为、体育品德各一段，段内用分号连接，可观察、可评价。';
+      case 'lessons': return '一行一个课时，共 18 行；用 | 分隔，表头那一行别删。目标是三段式，内容是四段式（热身小游戏/技术学练/展示与比赛/体能练习），策略是四要素（情境导入/教与学的方法/比赛活动/教学评价）。';
       case 'structure': return '一行一个分支，冒号后面写「第N课次：名称」，多个之间用中文分号隔开。';
-      case 'keyDifficulties': return '四个重难点各一行。';
-      case 'evaluation': return '过程性 / 终结性 / 学练赛评一体化 各一行。';
+      case 'keyDifficulties': return '四个重难点各一行，每行写「重点：… 难点：…」。';
+      case 'rubric': return '三张表：核心素养占比、等级评价量规（优秀85-100/良好75-84/合格60-74/不合格60以下）、细分得分点（合计 100 分）。';
       default: return '直接写正文即可，段落格式会原样保存。';
     }
   },
@@ -1237,26 +1296,24 @@ const OfflineResources = {
 
   moduleReadonly(unit, id, line) {
     switch (id) {
-      case 'objectives': return line('运动能力', unit.objectives.ability)
-        + line('健康行为', unit.objectives.health) + line('体育品德', unit.objectives.character);
+      case 'objectives': return line('教学目标', unit.objectives);
       case 'keyDifficulties': return line('学生学习的重难点', unit.keyDifficulties.learning)
         + line('学习内容的重难点', unit.keyDifficulties.content)
         + line('教学组织的重难点', unit.keyDifficulties.organization)
         + line('教学方法的重难点', unit.keyDifficulties.method);
-      case 'evaluation': return line('过程性评价', unit.evaluation.process)
-        + line('终结性评价', unit.evaluation.summative)
-        + line('「学、练、赛、评」一体化', unit.evaluation.integration);
-      case 'structure': return `<div class="res-ro-tree">${UNIT_STRUCTURE_BRANCHES.map(branch => `
-        <div class="res-ro-branch"><b>${branch.label}</b>
-          ${unit.structure[branch.id].length
-            ? `<ol>${unit.structure[branch.id].map(node => `<li>${this._escape(node.title)}</li>`).join('')}</ol>`
-            : '<p class="res-note">无</p>'}
-        </div>`).join('')}</div>`;
+      case 'structure': return `<div class="ud2-mx"><div class="ud2-mx-scroll"><div class="ud2-mx-inner">${
+        typeof buildUnitStructureMatrixHTML === 'function'
+          ? buildUnitStructureMatrixHTML(unit)
+          : '<p class="res-note">暂无结构图</p>'
+      }</div></div></div>`;
+      case 'rubric': return typeof buildUnitRubricHTML === 'function'
+        ? buildUnitRubricHTML(unit)
+        : '<p class="res-note">暂无评价量规表</p>';
       case 'lessons': return `<div class="res-ro-table-wrap"><table class="data-table res-ro-table">
-        <thead><tr><th>课时</th><th>学习目标（三维）</th><th>教学内容</th><th>组织教学与方法</th></tr></thead><tbody>
+        <thead><tr><th>课次</th><th>学习目标（三维段落）</th><th>主要学习内容</th><th>教学策略/学练活动</th></tr></thead><tbody>
         ${unit.lessons.map(lesson => `<tr>
           <td>第 ${lesson.no} 课</td>
-          <td>能力：${this._escape(lesson.objectives.ability) || '—'}<br>健康：${this._escape(lesson.objectives.health) || '—'}<br>品德：${this._escape(lesson.objectives.character) || '—'}</td>
+          <td>${this._escape(lesson.objectives) || '—'}</td>
           <td>${this._escape(lesson.content) || '—'}</td>
           <td>${this._escape(lesson.method) || '—'}</td></tr>`).join('')}
         </tbody></table></div>`;

@@ -794,6 +794,11 @@ table.data-table tbody tr:last-child td {
   color: var(--text-secondary);
 }
 
+/* 🌐 离线状态标签：复用 .tag 的灰底灰字，断网时常驻顶栏右侧。
+   [hidden] 必须显式声明，否则 .tag 的 display:inline-flex 会盖过浏览器默认隐藏。 */
+.topbar-offline-badge[hidden] { display: none; }
+.topbar-offline-badge { white-space: nowrap; cursor: default; }
+
 /* 搜索框 */
 .search-box {
   display: flex;

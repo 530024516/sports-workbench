@@ -92,7 +92,7 @@ create table if not exists public.sports_meet (
 );
 
 -- 离线资源库：保存的大单元设计（一行 = 一个资源，用「具名列」而非 data(jsonb) 通用包装）
--- modules_json 里放完整大单元数据：11 个模块 + 18 课时计划表 + 选题 meta
+-- modules_json 里放完整大单元数据：10 个模块 + 18 课时计划表 + 选题 meta
 create table if not exists public.offline_resources (
   id text primary key,
   category text not null default '',

@@ -4,7 +4,7 @@
  * 大单元「离线模板」双向转换 —— 离线方案的核心。
  *
  * 老师不想再被 AI 的不确定性折腾时，走这条纯离线路径：
- *   ① 【下载大单元模板】拿到一份 .md（11 个模块标题 + 18 课时表格全部写死）
+ *   ① 【下载大单元模板】拿到一份 .md（10 个模块标题 + 18 课时表格全部写死）
  *   ② 用本地编辑器填好后【上传】，这里把它解析成系统里的大单元结构
  *   ③ 或者用【全屏工作台】逐模块填写 —— 工作台每个模块用的就是同一份文本格式
  *
@@ -13,19 +13,19 @@
  *   这里让两边共用同一套：模块标题 / 别名 / 字段名 / 表格列定义（见 unitFieldToText 与 applyFieldText）。
  *
  * 依赖（都是全局，加载顺序见 offline-resources.html）：
- *   js/unit-model.js（UNIT_MODULES / createEmptyUnit / normalizeUnit / structureBranchOfDimension）
+ *   js/unit-model.js（UNIT_MODULES / createEmptyUnit / normalizeUnit / unitMatrixDimensionLabel）
  *   js/unit-catalog.js（UNIT_CATALOG / UNIT_LEVELS / UNIT_DIMENSIONS，用于把标签反查成 id）
  */
 
 const UNIT_TEMPLATE_VERSION = 'v1';
-/** 基本信息段的标识（不属于 11 个模块） */
+/** 基本信息段的标识（不属于 10 个模块） */
 const UNIT_TEMPLATE_META = '__meta__';
 
 const UNIT_CN_NUMERALS = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十',
   '十一', '十二', '十三', '十四', '十五', '十六', '十七', '十八', '十九', '二十'];
 
 /**
- * 模板里的 11 个模块 —— 顺序与 UNIT_MODULES 一致，aliases 是老师可能自己写的标题。
+ * 模板里的 10 个模块 —— 顺序与 UNIT_MODULES 一致，aliases 是老师可能自己写的标题。
  * 匹配规则：先精确相等，再看"长别名是否被包含"，同样命中时取别名更长的那个
  * （所以「主要教学内容」会赢过「教学内容」）。
  */
@@ -42,12 +42,20 @@ const UNIT_TEMPLATE_MODULES = [
     aliases: ['18 课时计划表', '18课时计划表', '18课时表', '课时计划表', '课时计划', '课时表', '18课时', '18 课时'],
   },
   { id: 'assessment', title: '考核与作业', aliases: ['考核与作业', '考核', '作业'] },
-  { id: 'evaluation', title: '学习评价', aliases: ['学习评价', '评价'] },
   { id: 'reflection', title: '教学反思', aliases: ['教学反思', '反思', '课后反思'] },
-  { id: 'resources', title: '教学资源', aliases: ['教学资源', '资源'] },
+  { id: 'rubric', title: '单元学习评价表', aliases: ['单元学习评价表', '学习评价表', '评价量规表', '评价表', '量规'] },
 ];
 
-/** 基本信息字段（不属于 11 模块，所以单独一段） */
+/**
+ * 已废弃的模块标题 —— 旧版 11 模块里的「学习评价」。
+ *
+ * ⚠️ 必须拦住它：「学习评价」是「单元学习评价表」的子串，按"长别名包含"规则
+ *    导入旧模板时会被误判成量规表，把老师写的过程性评价塞进量规格子里。
+ *    所以这里精确匹配并直接丢弃这一段（不落到任何模块）。
+ */
+const UNIT_DEPRECATED_HEADINGS = ['学习评价'];
+
+/** 基本信息字段（不属于 10 模块，所以单独一段） */
 const UNIT_META_FIELDS = [
   { label: '单元名称', key: 'unitTitle' },
   { label: '教材大类', key: 'category' },
@@ -67,13 +75,16 @@ const UNIT_DIMENSION_ALIASES = [
   { id: 'watch', names: ['观赏与评价', '观赏', 'watch'] },
 ];
 
-/** 结构图分支的写法别名（分支 id + 维度 id + 中文标签都认） */
-const UNIT_BRANCH_ALIASES = (typeof UNIT_STRUCTURE_BRANCHES !== 'undefined' ? UNIT_STRUCTURE_BRANCHES : [])
-  .map(branch => ({
-    id: branch.id,
-    dim: branch.dim,
-    names: [branch.label, branch.id, branch.dim, ...(branch.label || '').split('与')].filter(Boolean),
-  }));
+/**
+ * 结构图泳道的写法别名（泳道 id + 中文标签 + 旧七大维度名都认）。
+ * 旧模板里的"专项体能 / 规则与裁判 / 观赏与评价"会分别归到 基本技术 / 技战术运用 / 展示或比赛。
+ */
+const UNIT_MATRIX_ALIASES = [
+  { id: 'basic', names: ['基础知识', '基础知识与技能', '知识', 'basic'] },
+  { id: 'technique', names: ['基本技术', '基本技术与技能', '技术', 'technique', '专项体能', '体能', 'fitness'] },
+  { id: 'tactics', names: ['技战术运用', '战术', 'tactic', 'tactics', '规则与裁判', '规则', '裁判', 'rule'] },
+  { id: 'match', names: ['展示或比赛', '比赛与展示', '比赛', '展示', 'match', '观赏与评价', '观赏', 'watch'] },
+];
 
 /** 课时表格的列：表头写什么都列出了别名，解析时按表头内容决定每一列是什么 */
 const UNIT_LESSON_COLUMNS = [
@@ -82,12 +93,14 @@ const UNIT_LESSON_COLUMNS = [
   { key: 'ability', names: ['运动能力', '能力目标', '能力', '技能目标', 'ability'] },
   { key: 'health', names: ['健康行为', '健康目标', '健康', 'health'] },
   { key: 'character', names: ['体育品德', '品德目标', '品德', 'character'] },
-  { key: 'target', names: ['学习目标', '三维目标', '课时目标', '目标', '学习目标（三维）'] },
-  { key: 'content', names: ['教学内容', '内容', '主要教学内容', '本课内容', 'content'] },
-  { key: 'method', names: ['组织教学与方法', '教学组织与方法', '组织教法', '教学方法', '教法', '组织与方法', 'method'] },
+  { key: 'target', names: ['学习目标', '三维目标', '课时目标', '目标', '学习目标（三维）', '学习目标（三维段落）'] },
+  { key: 'content', names: ['教学内容', '内容', '主要教学内容', '主要学习内容', '本课内容', 'content'] },
+  { key: 'method', names: ['组织教学与方法', '教学组织与方法', '组织教法', '教学方法', '教法', '组织与方法', '教学策略', '学练活动', '教学策略/学练活动', 'method'] },
 ];
 /** 表格没有表头（或表头被改坏）时，按模板自带的列顺序兜底 */
-const UNIT_LESSON_DEFAULT_ORDER = ['no', 'dimension', 'ability', 'health', 'character', 'content', 'method'];
+const UNIT_LESSON_DEFAULT_ORDER = ['no', 'target', 'content', 'method'];
+/** 旧版 7 列表（课时/维度/运动能力/健康行为/体育品德/教学内容/组织教法）的列顺序 */
+const UNIT_LESSON_LEGACY_ORDER = ['no', 'dimension', 'ability', 'health', 'character', 'content', 'method'];
 
 /* ---------------- 小工具 ---------------- */
 
@@ -143,13 +156,21 @@ function unitDimensionIdOf(text) {
   return loose ? loose.id : '';
 }
 
-function unitBranchIdOf(text) {
+/** 泳道写法 → 泳道 id（中文标签 / 英文键 / 旧七大维度名都认） */
+function unitMatrixLaneIdOf(text) {
   const raw = String(text ?? '').trim().toLowerCase();
   if (!raw) return '';
-  const exact = UNIT_BRANCH_ALIASES.find(entry => entry.names.some(name => name.toLowerCase() === raw));
+  const exact = UNIT_MATRIX_ALIASES.find(entry => entry.names.some(name => name.toLowerCase() === raw));
   if (exact) return exact.id;
-  const loose = UNIT_BRANCH_ALIASES.find(entry => entry.names.some(name => raw.includes(name.toLowerCase())));
+  const loose = UNIT_MATRIX_ALIASES.find(entry => entry.names.some(name => raw.includes(name.toLowerCase())));
   return loose ? loose.id : '';
+}
+
+/** 泳道 id → 中文标签（结构图节点里存的就是这个） */
+function unitMatrixLaneLabel(laneId) {
+  if (typeof unitMatrixDimensionLabel === 'function') return unitMatrixDimensionLabel(laneId);
+  const found = UNIT_MATRIX_ALIASES.find(entry => entry.id === laneId);
+  return found ? found.names[0] : '';
 }
 
 /** 剥掉列表符号与序号，得到干净的正文 */
@@ -243,11 +264,10 @@ function unitFieldToText(unit, moduleId) {
           : (data.meta[field.key] || '')))
         .join('\n');
     case 'objectives':
-      return [
-        unitLabeledLine('运动能力', data.objectives.ability),
-        unitLabeledLine('健康行为', data.objectives.health),
-        unitLabeledLine('体育品德', data.objectives.character),
-      ].join('\n');
+      // 学习目标现在就是一段文本（里面自带"运动能力：…""健康行为：…""体育品德：…"三段）
+      // 空的时候给一段骨架，方便老师直接照着填
+      return String(data.objectives || '').trim()
+        || '运动能力：\n\n健康行为：\n\n体育品德：';
     case 'keyDifficulties':
       return [
         unitLabeledLine('学生学习的重难点', data.keyDifficulties.learning),
@@ -255,44 +275,81 @@ function unitFieldToText(unit, moduleId) {
         unitLabeledLine('教学组织的重难点', data.keyDifficulties.organization),
         unitLabeledLine('教学方法的重难点', data.keyDifficulties.method),
       ].join('\n');
-    case 'evaluation':
-      return [
-        unitLabeledLine('过程性评价', data.evaluation.process),
-        unitLabeledLine('终结性评价', data.evaluation.summative),
-        unitLabeledLine('学练赛评一体化', data.evaluation.integration),
-      ].join('\n');
     case 'structure':
-      return (typeof UNIT_STRUCTURE_BRANCHES !== 'undefined' ? UNIT_STRUCTURE_BRANCHES : [])
-        .map(branch => unitLabeledLine(branch.label,
-          (data.structure[branch.id] || []).map(node => node.title).join('；')))
-        .join('\n');
+      return [
+        ...(typeof UNIT_MATRIX_DIMENSIONS !== 'undefined' ? UNIT_MATRIX_DIMENSIONS : [])
+          .map(dimension => unitLabeledLine(dimension.label,
+            (data.structure_nodes || [])
+              .filter(node => unitMatrixDimensionLabel(node.dimension) === dimension.label)
+              .map(node => `第${node.id}课次：${node.title}`).join('；'))),
+        unitLabeledLine('主要项目', (data.main_projects || []).join('、')),
+      ].join('\n');
     case 'lessons':
       return unitLessonsTableText(data);
+    case 'rubric':
+      return unitRubricTableText(data);
     default:
       return String(data[moduleId] ?? '');
   }
 }
 
-/** 18 课时表格（表头 + 分隔行 + 18 行） */
+/**
+ * 18 课时表格（表头 + 分隔行 + 18 行）
+ *
+ * ⚠️ 模板里比页面多一列「维度」：页面上的课时表已经精简成 4 列（老师看着清楚），
+ *    但 .md 模板是"手填表"，维度是结构图泳道的依据 —— 少了它，导入回来的单元
+ *    就丢了"哪一课属于哪个维度"。所以模板保留这一列，页面不显示。
+ */
 function unitLessonsTableText(data) {
-  const header = ['课时', '维度', '运动能力', '健康行为', '体育品德', '教学内容', '组织教学与方法'];
+  const header = ['课次', '维度', '学习目标（三维段落）', '主要学习内容（结构化）', '教学策略/学练活动'];
   const rows = [
     `| ${header.join(' | ')} |`,
     `| ${header.map(() => '---').join(' | ')} |`,
   ];
+  // 课时表现在是"多段落 + 小标题"的长文本：换行要保留成 <br>，
+  // 【小标题】还原成 Markdown 加粗，否则导出后全糊成一块。
+  const cell = value => String(value ?? '')
+    .replace(/\|/g, '／')
+    .replace(/\r?\n+/g, '<br>')
+    .replace(/【([^】]{1,20})】/g, '**【$1】**')
+    .trim();
   data.lessons.forEach(lesson => {
     const cells = [
       lesson.no,
       unitDimensionLabelOf(lesson.dimension),
-      lesson.objectives.ability,
-      lesson.objectives.health,
-      lesson.objectives.character,
-      lesson.content,
-      lesson.method,
-    ].map(unitTableCell);
+      cell(lesson.objectives),
+      cell(lesson.content),
+      cell(lesson.method),
+    ];
     rows.push(`| ${cells.join(' | ')} |`);
   });
   return rows.join('\n');
+}
+
+/** 【单元学习评价表】的模板文本：三张 markdown 表（素养占比 / 等级量规 / 细分得分点） */
+function unitRubricTableText(data) {
+  const rubric = data.rubric || (typeof unitRubricTemplate === 'function' ? unitRubricTemplate() : {});
+  const literacies = (rubric.literacyWeights || []).map(item => item.name);
+  const cell = value => String(value ?? '').replace(/\|/g, '／').replace(/\n+/g, '<br>');
+  const lines = ['### 核心素养占比',
+    '| 核心素养 | 权重 |',
+    '| --- | --- |',
+    ...(rubric.literacyWeights || []).map(item => `| ${cell(item.name)} | ${cell(item.percent)} |`),
+    '', '### 等级评价量规',
+    `| 等级 | 分值区间 | ${literacies.map(name => cell(name)).join(' | ')} |`,
+    `| --- | --- | ${literacies.map(() => '---').join(' | ')} |`,
+    ...(rubric.levels || []).map(level => `| ${cell(level.name)} | ${cell(level.range)} | ${literacies.map(name => {
+      const key = name === '健康行为' ? 'health' : (name === '体育品德' ? 'character' : 'ability');
+      return cell(level[key] || '');
+    }).join(' | ')} |`),
+    '', '### 细分得分点',
+    '| 核心素养 | 得分点 | 分值 | 评价要点 |',
+    '| --- | --- | --- | --- |',
+    ...(rubric.scoreItems || []).map(item =>
+      `| ${cell(item.literacy)} | ${cell(item.name)} | ${cell(item.points)} | ${cell(item.desc)} |`),
+  ];
+  if (rubric.note) lines.push('', `评价说明：${rubric.note}`);
+  return lines.join('\n');
 }
 
 /** 生成可直接下载的模板文本（unit 为空时就是空白模板） */
@@ -334,7 +391,7 @@ function unitTemplateFileName(unit) {
 /* ---------------- ② 文本 → 单元（按模块就地写入） ---------------- */
 
 /**
- * 把某一段文本写进 unit（11 个模块 + 基本信息共用一套规则）。
+ * 把某一段文本写进 unit（10 个模块 + 基本信息共用一套规则）。
  * @returns {string[]} 解析过程中的提示
  */
 function applyFieldText(target, moduleId, text) {
@@ -365,13 +422,16 @@ function applyFieldText(target, moduleId, text) {
       const character = unitPickLabel(map, ['体育品德', '品德', 'character']);
       const loose = map.get('') || '';
       if (ability || health || character) {
-        target.objectives = { ability, health, character };
+        // 分项写 → 合成一段文本（三段之间空行）
+        target.objectives = [
+          ability ? `运动能力：${ability}` : '',
+          health ? `健康行为：${health}` : '',
+          character ? `体育品德：${character}` : '',
+        ].filter(Boolean).join('\n\n');
       } else if (loose) {
-        const split = unitSplitThreeFields(loose, UNIT_OBJECTIVE_MARKERS);
-        target.objectives = split
-          ? { ability: split.ability || '', health: split.health || '', character: split.character || '' }
-          : { ability: loose, health: '', character: '' };
-        warnings.push('【教学目标】没按分项写，整段放进了「运动能力」，其余两项留空，可在工作台里改。');
+        // 整段写（新版的段落式）→ 原样保留
+        target.objectives = loose;
+        warnings.push('【教学目标】没按"运动能力 / 健康行为 / 体育品德"分项写，已整段保留，可在工作台里拆分。');
       }
       break;
     }
@@ -386,21 +446,18 @@ function applyFieldText(target, moduleId, text) {
       if (map.get('')) target.keyDifficulties.learning = `${target.keyDifficulties.learning}\n${map.get('')}`.trim();
       break;
     }
-    case 'evaluation': {
-      const map = unitParseLabeledBlock(body);
-      target.evaluation = {
-        process: unitPickLabel(map, ['过程性评价', '过程性', 'process']),
-        summative: unitPickLabel(map, ['终结性评价', '终结性', 'summative']),
-        integration: unitPickLabel(map, ['学练赛评一体化', '一体化', 'integration']),
-      };
-      if (map.get('')) target.evaluation.process = `${target.evaluation.process}\n${map.get('')}`.trim();
-      break;
-    }
     case 'structure': {
       const parsed = unitParseStructureBlock(body);
-      target.structure = parsed.structure;
+      target.structure_nodes = parsed.nodes;
+      if (parsed.mainProjects.length) target.main_projects = parsed.mainProjects;
       warnings.push(...parsed.warnings);
       target._looseStructureNodes = parsed.loose;      // 等课时表解析完再按维度归位
+      break;
+    }
+    case 'rubric': {
+      const parsed = unitParseRubricBlock(body);
+      target.rubric = parsed.rubric;
+      warnings.push(...parsed.warnings);
       break;
     }
     case 'lessons': {
@@ -511,9 +568,13 @@ function unitParseLessonTable(body) {
       no: 0, dimension: '', ability: '', health: '', character: '', content: '', method: '', target: '',
     };
     cells.forEach((cell, index) => {
-      const key = headerMap ? headerMap[index] : UNIT_LESSON_DEFAULT_ORDER[index];
+      const key = headerMap ? headerMap[index] : (cells.length >= 6 ? UNIT_LESSON_LEGACY_ORDER[index] : UNIT_LESSON_DEFAULT_ORDER[index]);
       if (!key) return;
-      const text = String(cell ?? '').replace(/<br\s*\/?>/gi, ' ').trim();
+      const raw = String(cell ?? '').trim();
+      // 目标列里的 <br> 是三段之间的换行，其余列一律当空格
+      const text = key === 'target'
+        ? raw.replace(/<br\s*\/?>/gi, '\n').trim()
+        : raw.replace(/<br\s*\/?>/gi, ' ').trim();
       if (!text) return;
       if (key === 'no') {
         const found = text.match(/\d{1,2}/);
@@ -524,44 +585,36 @@ function unitParseLessonTable(body) {
       row[key] = row[key] ? `${row[key]}；${text}` : text;
     });
 
-    // 「目标」列里混着三维时，尽量拆开
+    // 「目标」列：新版是一整段（三维段落）；旧版拆成三列时再合并回一段
     if (row.target) {
-      const split = unitSplitThreeFields(row.target, UNIT_OBJECTIVE_MARKERS);
-      if (split) {
-        row.ability = row.ability || split.ability || '';
-        row.health = row.health || split.health || '';
-        row.character = row.character || split.character || '';
-      } else {
-        row.ability = row.ability || row.target;
-      }
+      row.ability = row.ability || '';
+      row.health = row.health || '';
+      row.character = row.character || '';
     }
+    const objectiveTextOf = row => {
+      if (row.target) return row.target;
+      const parts = [['运动能力', row.ability], ['健康行为', row.health], ['体育品德', row.character]]
+        .filter(([, text]) => String(text || '').trim());
+      return parts.map(([label, text]) => `${label}：${String(text).trim()}`).join('\n\n');
+    };
     // 「教学内容」列里带了对学生能做什么的描述时不动，保持老师原样
     if (row.no >= 1 && row.no <= 18) {
       if (seen.has(row.no)) { dropped += 1; return; }
       seen.add(row.no);
       const target = lessons[row.no - 1];
       target.dimension = row.dimension || target.dimension;
-      target.objectives = {
-        ability: row.ability || target.objectives.ability || '',
-        health: row.health || target.objectives.health || '',
-        character: row.character || target.objectives.character || '',
-      };
+      target.objectives = objectiveTextOf(row) || target.objectives || '';
       target.content = row.content || target.content || '';
       target.method = row.method || target.method || '';
       return;
     }
     sequential += 1;
-    const slot = lessons.find(lesson => !unitHasContent(lesson.content, lesson.method,
-      lesson.objectives.ability, lesson.objectives.health, lesson.objectives.character)
+    const slot = lessons.find(lesson => !unitHasContent(lesson.content, lesson.method, lesson.objectives)
       && !seen.has(lesson.no));
     if (slot) {
       seen.add(slot.no);
       slot.dimension = row.dimension || slot.dimension;
-      slot.objectives = {
-        ability: row.ability || slot.objectives.ability || '',
-        health: row.health || slot.objectives.health || '',
-        character: row.character || slot.objectives.character || '',
-      };
+      slot.objectives = objectiveTextOf(row) || slot.objectives || '';
       slot.content = row.content || slot.content || '';
       slot.method = row.method || slot.method || '';
     } else {
@@ -580,36 +633,131 @@ function unitParseLessonTable(body) {
 /* ---------------- 结构图解析 ---------------- */
 
 /**
+ * 拆出正文里的所有 markdown 表格（表头 + 数据行）。
+ * 分隔行（| --- | --- |）会被跳过。
+ */
+function unitSplitMarkdownTables(text) {
+  const tables = [];
+  let current = null;
+  String(text ?? '').split('\n').forEach(raw => {
+    const line = raw.trim();
+    if (!line.startsWith('|')) {
+      if (current) { tables.push(current); current = null; }
+      return;
+    }
+    const cells = line.replace(/^\|/, '').replace(/\|$/, '').split('|').map(cell => cell.trim());
+    if (cells.every(cell => /^:?-{2,}:?$/.test(cell) || cell === '')) return;   // 分隔行
+    if (!current) { current = { header: cells, rows: [] }; return; }
+    current.rows.push(cells);
+  });
+  if (current) tables.push(current);
+  return tables;
+}
+
+/**
+ * 解析【单元学习评价表】—— 三张表：核心素养占比 / 等级评价量规 / 细分得分点。
+ * 认表不认位置：按表头关键字判断这张表是干什么的，缺哪张就沿用课标标准模板。
+ */
+function unitParseRubricBlock(body) {
+  const warnings = [];
+  const base = typeof unitRubricTemplate === 'function' ? unitRubricTemplate()
+    : { levels: [], literacyWeights: [], scoreItems: [], note: '' };
+  const levels = [];
+  const weights = [];
+  const items = [];
+  unitSplitMarkdownTables(body).forEach(table => {
+    const head = table.header.map(cell => cell.replace(/[*_\s`]/g, ''));
+    const has = keyword => head.some(cell => cell.includes(keyword));
+    if (has('权重')) {
+      table.rows.forEach(cells => {
+        const name = String(cells[0] || '').trim();
+        if (!name) return;
+        const percent = Number(String(cells[1] || '').replace(/[^\d.]/g, ''));
+        weights.push({ name, percent: Number.isFinite(percent) ? percent : 0 });
+      });
+      return;
+    }
+    if (has('等级')) {
+      table.rows.forEach(cells => {
+        const name = String(cells[0] || '').trim();
+        if (!name) return;
+        levels.push({
+          name,
+          range: String(cells[1] || '').trim(),
+          ability: String(cells[2] || '').trim(),
+          health: String(cells[3] || '').trim(),
+          character: String(cells[4] || '').trim(),
+        });
+      });
+      return;
+    }
+    if (has('得分点')) {
+      table.rows.forEach(cells => {
+        const name = String(cells[1] || '').trim();
+        if (!name) return;
+        items.push({
+          literacy: String(cells[0] || '运动能力').trim(),
+          name,
+          points: Number(String(cells[2] || '').replace(/[^\d.]/g, '')) || 0,
+          desc: String(cells[3] || '').trim(),
+        });
+      });
+    }
+  });
+  const noteMatch = String(body ?? '').match(/评价说明\s*[：:]\s*([\s\S]+)$/);
+  const rubric = {
+    levels: levels.length ? levels : base.levels,
+    literacyWeights: weights.length ? weights : base.literacyWeights,
+    scoreItems: items.length ? items : base.scoreItems,
+    note: noteMatch ? String(noteMatch[1]).trim() : base.note,
+  };
+  if (!levels.length && !weights.length && !items.length) {
+    warnings.push('【单元学习评价表】没认出量规表，已沿用课标标准模板（优秀85-100 / 良好75-84 / 合格60-74 / 不合格60以下）。');
+  }
+  return { rubric, warnings };
+}
+
+/**
  * 结构图这一块的写法很自由，这里支持三种：
- *   - 基本技术：第3课次：原地运球；第4课次：行进间运球       （一行一个分支）
+ *   - 基本技术：第3课次：原地运球；第4课次：行进间运球       （一行一个维度）
  *   - 基本技术：                                             （下面跟着一串 - 第N课次：xxx）
- *   - 第5课次：战术                                          （不写分支，按课时表的维度归位）
+ *   - 第5课次：战术                                          （不写维度，按课时表的维度归位）
+ * 解析出来的是"矩阵节点"数组：{ id, dimension(泳道中文名), title }。
  */
 function unitParseStructureBlock(body) {
   const warnings = [];
-  const structure = normalizeUnit({}).structure;
+  const nodes = [];
   const loose = [];
-  let current = null;
+  let mainProjects = [];
+  let current = '';
 
   String(body ?? '').split('\n').forEach(rawLine => {
     const line = unitCleanLine(rawLine);
     if (!line) return;
+    // 「主要项目：A、B」—— 结构图底部那一行
+    const mainMatch = line.match(/^主要项目\s*[：:]\s*(.*)$/);
+    if (mainMatch) {
+      mainProjects = mainMatch[1].split(/[、,，;；]/).map(item => item.trim()).filter(Boolean).slice(0, 3);
+      return;
+    }
     const matched = line.match(/^([^：:]{1,12})\s*[：:]\s*([\s\S]*)$/);
-    const branch = matched ? unitBranchIdOf(matched[1]) : '';
-    if (branch && !/\d/.test(matched[1])) {
-      current = branch;
-      if (matched[2].trim()) unitPushNodes(structure[branch], matched[2], warnings);
+    const lane = matched ? unitMatrixLaneIdOf(matched[1]) : '';
+    if (lane && !/\d/.test(matched[1])) {
+      current = lane;
+      if (matched[2].trim()) unitPushNodes(nodes, current, matched[2], warnings);
       return;
     }
-    const nodes = unitExtractNodes(line);
-    if (nodes.length) {
-      nodes.forEach(node => (current ? structure[current].push(node) : loose.push(node)));
+    const parsed = unitExtractNodes(line);
+    if (parsed.length) {
+      parsed.forEach(node => (current
+        ? nodes.push({ ...node, dimension: current })
+        : loose.push(node)));
       return;
     }
-    loose.push({ no: 0, title: line });
+    loose.push({ id: 0, no: 0, title: line });
   });
 
-  return { structure, loose, warnings };
+  return { nodes, loose, mainProjects, warnings };
 }
 
 function unitExtractNodes(text) {
@@ -620,19 +768,20 @@ function unitExtractNodes(text) {
     const found = cleaned.match(/第\s*(\d{1,2})\s*课(?:次)?/);
     if (!found) return;
     const no = Number(found[1]);
-    const title = cleaned.replace(/^\s*[-*+]\s*/, '').trim();
-    nodes.push({ no, title });
+    // 节点标题里不要带"第N课次："前缀（结构图的格子已经标了课次号）
+    const stripped = cleaned.replace(/^第\s*\d{1,2}\s*课(?:次)?\s*[：:、.．]?\s*/, '').trim();
+    nodes.push({ no, title: stripped || cleaned });
   });
   return nodes;
 }
 
-function unitPushNodes(list, text, warnings) {
+function unitPushNodes(list, laneId, text, warnings) {
   const nodes = unitExtractNodes(text);
   if (!nodes.length && String(text).trim()) {
     warnings.push('结构图里有一行看不出是第几课次，已忽略（请写成「第N课次：xxx」）。');
     return;
   }
-  nodes.forEach(node => list.push(node));
+  nodes.forEach(node => list.push({ ...node, dimension: laneId }));
 }
 
 /* ---------------- ③ 整份文本 → 单元 + 校验报告 ---------------- */
@@ -659,6 +808,17 @@ function unitHeadingBody(text) {
 }
 
 /**
+ * 这一行是不是废弃的模块标题（旧版 11 模块的「学习评价」）。
+ * 命中时调用方要整段跳过 —— 它既不属于任何模块，也不能并进上一个模块。
+ */
+function unitIsDeprecatedHeading(line) {
+  const candidate = unitHeadingCandidate(line);
+  if (!candidate) return false;
+  const body = unitHeadingBody(candidate.text).trim();
+  return UNIT_DEPRECATED_HEADINGS.includes(body);
+}
+
+/**
  * 一行文字 → 模块 id（没命中返回 ''）。
  *
  * @param {object} [options]
@@ -675,6 +835,9 @@ function unitMatchModuleHeading(line, options = {}) {
   if (!candidate.strong && (!allowWeak || !isolated)) return '';
   const body = unitHeadingBody(candidate.text);
   if (!body || body.length > 24) return '';
+  // 废弃标题（旧版 11 模块的「学习评价」）：直接跳过这一段，
+  // 否则它会被「单元学习评价表」的别名吞掉，把内容塞错模块。
+  if (UNIT_DEPRECATED_HEADINGS.includes(body)) return '';
   let best = { id: '', score: 0 };
   const consider = (id, aliases) => {
     aliases.forEach(alias => {
@@ -692,7 +855,7 @@ function unitMatchModuleHeading(line, options = {}) {
   return best.id;
 }
 
-/** 按标题把整篇切成 11 段（+ 基本信息段） */
+/** 按标题把整篇切成 10 段（+ 基本信息段） */
 function unitSplitSections(text) {
   const lines = String(text ?? '').replace(/\r\n?/g, '\n').split('\n');
   const collect = (allowWeak) => {
@@ -702,6 +865,12 @@ function unitSplitSections(text) {
     lines.forEach(line => {
       const moduleId = unitMatchModuleHeading(line, { allowWeak, isolated: previousBlank });
       previousBlank = !String(line).trim();
+      // 废弃标题（旧版 11 模块的「学习评价」）：整段丢弃 ——
+      // 既不能落到任何模块，也不能被并进上一个模块（那会把过程性评价写进考核里）。
+      if (unitIsDeprecatedHeading(line)) {
+        current = '';
+        return;
+      }
       if (moduleId) {
         current = moduleId;
         if (!sections.has(current)) sections.set(current, []);
@@ -780,7 +949,7 @@ function parseUnitTemplate(input, options = {}) {
       .filter(id => unitModuleCompleted(unit, id));
     report.empty = UNIT_TEMPLATE_MODULES.map(module => module.id).filter(id => !report.found.includes(id));
     report.lessonRows = unit.lessons.filter(lesson => unitHasContent(lesson.content, lesson.method,
-      lesson.objectives.ability, lesson.objectives.health, lesson.objectives.character)).length;
+      lesson.objectives)).length;
     unitBuildReport(report, options);
     return report;
   }
@@ -811,33 +980,34 @@ function parseUnitTemplate(input, options = {}) {
   const unit = normalizeUnit(draft);
   report.unit = unit;
   report.lessonRows = unit.lessons.filter(lesson => unitHasContent(lesson.content, lesson.method,
-    lesson.objectives.ability, lesson.objectives.health, lesson.objectives.character)).length;
+    lesson.objectives)).length;
   unitBuildReport(report, options);
   return report;
 }
 
-/** 结构图里没写分支的节点：按课时表的维度归位 */
+/** 结构图里没写维度的节点：按课时表的维度归位到对应泳道 */
 function unitAttachLooseNodes(unit, loose, warnings) {
   if (!Array.isArray(loose) || !loose.length) return;
+  const nodes = Array.isArray(unit.structure_nodes) ? [...unit.structure_nodes] : [];
   let placed = 0;
   loose.forEach(node => {
-    if (!node.no) return;
-    const lesson = unit.lessons[node.no - 1];
+    const id = Number(node.id ?? node.no);
+    if (!Number.isInteger(id) || id < 1 || id > UNIT_LESSON_COUNT) return;
+    const lesson = unit.lessons[id - 1];
     const dimension = lesson ? lesson.dimension : '';
-    const branch = (typeof structureBranchOfDimension === 'function'
-      ? structureBranchOfDimension(dimension) : '') || (node.no <= 2 ? 'basic'
-      : node.no <= 9 ? 'technique' : node.no <= 15 ? 'tactics' : 'fitness');
-    if (unit.structure[branch]) { unit.structure[branch].push(node); placed += 1; }
+    const lane = (typeof unitMatrixDimensionLabel === 'function' ? unitMatrixDimensionLabel(dimension) : '')
+      || (typeof unitMatrixFallbackDimension === 'function' ? unitMatrixFallbackDimension(id) : '基础知识');
+    nodes.push({ id, dimension: lane, title: String(node.title || '') });
+    placed += 1;
   });
-  // 同一分支里按课次号排好，别乱序
-  Object.keys(unit.structure).forEach(branch => {
-    unit.structure[branch].sort((a, b) => a.no - b.no);
-  });
-  const skipped = loose.filter(node => !node.no).length;
+  unit.structure_nodes = typeof normalizeStructureNodes === 'function'
+    ? normalizeStructureNodes(nodes)
+    : nodes.sort((a, b) => a.id - b.id);
+  const skipped = loose.filter(node => !Number.isInteger(Number(node.id ?? node.no))).length;
   if (skipped) {
     warnings.push(`【大单元设计结构图】有 ${skipped} 行没写「第N课次」，无法归位，请改成「第N课次：xxx」。`);
   }
-  if (placed) warnings.push(`【大单元设计结构图】有 ${placed} 个节点没写分支，已按课时表的维度自动归位。`);
+  if (placed) warnings.push(`【大单元设计结构图】有 ${placed} 个节点没写维度，已按课时表的维度自动归位。`);
 }
 
 /** 统一的报告收尾：把 found/missing/empty/课时行数翻成人话的问题清单 */
@@ -856,8 +1026,7 @@ function unitBuildReport(report, options = {}) {
   }
   if (report.lessonRows > 0 && report.lessonRows < 18) {
     const done = new Set(report.unit.lessons
-      .filter(lesson => unitHasContent(lesson.content, lesson.method,
-        lesson.objectives.ability, lesson.objectives.health, lesson.objectives.character))
+      .filter(lesson => unitHasContent(lesson.content, lesson.method, lesson.objectives))
       .map(lesson => lesson.no));
     const absent = [];
     for (let no = 1; no <= UNIT_LESSON_COUNT; no += 1) if (!done.has(no)) absent.push(no);
@@ -913,7 +1082,7 @@ if (typeof module !== 'undefined' && module.exports) {
     const catalog = require(path.resolve(__dirname, 'unit-catalog.js'));
     const missing = {
       ...model, ...catalog,
-      UNIT_STRUCTURE_BRANCHES: model.UNIT_STRUCTURE_BRANCHES,
+      UNIT_MATRIX_DIMENSIONS: model.UNIT_MATRIX_DIMENSIONS,
       UNIT_MODULES: model.UNIT_MODULES,
       UNIT_DIMENSIONS: catalog.UNIT_DIMENSIONS,
       UNIT_CATALOG: catalog.UNIT_CATALOG,
