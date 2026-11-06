@@ -2554,13 +2554,31 @@ const Store = {
   },
 
   /**
+   * 大单元是不是「有效成品」。
+   * ⚠️ 不能只看 Object.keys().length：unitSavePayload() 对空模板也会吐出
+   *    13 个字段 / 18 个空格子 / 默认量规模板，那份 JSON 有 3KB 却一个字的内容都没有。
+   * rubric 不计入 —— 默认量规模板本身带文字，算进去空壳会被误判成"有数据"。
+   * 口径与 lib/supabase.js 的 unitDesignFilledFields() 一致。
+   */
+  _unitDesignHasContent(value) {
+    if (!this._isPlainObject(value)) return false;
+    return [
+      'unitTitle', 'objectives', 'textbookAnalysis', 'studentAnalysis', 'teachingContent',
+      'keyDifficulties', 'structure_nodes', 'main_projects', 'lessons', 'assessment', 'reflection',
+    ].some(field => this._unitFieldHasData(value[field]));
+  },
+
+  /**
    * 这个值算不算"空载荷"（绝不允许推到云端的那种空）。
    * ⛔ 空对象 / 空数组 / null / 空字符串一律算空载荷 —— 它们推上去就是"把云端洗成 0 条"。
+   * ⛔ 大单元还多一层「空壳」判定：有 key 没内容同样算空，避免 POST 到 /api/data
+   *    后被服务端 400 拒绝、连续失败 3 次把这个键熔断。
    */
   _isEmptyPayloadForPush(key, value) {
     if (value === null || value === undefined) return true;
     if (Array.isArray(value)) return value.length === 0;
     if (this._isPlainObject(value)) {
+      if (key === UNIT_DESIGN_KEY) return !this._unitDesignHasContent(value);
       if (this._isMeetKey(key)) return !this._hasContent(key, value);  // 运动会：报名 0 条 = 空
       return Object.keys(value).length === 0;
     }

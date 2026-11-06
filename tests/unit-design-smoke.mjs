@@ -268,7 +268,11 @@ function createUnitEnv() {
     Layout: { init() {} },
     Store: {
       read: () => null,
-      write: (key, value) => { context.__saved = { key, value }; },
+      write: (key, value, options) => {
+        context.__saved = { key, value, options };
+        if (!Array.isArray(context.__writes)) context.__writes = [];
+        context.__writes.push({ key, value, options });
+      },
       onReady: callback => callback('local'),
     },
     setTimeout,
@@ -301,6 +305,9 @@ function createUnitEnv() {
     // 课次-维度计划表（前端版，用于和后端对账）
     unitLessonPlanFor, unitCurrentLessonPlan, unitDimensionQuotaFor, unitDimensionStatsFor,
     unitCheckBackendVersion, UNIT_CLIENT_VERSION,
+    // 空壳防线 / 保存链路
+    unitSavePayload, saveUnitData, unitPayloadFilledModules, syncUnitKeyWithResource,
+    UNIT_SAVE_LIVE_FIELDS, UNIT_STORAGE_KEY,
     // 下面几个在 unit-model.js 里以「接收 unit」的纯函数形态存在，这里绑到页面的 unitData 上
     missingStructureNumbers: () => missingStructureNumbers(unitData),
     buildUnitExportHTML: () => buildUnitExportHTML(unitData),
@@ -2313,6 +2320,66 @@ await test('㊿k 真实接口闭环保护：推理模型必须压低思考量，
   assert(/AI_REASONING_EFFORT\s*=\s*String\(process\.env\.AI_REASONING_EFFORT \|\| 'low'\)/.test(coreSource),
     '推理强度要可用环境变量覆盖（AI_REASONING_EFFORT=none 可完全关闭）');
   assert(/reasoning_effort: AI_REASONING_EFFORT/.test(coreSource), '参数要真的写进上游请求体');
+});
+
+await test('㊿l 空壳保存绝不推云端：选题变更时 unit_designs 不会被洗空', async () => {
+  const env = createUnitEnv();
+  env.api.setUnit(env.api.createEmptyUnit());
+  const hollow = env.api.unitSavePayload();
+  // 复现事故现场：空模板照样吐出 13 个字段、18 个空格子、一份自带文字的默认量规
+  assert(Object.keys(hollow).length >= 10, '空壳 payload 确实有很多 key');
+  equal(env.api.unitPayloadFilledModules(hollow).length, 0, '但 10 个模块 0 个有内容');
+
+  env.context.__writes = [];
+  env.api.saveUnitData({ silent: true });       // 选题变更走的正是这条路
+  const writes = env.context.__writes;
+  equal(writes.length, 1, '只写一次');
+  equal(writes[0].options?.push, false, '必须只落本地（push:false），绝不 POST /api/data');
+});
+
+await test('㊿m 主键已有完整数据时，空壳视图连本地都不许覆盖', async () => {
+  const env = createUnitEnv();
+  const full = env.api.createEmptyUnit();
+  full.objectives = '运动能力：能完成急停急起变向运球。';
+  env.context.Store.read = () => full;         // 主键 / 云端里是完整的
+  env.api.setUnit(env.api.createEmptyUnit());  // 但当前视图是空壳（页面初始化竞态）
+  env.context.__writes = [];
+  env.api.saveUnitData({ silent: true });
+  equal(env.context.__writes.length, 0, '整个保存必须被跳过');
+});
+
+await test('㊿n 有内容的大单元 → 正常推云端，日志报出模块数', async () => {
+  const env = createUnitEnv();
+  const full = env.api.createEmptyUnit();
+  full.objectives = '运动能力：能完成急停急起变向运球。';
+  full.lessons[0].objectives = '能说出屈膝含胸的发力顺序。';
+  env.api.setUnit(full);
+  env.context.__writes = [];
+  env.api.saveUnitData({ silent: true });
+  const writes = env.context.__writes;
+  equal(writes.length, 1, '写一次');
+  equal(writes[0].options, undefined, 'cloud=true → 不带 push:false，正常推云端');
+  assert(String(writes[0].value.objectives).includes('急停急起'), '提交的是完整内容，不是空壳');
+});
+
+await test('㊿o 保存到资源库后：空记录绝不覆盖主表，完整记录才写主键', async () => {
+  const env = createUnitEnv();
+  // 用假的 OfflineResources 模拟「资源库里那条记录是空的」
+  env.context.OfflineResources = {
+    unitFromRecord: () => env.api.createEmptyUnit(),
+  };
+  env.context.__writes = [];
+  const blocked = env.api.syncUnitKeyWithResource({ id: 'ur_empty' });
+  equal(blocked, null, '空记录必须返回 null（保存失败，不谎报成功）');
+  equal(env.context.__writes.length, 0, '一次 Store.write 都不能发');
+
+  const full = env.api.createEmptyUnit();
+  full.objectives = '运动能力：能完成急停急起变向运球。';
+  env.context.OfflineResources = { unitFromRecord: () => full };
+  const synced = env.api.syncUnitKeyWithResource({ id: 'ur_full' });
+  assert(synced, '有内容的记录要正常同步');
+  equal(String(synced.objectives), full.objectives, '写进主键的是完整 10 模块数据');
+  assert(env.context.__writes.length > 0, '要真的写到 Store');
 });
 
 const failed = results.filter(result => !result.ok);

@@ -8,6 +8,35 @@ let selectedResourceTag = 'all';
 let favoritesOnly = false;
 let aiLessonDraft = null;
 
+/**
+ * ⏱ AI 教案流式接收超时：与服务端 AI_TIMEOUT_MS = 120000 严格对齐，绝不提前掐断。
+ * 120 秒还没读完就按「断点」处理：已经收到的文字全部保留在页面上，一字不丢，
+ * 可继续点【继续生成】续写剩余部分。
+ */
+const LESSON_AI_TIMEOUT_MS = 120000;
+
+/**
+ * 📐 教案分段标题（key 必须与后端 lib/ai-core.js 的 LESSON_SECTIONS 一一对应）。
+ * 前端用 ===KEY=== 正则切段后，按这里的标题还原成 Markdown 正文，并填进对应输入框。
+ */
+const LESSON_SECTION_TITLES = {
+  CONTENT: '一、教学内容',
+  TARGET: '二、教学目标',
+  KEYPOINT: '三、教学重难点',
+  EQUIPMENT: '四、场地与器材',
+  PREPARATION: '五、教学过程 · 准备部分',
+  BASIC_PART: '六、教学过程 · 基本部分',
+  END_PART: '七、教学过程 · 结束部分',
+  DENSITY: '八、预计练习密度与心率',
+  REFLECTION: '九、课后反思',
+};
+/** 教学过程三段的环节名与时长（与后端 Prompt 的 8+25+7 分钟一致） */
+const LESSON_PROCESS_STAGES = [
+  { key: 'PREPARATION', stage: '准备部分', minutes: 8 },
+  { key: 'BASIC_PART', stage: '基本部分', minutes: 25 },
+  { key: 'END_PART', stage: '结束部分', minutes: 7 },
+];
+
 Layout.init('lessons', '教案与资源库', '教案与资源');
 
 const content = document.getElementById('page-content');
@@ -613,6 +642,43 @@ function addLessonProcessStep(step = {}) {
   updateLessonTimingWarning();
 }
 
+/**
+ * 🔥 把教学过程环节写进表单：先用 HTML 骨架铺结构，再用 **DOM 属性**回填真实文本。
+ *
+ * 为什么多这一道：
+ *   AI 生成的教学过程动辄几百字，里面还有引号、顿号、换行。
+ *   如果整段文本只靠「拼 HTML 字符串 → innerHTML」这一条路走，
+ *   任何一处引号 / 尖括号 / 换行处理不当都可能让 textarea 只剩下第一行（内容被截断）。
+ *   用 `node.value = 原文` 直接赋值，浏览器不会再对内容做任何解析，一字不差。
+ */
+function renderLessonProcessSteps(container, steps) {
+  if (!container) return;
+  container.innerHTML = steps.map((step, index) => lessonProcessStepMarkup(step, index)).join('');
+  const rows = [...container.querySelectorAll('.lesson-process-row')];
+  rows.forEach((row, index) => {
+    const step = steps[index];
+    if (!step) return;
+    const stageNode = row.querySelector('[data-process-stage]');
+    const minutesNode = row.querySelector('[data-process-minutes]');
+    const contentNode = row.querySelector('[data-process-content]');
+    if (stageNode) stageNode.value = String(step.stage ?? '');
+    if (minutesNode) minutesNode.value = String(step.minutes ?? '');
+    if (contentNode) contentNode.value = String(step.content ?? '');
+  });
+}
+
+/** 🔥 同样是「DOM 属性回填」：长文本（AI Markdown 正文）不走 HTML 字符串往返 */
+function assignLessonFormTexts(lesson = {}) {
+  const form = document.getElementById('lessonForm');
+  if (!form) return;
+  const contentNode = form.querySelector('[name="content"]');
+  if (contentNode && lesson.content) contentNode.value = String(lesson.content);
+  const container = document.getElementById('lessonProcessSteps');
+  if (container && Array.isArray(lesson.processSteps) && lesson.processSteps.length) {
+    renderLessonProcessSteps(container, normalizeLessonProcessSteps(lesson.processSteps));
+  }
+}
+
 function lessonFormData() {
   const form = document.getElementById('lessonForm');
   const data = Object.fromEntries(new FormData(form));
@@ -657,6 +723,8 @@ function openAddLesson(initialLesson = {}) {
     ${initialLesson.aiDraft ? '<button class="btn btn-secondary" id="continueLessonButton" onclick="continueLessonWithAI()">继续生成 / 扩写</button>' : ''}
     <button class="btn btn-primary" onclick="saveNewLesson()">保存教案</button>
   `);
+  /* 🔥 长文本一律用 DOM 属性回填，绝不让 AI 正文只靠 HTML 字符串往返 */
+  assignLessonFormTexts(initialLesson);
   updateLessonTimingWarning();
 }
 
@@ -677,6 +745,10 @@ async function continueLessonWithAI() {
       renderLessonDraftPreview(true);
     });
     aiLessonDraft.content = result.content ? `${baseContent}\n\n${result.content}` : baseContent;
+    /* 续写后重新切段：同名段以最新一次为准 */
+    const parsed = parseLessonSections(aiLessonDraft.content);
+    aiLessonDraft.sections = parsed.sections;
+    aiLessonDraft.sectionOrder = parsed.order;
     renderLessonDraftPreview();
     if (result.truncated) {
       setLessonContinueState({ hint: `⚠️ ${result.warning || 'AI 输出未完整结束。'}可继续点击「继续生成」续写剩余部分。` });
@@ -693,19 +765,153 @@ async function continueLessonWithAI() {
 }
 
 /**
+ * ✂️ 按 ===KEY=== 分隔符把纯文本教案切成段。
+ * 为什么不用 JSON：大段文字套进 JSON，一旦被单次输出上限拦腰截断，整份 JSON 直接作废；
+ * 换成短分隔符后，缺一段只丢那一段，前面的段落照样能用 —— 与大单元同一套终极方案。
+ * 同名段后出现的覆盖先出现的（续写补全会再给一次同名段，取最新的完整版）。
+ */
+function parseLessonSections(text) {
+  const source = String(text || '');
+  const sections = {};
+  const order = [];
+  const marks = [];
+  const re = /^[ \t]*===\s*([A-Z][A-Z0-9_]*)\s*===[ \t]*/gm;
+  let match = re.exec(source);
+  while (match !== null) {
+    marks.push({ key: match[1], start: match.index, bodyStart: match.index + match[0].length });
+    match = re.exec(source);
+  }
+  marks.forEach((mark, index) => {
+    const end = index + 1 < marks.length ? marks[index + 1].start : source.length;
+    const body = source.slice(mark.bodyStart, end).trim();
+    if (!(mark.key in sections)) order.push(mark.key);
+    sections[mark.key] = body;
+  });
+  return { sections, order, hasSections: order.length > 0 };
+}
+
+/** 把分段还原成 Markdown 正文（预览与保存都用它） */
+function sectionsToMarkdown(sections, order) {
+  const keys = order && order.length ? order : Object.keys(LESSON_SECTION_TITLES);
+  const parts = [];
+  keys.forEach(key => {
+    const body = String(sections?.[key] || '').trim();
+    if (!body) return;
+    parts.push(`## ${LESSON_SECTION_TITLES[key] || key}\n\n${body}`);
+  });
+  return parts.join('\n\n');
+}
+
+/**
+ * 📋 把 === 分段直接填进教案表单的对应输入框。
+ * ① TARGET 三维目标 → 运动技能 / 知识与认知 / 情感态度与社会适应；
+ * ② KEYPOINT → 教学重点 / 教学难点；
+ * ③ EQUIPMENT / DENSITY / REFLECTION → 场地器材 / 练习密度与心率 / 课后反思；
+ * ④ PREPARATION / BASIC_PART / END_PART → 教学过程三个环节（自动带 8 / 25 / 7 分钟）。
+ */
+function fillLessonFormFromSections(sections) {
+  const form = document.getElementById('lessonForm');
+  if (!form || !sections) return false;
+  const setValue = (name, value) => {
+    const node = form.querySelector(`[name="${name}"]`);
+    const text = String(value || '').trim();
+    if (node && text) node.value = text;
+    return Boolean(node && text);
+  };
+  /* ① 三维目标：按「运动能力 / 健康行为 / 体育品德」拆到三个输入框 */
+  const targetLines = String(sections.TARGET || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const pickGoal = (label) => {
+    const hit = targetLines.find(line => line.includes(label));
+    if (!hit) return '';
+    return hit.replace(/^[\s\d.、）)]*/, '').replace(label, '').replace(/^[:：]/, '').trim();
+  };
+  const ability = pickGoal('运动能力');
+  const behavior = pickGoal('健康行为');
+  const character = pickGoal('体育品德');
+  if (ability) setValue('objectiveSkill', ability);
+  if (behavior) setValue('objectiveKnowledge', behavior);
+  if (character) setValue('objectiveAttitude', character);
+  if (!ability && !behavior && !character && targetLines.length) {
+    setValue('objectiveSkill', targetLines.join('\n'));
+  }
+  /* ② 教学重难点 */
+  const keypoint = String(sections.KEYPOINT || '');
+  const keyMatch = keypoint.match(/重点[:：][\s\S]*?(?=难点[:：]|$)/);
+  const diffMatch = keypoint.match(/难点[:：][\s\S]*$/);
+  if (keyMatch) setValue('keyPoints', keyMatch[0].replace(/^重点[:：]/, '').trim());
+  if (diffMatch) setValue('difficultyPoints', diffMatch[0].replace(/^难点[:：]/, '').trim());
+  /* ③ 场地器材 / 练习密度与心率 / 课后反思 */
+  setValue('equipment', sections.EQUIPMENT);
+  setValue('practiceDensity', sections.DENSITY);
+  setValue('reflection', sections.REFLECTION);
+  /* ④ 教学过程三环节 */
+  const container = document.getElementById('lessonProcessSteps');
+  const steps = LESSON_PROCESS_STAGES
+    .map(item => ({ stage: item.stage, minutes: item.minutes, content: String(sections[item.key] || '').trim() }))
+    .filter(step => step.content);
+  if (container && steps.length) {
+    /* 🔥 用 DOM 属性回填正文：一字不差，绝不被 HTML 解析截断 */
+    renderLessonProcessSteps(container, steps);
+    if (typeof updateLessonTimingWarning === 'function') updateLessonTimingWarning();
+  }
+  return true;
+}
+
+/** 【📋 填入教案表单】：把 AI 分段结果填进新建教案表单的各个输入框 */
+function openLessonFormFromAI() {
+  const draft = aiLessonDraft;
+  if (!draft) return;
+  const parsed = parseLessonSections(draft.content || '');
+  const sections = parsed.sections;
+  const processSteps = LESSON_PROCESS_STAGES
+    .map(item => ({ stage: item.stage, minutes: item.minutes, content: String(sections[item.key] || '').trim() }))
+    .filter(step => step.content);
+  closeModal(document.querySelector('.modal-close'));
+  openAddLesson({
+    title: draft.title,
+    grade: draft.grade,
+    sport: draft.sport,
+    duration: draft.duration,
+    studentCount: draft.studentCount,
+    /* 正文用还原后的 Markdown（去掉 === 分隔符），保存出来的教案才干净 */
+    content: lessonDraftMarkdown(draft.content),
+    objectives: String(sections.TARGET || ''),
+    keyPoints: String(sections.KEYPOINT || ''),
+    equipment: String(sections.EQUIPMENT || ''),
+    practiceDensity: String(sections.DENSITY || ''),
+    reflection: String(sections.REFLECTION || ''),
+    processSteps,
+    aiDraft: true,
+  });
+  fillLessonFormFromSections(sections);
+  showToast('已按分段填入教案表单，请核对后保存。', 'success');
+}
+
+/**
  * 流式读取统一 AI 入口 /api/ai（type: 'lesson'，SSE）
  * 每收到一段就通过 onUpdate 回调增量渲染，实现打字机效果
  * 返回 { content, truncated, warning }
+ * 🛑 断点保护：接收中途断开（网络抖动 / 超时）也把已经收到的文字全部保留，
+ *    绝不抛错清空页面；只把 truncated 置 true，让前端提示"可继续生成"。
  */
 async function streamLessonMarkdown(payload, onUpdate) {
   let response;
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  let timedOut = false;
+  const timeoutHandle = setTimeout(() => {
+    timedOut = true;
+    try { controller?.abort(); } catch (error) { /* 忽略 */ }
+  }, LESSON_AI_TIMEOUT_MS);
   try {
     response = await fetch('/api/ai', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ type: 'lesson', ...payload }),
+      signal: controller?.signal,
     });
-  } catch {
+  } catch (error) {
+    clearTimeout(timeoutHandle);
+    if (timedOut) throw new Error(`AI 生成超过 ${Math.round(LESSON_AI_TIMEOUT_MS / 1000)} 秒仍未返回，请重试。`);
     throw new Error('无法连接本地 AI 服务，请确认已运行 node server.js。');
   }
 
@@ -768,6 +974,7 @@ async function streamLessonMarkdown(payload, onUpdate) {
     }
   };
 
+  let broken = false;
   try {
     while (true) {
       const { value, done } = await reader.read();
@@ -779,12 +986,23 @@ async function streamLessonMarkdown(payload, onUpdate) {
     }
     buffer += decoder.decode();
     if (buffer.trim()) consumeFrame(buffer);
+  } catch (error) {
+    /* 🛑 断点保护：连接中途断开（网络抖动 / 超时 / 上游掐断）也把已经收到的文字全部保留，
+       只标记成"还没写完"，绝不抛错把页面清空 —— 已写出的每一个字都留在屏幕上。 */
+    broken = true;
+    const reason = timedOut
+      ? `接收超时（${Math.round(LESSON_AI_TIMEOUT_MS / 1000)} 秒）`
+      : (error?.message || '连接中断');
+    const notice = `⚠️ ${reason}，已保留收到的 ${content.length} 字，可点「继续生成」续写剩余部分。`;
+    warning = warning ? `${warning} ${notice}` : notice;
+    console.warn(`[AI 教案] 接收中断：${reason}（已保留 ${content.length} 字，不清空页面）`, error);
   } finally {
+    clearTimeout(timeoutHandle);
     if (frameHandle !== null) cancelAnimationFrame(frameHandle);
     flushUpdate();
   }
 
-  return { content: content.trim(), truncated, warning };
+  return { content: content.trim(), truncated: truncated || broken, warning };
 }
 
 function getLessonDeltaText(delta) {
@@ -794,17 +1012,43 @@ function getLessonDeltaText(delta) {
   return parts ? parts.map(part => (typeof part?.text === 'string' ? part.text : '')).join('') : '';
 }
 
+/** 把 AI 返回的分隔符原文还原成 Markdown 正文（预览与保存都用它） */
+function lessonDraftMarkdown(content) {
+  const source = String(content || '');
+  const parsed = parseLessonSections(source);
+  if (!parsed.hasSections) return source;
+  return sectionsToMarkdown(parsed.sections, parsed.order);
+}
+
 function renderLessonDraftPreview(autoScroll = false) {
+  const source = aiLessonDraft?.content || '';
   const preview = document.getElementById('aiGeneratedLessonContent');
   if (preview) {
     const modal = preview.closest('.modal');
     const nearBottom = modal ? modal.scrollHeight - modal.scrollTop - modal.clientHeight < 120 : false;
-    preview.innerHTML = renderLessonMarkdown(aiLessonDraft?.content || '');
+    preview.innerHTML = renderLessonMarkdown(lessonDraftMarkdown(source));
     if (autoScroll && modal && nearBottom) modal.scrollTop = modal.scrollHeight;
+    /* 分段完整度提示：哪几段还空着，一眼可见（绝不静默丢段） */
+    const hint = document.getElementById('lessonSectionHint');
+    if (hint) {
+      const parsed = parseLessonSections(source);
+      if (!parsed.hasSections) {
+        hint.textContent = '';
+        hint.hidden = true;
+      } else {
+        const missing = Object.keys(LESSON_SECTION_TITLES)
+          .filter(key => !String(parsed.sections[key] || '').trim());
+        hint.textContent = missing.length
+          ? `⚠️ 这些分段还没有内容：${missing.map(key => LESSON_SECTION_TITLES[key]).join('、')}`
+            + '（可点「继续生成」补齐；已生成的内容不会丢失）'
+          : `✅ 已完整输出 ${Object.keys(parsed.sections).length} 个分段，未被截断`;
+        hint.hidden = false;
+      }
+    }
     return;
   }
   const textarea = document.querySelector('#lessonForm textarea[name="content"]');
-  if (textarea) textarea.value = aiLessonDraft?.content || '';
+  if (textarea) textarea.value = lessonDraftMarkdown(source);
 }
 
 function setLessonContinueState(options = {}) {
@@ -831,13 +1075,15 @@ function openAIGeneratedLesson(draft) {
       <span class="tag">${escapeLessonHTML(draft.sport)}</span>
       <span class="tag">${escapeLessonHTML(draft.duration)}</span>
     </div>
-    <article id="aiGeneratedLessonContent" class="markdown-body lesson-full-markdown">${renderLessonMarkdown(draft.content)}</article>
+    <article id="aiGeneratedLessonContent" class="markdown-body lesson-full-markdown">${renderLessonMarkdown(lessonDraftMarkdown(draft.content))}</article>
+    <p class="lesson-ai-continue-hint" id="lessonSectionHint" hidden></p>
     <div class="lesson-ai-continue">
       <p class="lesson-ai-continue-hint" id="lessonContinueHint" hidden></p>
       <button class="btn btn-secondary" id="continueLessonButton" type="button" onclick="continueLessonWithAI()">继续生成 / 续写剩余部分</button>
     </div>
   `, `
     <button class="btn btn-ghost" onclick="closeModal(this)">关闭</button>
+    <button class="btn btn-secondary" id="fillLessonFormButton" type="button" onclick="openLessonFormFromAI()">📋 填入教案表单</button>
     <button class="btn btn-primary" onclick="saveAIGeneratedLesson()">保存教案</button>
   `);
 }
@@ -848,6 +1094,13 @@ function saveAIGeneratedLesson() {
     return;
   }
   try {
+    /* ✂️ 按 === 分隔符切段，把结构化字段一并落库（正文仍是还原后的 Markdown） */
+    const parsed = parseLessonSections(aiLessonDraft.content);
+    const sections = parsed.sections;
+    const keypoint = String(sections.KEYPOINT || '');
+    const processSteps = LESSON_PROCESS_STAGES
+      .map(item => ({ stage: item.stage, minutes: item.minutes, content: String(sections[item.key] || '').trim() }))
+      .filter(step => step.content);
     DB.addLessonPlan({
       title: aiLessonDraft.title,
       grade: aiLessonDraft.grade,
@@ -855,8 +1108,14 @@ function saveAIGeneratedLesson() {
       duration: aiLessonDraft.duration,
       difficulty: '中等',
       status: '待上课',
-      content: aiLessonDraft.content,
-      processSteps: [],
+      content: lessonDraftMarkdown(aiLessonDraft.content),
+      objectives: String(sections.TARGET || ''),
+      keyPoints: (keypoint.match(/重点[:：][\s\S]*?(?=难点[:：]|$)/) || [''])[0].replace(/^重点[:：]/, '').trim(),
+      difficultyPoints: (keypoint.match(/难点[:：][\s\S]*$/) || [''])[0].replace(/^难点[:：]/, '').trim(),
+      equipment: String(sections.EQUIPMENT || ''),
+      practiceDensity: String(sections.DENSITY || ''),
+      reflection: String(sections.REFLECTION || ''),
+      processSteps,
       isFavorite: false,
     });
     closeModal(document.querySelector('.modal-close'));
@@ -1068,18 +1327,30 @@ async function generateLessonWithAI() {
       renderLessonDraftPreview(true);
     });
     aiLessonDraft.content = result.content;
+    /* ✂️ 按 === 分隔符切段：缺一段只丢那一段，前面的段落照样能用 */
+    const parsed = parseLessonSections(result.content);
+    aiLessonDraft.sections = parsed.sections;
+    aiLessonDraft.sectionOrder = parsed.order;
     renderLessonDraftPreview();
     if (result.truncated) {
-      setLessonContinueState({ hint: `⚠️ ${result.warning || 'AI 输出未完整结束。'}可点击「继续生成」续写剩余部分。` });
-      showToast('AI 输出已达上限，可点击「继续生成」续写剩余部分。', 'error');
+      setLessonContinueState({ hint: `⚠️ ${result.warning || 'AI 输出未完整结束。'}已生成的内容全部保留，可点击「继续生成」续写剩余部分。` });
+      showToast('AI 输出已达上限，已生成内容全部保留，可点击「继续生成」续写。', 'error');
     } else {
       setLessonContinueState({});
       showToast('AI 教案生成完成，请核对后保存。', 'success');
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : '发生未知错误，请稍后重试。';
-    showToast(`AI 教案生成失败：${message}`, 'error');
-    setLessonContinueState({ hint: `生成失败：${message}` });
+    /* 🛑 已经收到的内容一律保留：绝不清空页面 */
+    const kept = String(aiLessonDraft?.content || '').trim();
+    if (kept) {
+      renderLessonDraftPreview();
+      setLessonContinueState({ hint: `生成中断：${message}。已保留收到的 ${kept.length} 字，可点「继续生成」续写。` });
+      showToast(`AI 教案生成中断：${message}（已保留已生成内容，可继续生成）`, 'error');
+    } else {
+      showToast(`AI 教案生成失败：${message}`, 'error');
+      setLessonContinueState({ hint: `生成失败：${message}` });
+    }
   } finally {
     if (button.isConnected) {
       button.disabled = false;

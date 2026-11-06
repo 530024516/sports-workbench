@@ -19,7 +19,38 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const { writeCollectionRows, dedupeRowsById, chunkList, writeData, writeMany } = require(path.join(ROOT, 'lib/supabase.js'));
+const {
+  writeCollectionRows, dedupeRowsById, chunkList, writeData, writeMany,
+  isEmptyPayload, unitDesignFilledFields, UNIT_DESIGN_KEY,
+} = require(path.join(ROOT, 'lib/supabase.js'));
+
+/* 大单元「空壳」：unitSavePayload() 对 createEmptyUnit() 的真实输出形态 ——
+   13 个字段、18 个空格子，还带一份自带文字的默认量规模板（rubric 最会骗人）。
+   过去后端只看 Object.keys().length，这份东西就被当成有效数据写进 unit_designs。 */
+const UNIT_KEY = UNIT_DESIGN_KEY;
+function hollowUnit() {
+  return {
+    meta: { unitTitle: '', category: '', item: '', level: '', topic: '', dimensions: [], generatedAt: '' },
+    unitTitle: '', objectives: '', textbookAnalysis: '', studentAnalysis: '', teachingContent: '',
+    keyDifficulties: {}, structure_nodes: [], main_projects: [],
+    lessons: Array.from({ length: 18 }, (_, index) => ({
+      no: index + 1, dimension: '', objectives: '', content: '', method: '',
+    })),
+    assessment: '', reflection: '',
+    rubric: {
+      levels: [{ name: '优秀', range: '90-100', ability: '达标', health: '达标', character: '达标' }],
+      literacyWeights: [{ literacy: '运动能力', percent: 60 }],
+      scoreItems: [{ name: '技能', points: 10, desc: '说明' }], note: '',
+    },
+  };
+}
+function fullUnit() {
+  const unit = hollowUnit();
+  unit.objectives = '运动能力：能在对抗中完成急停急起变向运球。';
+  unit.teachingContent = '绕障碍运球接力、原地预摆弹性屈伸。';
+  unit.lessons[0].objectives = '能说出屈膝含胸、摆臂蹬地的发力顺序。';
+  return unit;
+}
 
 /* ------------------------------ 断言器 ------------------------------ */
 
@@ -70,7 +101,8 @@ function makeFakeSupabase(initial = {}, options = {}) {
           if (options.failUpsert) {
             return Promise.resolve({ data: null, error: { message: 'duplicate key value violates unique constraint "fitness_records_pkey"' } });
           }
-          payload.forEach(row => rows.set(row.id, row));
+          // 单例键（unit_designs / app_settings）传的是一行对象，集合键传的是数组
+          (Array.isArray(payload) ? payload : [payload]).forEach(row => rows.set(row.id, row));
           return Promise.resolve({ data: null, error: null });
         },
         insert(payload) {
@@ -365,6 +397,118 @@ await test('⑯ 一键清空体测数据（clearIntent）→ 体测表整表清�
   assert(!calls.some(call => call.type === 'upsert' && call.table !== 'fitness_records'),
     '清空时不该往其它表写任何东西');
   assert(!calls.some(call => call.type === 'insert'), '清空时一律不许 insert');
+});
+
+await test('⑰ 大单元空壳：13 个字段 + 自带文字的默认量规也必须判为空', async () => {
+  const hollow = hollowUnit();
+  assert(Object.keys(hollow).length > 10, '空壳确实有一堆 key —— 旧的 Object.keys 判定会放行');
+  equal(unitDesignFilledFields(hollow).length, 0, '空壳 0 个模块有内容');
+  equal(isEmptyPayload(hollow, UNIT_KEY), true, '按内容判定必须识别为空壳');
+  const full = fullUnit();
+  equal(isEmptyPayload(full, UNIT_KEY), false, '真有内容的大单元不能被误杀');
+  assert(unitDesignFilledFields(full).includes('objectives'), '教学目标要算内容');
+  assert(unitDesignFilledFields(full).includes('lessons'), '课时文本要算内容');
+  equal(isEmptyPayload(hollow, 'pe_lesson_plans'), false, '其它键仍沿用旧口径，不受影响');
+});
+
+await test('⑱ 空壳写大单元 → 400 拒绝，unit_designs 一行都不许写', async () => {
+  const { client, rowsOf, calls } = makeFakeSupabase({ unit_designs: [{ id: UNIT_KEY, data: fullUnit() }] });
+  let error = null;
+  try { await writeData(UNIT_KEY, hollowUnit(), { client }); } catch (thrown) { error = thrown; }
+  assert(error, '必须抛错，绝不能回 ok');
+  equal(error.code, 'EMPTY_PAYLOAD_REFUSED', '错误码');
+  equal(error.status, 400, '400 而不是 5xx（5xx 会让前端无限重试）');
+  assert(/空壳/.test(error.message), '错误信息要点明是空壳');
+  equal(calls.filter(call => call.type === 'upsert').length, 0, '一个 upsert 都不能发');
+  equal(rowsOf('unit_designs').size, 1, '云端原有的完整数据必须原封不动');
+});
+
+await test('⑲ 完整大单元 → 正常落库 unit_designs，report 带体积与有内容模块', async () => {
+  const { client, rowsOf } = makeFakeSupabase();
+  const report = await writeData(UNIT_KEY, fullUnit(), { client });
+  equal(report.count, 1, '写入 1 行');
+  equal(report.table, 'unit_designs', '写到 unit_designs 表');
+  equal(rowsOf('unit_designs').size, 1, '表里确实有这一行');
+  assert(report.bytes > 0, 'report 要带写入体积');
+  assert(Array.isArray(report.filledFields) && report.filledFields.includes('objectives'), 'report 要带有内容模块');
+});
+
+await test('⑳ 用户亲手清空（clearIntent）仍可写入空壳，不被误挡', async () => {
+  const { client, rowsOf } = makeFakeSupabase();
+  await writeData(UNIT_KEY, hollowUnit(), { client, clear: true });
+  equal(rowsOf('unit_designs').size, 1, '明确清空意图要放行');
+});
+
+await test('㉑ 写入成功后必须打印 value 长度与前 100 字符', async () => {
+  const { client } = makeFakeSupabase();
+  const logs = [];
+  const origin = console.log;
+  console.log = (...args) => { logs.push(args.join(' ')); };
+  try {
+    await writeData(UNIT_KEY, fullUnit(), { client });
+  } finally {
+    console.log = origin;
+  }
+  const line = logs.find(item => item.includes('写入成功'));
+  assert(line, '必须有一条写入成功日志');
+  assert(/\d+ 字符 \/ \d+ 字节/.test(line), '日志要写清 value 长度');
+  assert(line.includes('前 100 字符：'), '日志要打印前 100 字符');
+  assert(line.includes('有内容模块'), '大单元要打印有内容的模块数');
+});
+
+await test('㉒ 接口层：空壳 POST 返回 400，不再谎报 ok:true / count:1', async () => {
+  process.env.SUPABASE_URL = process.env.SUPABASE_URL || 'https://example.supabase.co';
+  process.env.SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'test-anon-key';
+  process.env.ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'e2e-admin-secret';
+  const { handleDataRequest } = require(path.join(ROOT, 'lib/data-api.js'));
+  const req = {
+    method: 'POST', url: '/api/data',
+    headers: { 'x-admin-password': process.env.ADMIN_PASSWORD },
+    body: { key: UNIT_KEY, value: hollowUnit() },
+    on() {},
+  };
+  let status = 0;
+  let payload = null;
+  const res = {
+    headersSent: false, writableEnded: false,
+    writeHead(code) { status = code; },
+    end(body) { payload = body ? JSON.parse(body) : null; this.writableEnded = true; },
+  };
+  await handleDataRequest(req, res);
+  equal(status, 400, '空壳写入必须 400');
+  equal(payload.code, 'EMPTY_PAYLOAD_REFUSED', '错误码要能识别');
+  equal(payload.ok, undefined, '绝不能回 ok:true');
+  equal(payload.report, undefined, '绝不能回 count:1 的假成功 report');
+});
+
+await test('㉓ 回读校验：ok:true 之后真的去 unit_designs 把那一行读回来', async () => {
+  const base = makeFakeSupabase();
+  // 给假 client 补上单例读取需要的 eq / maybeSingle
+  const client = {
+    from(name) {
+      const api = base.client.from(name);
+      api.eq = (column, value) => ({
+        maybeSingle: async () => ({
+          data: [...base.rowsOf(name).values()].find(row => row[column] === value) || null,
+          error: null,
+        }),
+      });
+      return api;
+    },
+  };
+  const logs = [];
+  const origin = console.log;
+  console.log = (...args) => { logs.push(args.join(' ')); };
+  let report;
+  try {
+    report = await writeData(UNIT_KEY, fullUnit(), { client });
+  } finally {
+    console.log = origin;
+  }
+  assert(report.verified, 'report 要带回读结果');
+  equal(report.verified.exists, true, '库里确实有这一行');
+  assert(report.verified.filledFields.includes('objectives'), '读回来的不是空壳');
+  assert(logs.some(line => line.includes('回读校验') && line.includes('行存在=true')), '日志要打印回读结论');
 });
 
 const failed = results.filter(result => !result.ok);
