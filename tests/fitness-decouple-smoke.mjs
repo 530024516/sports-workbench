@@ -44,7 +44,7 @@ console.log('\n🧪 体测数据 · 彻底解绑学生名单 回归测试\n');
 /* ================= 沙箱 ================= */
 
 /**
- * @param {object} storeData 初始存储内容（想验证"没有名单表"就别放 pe_students）
+ * @param {object} storeData 初始存储内容（pe_students 已退役：放进去也只会被当成"读不到的废数据"）
  * @param {string[]} files   要加载的脚本
  */
 function createEnv(storeData = {}, files = ['js/data.js']) {
@@ -162,7 +162,7 @@ await test('③ 班级字典由记录派生（运动会报名用得到）', () =
 
 /* ================= ④ 老数据迁移 ================= */
 
-await test('④ 老数据自动迁移：学号 id → 哈希 id，并回填 gender', () => {
+await test('④ 老数据自动迁移：学号 id → 哈希 id；pe_students 退役后绝不再被读取', () => {
   const legacyStudents = [
     { id: 'S1', name: '张三', gender: '男', grade: '三年级', class: '1班' },
     { id: 'S2', name: '李四', gender: '女', grade: '三年级', class: '2班' },
@@ -171,6 +171,7 @@ await test('④ 老数据自动迁移：学号 id → 哈希 id，并回填 gend
     { id: 'F1', studentId: 'S1', studentName: '张三', grade: '三年级', class: '1班', testType: 'run50', value: 8.1, testDate: '2026-05-01' },
     { id: 'F2', studentId: 'S2', studentName: '李四', grade: '三年级', class: '2班', testType: 'run50', value: 9.2, testDate: '2026-05-01' },
   ];
+  // 刻意把废弃名单留在 storeData 里：代码必须完全无视它
   const { DB, storeData } = createEnv({ pe_students: legacyStudents, pe_fitness_records: legacyRecords });
 
   const result = DB.migrateFitnessRecords();
@@ -179,23 +180,22 @@ await test('④ 老数据自动迁移：学号 id → 哈希 id，并回填 gend
   const migrated = storeData.pe_fitness_records;
   migrated.forEach(record => {
     assert(record.studentId.startsWith('H'), 'studentId 要换成哈希 id');
-    assert(record.gender === '男' || record.gender === '女', 'gender 要从旧名单回填');
+    equal(record.gender, '', '学生名单已退役：性别绝不再从 pe_students 回填');
   });
+  equal(DB.KEYS.STUDENTS, undefined, 'DB.KEYS 里不该再注册 pe_students');
   const zhang = migrated.find(record => record.studentName === '张三');
   equal(zhang.studentId, DB.makeFitnessStudentId({ name: '张三', grade: '三年级', class: '1班' }), '哈希 id 要和算出来的一致');
-  equal(zhang.gender, '男', '张三的性别回填成男');
 
-  // 迁移后名册照样能用
+  // 迁移后名册照样由记录派生
   const students = DB.getFitnessStudents();
   equal(students.length, 2, '迁移后名册有 2 人');
 });
 
 await test('⑤ 迁移幂等：再跑一次不会乱改', () => {
-  const legacyStudents = [{ id: 'S1', name: '张三', gender: '男', grade: '三年级', class: '1班' }];
   const legacyRecords = [
     { id: 'F1', studentId: 'S1', studentName: '张三', grade: '三年级', class: '1班', testType: 'run50', value: 8.1, testDate: '2026-05-01' },
   ];
-  const { DB } = createEnv({ pe_students: legacyStudents, pe_fitness_records: legacyRecords });
+  const { DB } = createEnv({ pe_fitness_records: legacyRecords });
 
   DB.migrateFitnessRecords();
   const first = JSON.stringify(DB.getFitnessRecords());

@@ -114,7 +114,7 @@ await test('⑥ 数据接口：GET 放行 / POST 拦截（走真实 handleDataRe
   const { auth } = loadAuth(SECRET);
   const { handleDataRequest } = require(path.join(ROOT, 'lib/data-api.js'));
 
-  const guest = makeReqRes({ method: 'POST', body: { key: 'pe_students', value: [{ id: 'HACK' }] } });
+  const guest = makeReqRes({ method: 'POST', body: { key: 'pe_attendance', value: [{ id: 'HACK' }] } });
   await handleDataRequest(guest.req, guest.res);
   equal(guest.status(), 403, '游客写数据必须 403');
   equal(guest.payload().error, '游客无权修改数据', '错误信息要一致');

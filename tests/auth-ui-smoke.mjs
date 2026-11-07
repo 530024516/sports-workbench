@@ -261,7 +261,7 @@ await test('⑦ 游客写请求（Store 底层）→ 不会发出任何 POST', a
 
   let rejected = false;
   try {
-    await Store._fetchJSON('/api/data', { method: 'POST', body: JSON.stringify({ key: 'pe_students' }) });
+    await Store._fetchJSON('/api/data', { method: 'POST', body: JSON.stringify({ key: 'pe_attendance' }) });
   } catch (error) {
     rejected = true;
   }

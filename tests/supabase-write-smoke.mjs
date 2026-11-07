@@ -22,7 +22,11 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const {
   writeCollectionRows, dedupeRowsById, chunkList, writeData, writeMany,
   isEmptyPayload, unitDesignFilledFields, UNIT_DESIGN_KEY,
+  purgeRetiredKeys, STORE_SCHEMA, STORE_KEYS, RETIRED_CLOUD_KEYS, RETIRED_TABLES,
+  readAllData, readKey, inspectKey,
 } = require(path.join(ROOT, 'lib/supabase.js'));
+
+const STUDENTS_KEY = 'pe_students';
 
 /* 大单元「空壳」：unitSavePayload() 对 createEmptyUnit() 的真实输出形态 ——
    13 个字段、18 个空格子，还带一份自带文字的默认量规模板（rubric 最会骗人）。
@@ -81,6 +85,8 @@ function equal(actual, expected, message) {
  */
 function makeFakeSupabase(initial = {}, options = {}) {
   const calls = [];
+  /** 所有 from(table) 的访问轨迹：用来断言「students 表再也没被 SELECT 过」 */
+  const accesses = [];
   const tables = new Map();
   Object.entries(initial).forEach(([name, list]) => {
     tables.set(name, new Map(list.map(row => [row.id, row])));
@@ -95,8 +101,17 @@ function makeFakeSupabase(initial = {}, options = {}) {
       const rows = rowsOf(name);
       let pending = { op: 'select', filters: [] };
       const api = {
-        select() { pending = { op: 'select', filters: [] }; return api; },
+        select() {
+          accesses.push({ op: 'select', table: name });
+          pending = { op: 'select', filters: [] };
+          return api;
+        },
+        /* readAllData / readKey 的链式调用：假 client 只需让链路走通 */
+        order() { return api; },
+        limit() { return api; },
+        maybeSingle: async () => ({ data: [...rows.values()][0] || null, error: null }),
         upsert(payload, upsertOptions) {
+          accesses.push({ op: 'upsert', table: name });
           calls.push({ type: 'upsert', table: name, payload, options: upsertOptions });
           if (options.failUpsert) {
             return Promise.resolve({ data: null, error: { message: 'duplicate key value violates unique constraint "fitness_records_pkey"' } });
@@ -111,6 +126,7 @@ function makeFakeSupabase(initial = {}, options = {}) {
           return Promise.resolve({ data: null, error: null });
         },
         delete() {
+          accesses.push({ op: 'delete', table: name });
           const call = { type: 'delete', table: name, ids: null };
           calls.push(call);
           pending = { op: 'delete', filters: [], call };
@@ -118,17 +134,46 @@ function makeFakeSupabase(initial = {}, options = {}) {
         },
         in(column, values) { pending.filters.push({ column, values }); return api; },
         neq(column, value) { pending.filters.push({ column, value }); return api; },
+        /* 按 id 等值：purgeRetiredKeys / purgeMeetData 会直接 await .eq('id', key)，
+           所以这里要返回既能 await、又能 .maybeSingle() 的结果。DELETE 时真删行并回 count。 */
+        eq(column, value) {
+          const run = () => {
+            const matched = [...rows.keys()].filter(id => String(id) === String(value));
+            if (pending.op === 'delete') {
+              matched.forEach(id => rows.delete(id));
+              if (pending.call) pending.call.ids = matched;
+              return { data: null, error: null, count: matched.length };
+            }
+            return {
+              data: [...rows.values()].find(row => String(row[column]) === String(value)) || null,
+              error: null,
+            };
+          };
+          return {
+            maybeSingle: async () => run(),
+            then: (onOk, onErr) => Promise.resolve().then(run).then(onOk, onErr),
+          };
+        },
         then(onOk, onErr) {
           let result = { data: null, error: null };
           if (pending.op === 'select') {
-            result = { data: [...rows.values()].map(row => ({ id: row.id, updated_at: row.updated_at })), error: null };
+            result = { data: [...rows.values()].map(row => ({ id: row.id, data: row.data, updated_at: row.updated_at })), error: null };
           } else if (pending.op === 'delete') {
-            const filter = pending.filters.find(item => item.values);
-            if (filter) {
-              filter.values.forEach(id => rows.delete(id));
-              if (pending.call) pending.call.ids = [...filter.values];
+            const inFilter = pending.filters.find(item => Array.isArray(item.values));
+            /* 整表 DELETE：purgeRetiredKeys 用 neq('id', 哨兵) 命中全部真实行 */
+            const neqFilter = pending.filters.find(item => item.column === 'id'
+              && item.value !== undefined && !Array.isArray(item.values));
+            let removed = 0;
+            if (inFilter) {
+              inFilter.values.forEach(id => { if (rows.delete(id)) removed += 1; });
+              if (pending.call) pending.call.ids = [...inFilter.values];
+            } else if (neqFilter) {
+              for (const id of [...rows.keys()]) {
+                if (String(id) !== String(neqFilter.value)) { rows.delete(id); removed += 1; }
+              }
+              if (pending.call) pending.call.ids = removed;
             }
-            result = { data: null, error: null };
+            result = { data: null, error: null, count: removed };
           }
           return Promise.resolve(result).then(onOk, onErr);
         },
@@ -136,7 +181,7 @@ function makeFakeSupabase(initial = {}, options = {}) {
       return api;
     },
   };
-  return { client, calls, tables, rowsOf };
+  return { client, calls, accesses, tables, rowsOf };
 }
 
 /* ------------------------------ 用例 ------------------------------ */
@@ -325,11 +370,11 @@ await test('⑯ 旧快照推上来时，云端的新数据一根都不能少（�
 
 await test('⑬ 批量迁移：空的那一项标记为 skipped-empty（不算失败），云端一个字节都不动', async () => {
   const { client, rowsOf } = makeFakeSupabase({ lesson_plans: [{ id: 'L1' }] });
-  const report = await writeMany({ pe_lesson_plans: [], pe_students: [{ id: 'S1' }] }, { client });
+  const report = await writeMany({ pe_lesson_plans: [], pe_attendance: [{ id: 'A1' }] }, { client });
   const empty = report.find(item => item.key === 'pe_lesson_plans');
   equal(empty.status, 'skipped-empty', '空的那一项要标记为跳过，而不是报错');
   equal(rowsOf('lesson_plans').size, 1, '云端的教案一根都不能少');
-  equal(rowsOf('students').size, 1, '有数据的键照常写入');
+  equal(rowsOf('attendance').size, 1, '有数据的键照常写入');
 });
 
 await test('⑭ 接口层：空载荷写入返回 400（不是 5xx —— 否则前端会无限重试刷屏）', async () => {
@@ -385,14 +430,14 @@ await test('⑯ 一键清空体测数据（clearIntent）→ 体测表整表清�
       { id: 'F1', data: { id: 'F1', studentId: 'S1' } },
       { id: 'F2', data: { id: 'F2', studentId: 'S2' } },
     ],
-    students: [{ id: 'S1', data: { id: 'S1', name: '张三' } }],
+    attendance: [{ id: 'A1', data: { id: 'A1' } }],
     lesson_plans: [{ id: 'L1', data: { id: 'L1' } }],
   });
   // 前端 clearKey() 发过来的正是这种请求：value=null + clear + clearIntent
   const result = await writeData('pe_fitness_records', null, { client, clear: true });
   equal(result.count, 0, '清空后写入条数必须是 0');
   equal(rowsOf('fitness_records').size, 0, '体测表必须被清空');
-  equal(rowsOf('students').size, 1, '学生名单不能被清空');
+  equal(rowsOf('attendance').size, 1, '考勤记录不能被清空');
   equal(rowsOf('lesson_plans').size, 1, '教案不能被清空');
   assert(!calls.some(call => call.type === 'upsert' && call.table !== 'fitness_records'),
     '清空时不该往其它表写任何东西');
@@ -411,41 +456,45 @@ await test('⑰ 大单元空壳：13 个字段 + 自带文字的默认量规也�
   equal(isEmptyPayload(hollow, 'pe_lesson_plans'), false, '其它键仍沿用旧口径，不受影响');
 });
 
-await test('⑱ 空壳写大单元 → 400 拒绝，unit_designs 一行都不许写', async () => {
+await test('⑱ 退役键 POST 空壳 → 拒绝写入、不抛错，云端一行都不许新增', async () => {
   const { client, rowsOf, calls } = makeFakeSupabase({ unit_designs: [{ id: UNIT_KEY, data: fullUnit() }] });
-  let error = null;
-  try { await writeData(UNIT_KEY, hollowUnit(), { client }); } catch (thrown) { error = thrown; }
-  assert(error, '必须抛错，绝不能回 ok');
-  equal(error.code, 'EMPTY_PAYLOAD_REFUSED', '错误码');
-  equal(error.status, 400, '400 而不是 5xx（5xx 会让前端无限重试）');
-  assert(/空壳/.test(error.message), '错误信息要点明是空壳');
+  const report = await writeData(UNIT_KEY, hollowUnit(), { client });
+  equal(report.status, 'retired', '必须明确标记该键已退役');
+  equal(report.retired, true, 'retired 标记');
+  equal(report.count, 0, '一行都没写');
   equal(calls.filter(call => call.type === 'upsert').length, 0, '一个 upsert 都不能发');
-  equal(rowsOf('unit_designs').size, 1, '云端原有的完整数据必须原封不动');
+  equal(rowsOf('unit_designs').size, 1, '历史行原封不动（由 purgeRetiredKeys 统一删）');
 });
 
-await test('⑲ 完整大单元 → 正常落库 unit_designs，report 带体积与有内容模块', async () => {
-  const { client, rowsOf } = makeFakeSupabase();
+await test('⑲ 退役键 POST 完整数据 → 同样拒绝上云（架构上就不该有这个键）', async () => {
+  const { client, rowsOf, calls } = makeFakeSupabase();
   const report = await writeData(UNIT_KEY, fullUnit(), { client });
-  equal(report.count, 1, '写入 1 行');
-  equal(report.table, 'unit_designs', '写到 unit_designs 表');
-  equal(rowsOf('unit_designs').size, 1, '表里确实有这一行');
-  assert(report.bytes > 0, 'report 要带写入体积');
-  assert(Array.isArray(report.filledFields) && report.filledFields.includes('objectives'), 'report 要带有内容模块');
+  equal(report.count, 0, '不写任何行');
+  equal(report.status, 'retired', '回 retired 而不是假装落库成功');
+  equal(rowsOf('unit_designs').size, 0, 'unit_designs 里不新增行');
+  equal(calls.filter(call => call.type === 'upsert').length, 0, '不发 upsert');
+  equal(STORE_SCHEMA[UNIT_KEY], undefined, '云端 schema 里已无该键');
+  assert(RETIRED_CLOUD_KEYS[UNIT_KEY]?.table === 'unit_designs', '退役映射仍记得要删哪张表');
 });
 
-await test('⑳ 用户亲手清空（clearIntent）仍可写入空壳，不被误挡', async () => {
-  const { client, rowsOf } = makeFakeSupabase();
-  await writeData(UNIT_KEY, hollowUnit(), { client, clear: true });
-  equal(rowsOf('unit_designs').size, 1, '明确清空意图要放行');
+await test('⑳ purgeRetiredKeys 把云端历史脏行物理删除（按 id DELETE）', async () => {
+  const { client, rowsOf, calls } = makeFakeSupabase({ unit_designs: [{ id: UNIT_KEY, data: hollowUnit() }] });
+  equal(rowsOf('unit_designs').size, 1, '先造一行历史脏数据');
+  const report = await purgeRetiredKeys(client);
+  equal(report[0].status, 'ok', '删除成功');
+  equal(report[0].deleted, true, '标记已删除');
+  equal(report[0].count, 1, '删掉 1 行');
+  equal(rowsOf('unit_designs').size, 0, '行彻底消失，不是写空值');
+  assert(calls.some(call => call.type === 'delete' && call.table === 'unit_designs'), '确实发了 DELETE');
 });
 
-await test('㉑ 写入成功后必须打印 value 长度与前 100 字符', async () => {
+await test('㉑ 其它键的写入日志仍打印 value 长度与前 100 字符', async () => {
   const { client } = makeFakeSupabase();
   const logs = [];
   const origin = console.log;
   console.log = (...args) => { logs.push(args.join(' ')); };
   try {
-    await writeData(UNIT_KEY, fullUnit(), { client });
+    await writeData('pe_schedule_v1', { week: '第 1 周', rows: [{ day: '周一', content: '快速跑' }] }, { client });
   } finally {
     console.log = origin;
   }
@@ -453,10 +502,9 @@ await test('㉑ 写入成功后必须打印 value 长度与前 100 字符', asyn
   assert(line, '必须有一条写入成功日志');
   assert(/\d+ 字符 \/ \d+ 字节/.test(line), '日志要写清 value 长度');
   assert(line.includes('前 100 字符：'), '日志要打印前 100 字符');
-  assert(line.includes('有内容模块'), '大单元要打印有内容的模块数');
 });
 
-await test('㉒ 接口层：空壳 POST 返回 400，不再谎报 ok:true / count:1', async () => {
+await test('㉒ 接口层：退役键 POST 不再谎报 count:1 的假成功', async () => {
   process.env.SUPABASE_URL = process.env.SUPABASE_URL || 'https://example.supabase.co';
   process.env.SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'test-anon-key';
   process.env.ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'e2e-admin-secret';
@@ -475,40 +523,135 @@ await test('㉒ 接口层：空壳 POST 返回 400，不再谎报 ok:true / coun
     end(body) { payload = body ? JSON.parse(body) : null; this.writableEnded = true; },
   };
   await handleDataRequest(req, res);
-  equal(status, 400, '空壳写入必须 400');
-  equal(payload.code, 'EMPTY_PAYLOAD_REFUSED', '错误码要能识别');
-  equal(payload.ok, undefined, '绝不能回 ok:true');
-  equal(payload.report, undefined, '绝不能回 count:1 的假成功 report');
+  equal(status, 200, '老客户端不报错（避免前端重试风暴）');
+  const item = payload?.report?.[0];
+  equal(item?.status, 'retired', '明确回 retired');
+  equal(item?.count, 0, '绝不能回 count:1');
 });
 
-await test('㉓ 回读校验：ok:true 之后真的去 unit_designs 把那一行读回来', async () => {
-  const base = makeFakeSupabase();
-  // 给假 client 补上单例读取需要的 eq / maybeSingle
+await test('㉓ 清理指令 + inspect 诊断：都认得这个已退役的键', async () => {
+  const report = await purgeRetiredKeys(makeFakeSupabase().client, ['pe_big_unit_design_v1']);
+  equal(report.length, 1, '一条清理结果');
+  equal(report[0].table, 'unit_designs', '删的是 unit_designs');
+  const unknown = await purgeRetiredKeys(makeFakeSupabase().client, ['pe_not_a_key']);
+  equal(unknown[0].status, 'skipped-unknown', '未知键跳过，不乱删');
+});
+
+/* ==================== pe_students 彻底退役 ==================== */
+
+await test('㉔ 注册已摘除：STORE_SCHEMA / STORE_KEYS 里没有 pe_students，退役映射到 students 整表', () => {
+  equal(STORE_SCHEMA[STUDENTS_KEY], undefined, '云端 schema 不再有这个键');
+  assert(!STORE_KEYS.includes(STUDENTS_KEY), '云端键清单不再有这个键');
+  equal(RETIRED_CLOUD_KEYS[STUDENTS_KEY]?.table, 'students', '退役映射仍记得要清哪张表');
+  equal(RETIRED_CLOUD_KEYS[STUDENTS_KEY]?.wholeTable, true, '集合型旧数据要整表清，不是只删一行');
+  assert(RETIRED_TABLES.has('students'), 'students 表列入「绝不 SELECT」名单');
+  assert(STORE_KEYS.includes('pe_fitness_records'), '体测记录仍然正常同步');
+  assert(STORE_KEYS.includes('pe_offline_resources_v1'), '离线资源库仍然正常同步');
+});
+
+await test('㉕ readKey 遇到退役键 / 退役表直接返回 null，一个 SELECT 都不发', async () => {
+  const { client, accesses } = makeFakeSupabase({ students: [{ id: 'S1' }] });
+  equal(await readKey(client, STUDENTS_KEY, { table: 'students' }), null, '退役键不许读');
+  equal(await readKey(client, 'some_future_key', { table: 'students' }), null, '哪怕键名换了，退役表也不许读');
+  equal(accesses.filter(item => item.op === 'select').length, 0, '零次 SELECT');
+});
+
+await test('㉖ readAllData 整轮同步绝不查询 students 表（只有一次整表清理 DELETE）', async () => {
+  const legacy = Array.from({ length: 300 }, (_, i) => ({ id: `S${i}`, data: { id: `S${i}` } }));
+  const { client, accesses, rowsOf } = makeFakeSupabase({ students: legacy });
+  const result = await readAllData({ client });
+  assert(result && result.data, '同步要正常返回');
+  equal(accesses.filter(item => item.op === 'select' && item.table === 'students').length, 0,
+    'students 表零次 SELECT：几百条废数据不再拖慢启动');
+  assert(accesses.some(item => item.op === 'delete' && item.table === 'students'),
+    '下次同步顺手发一次整表 DELETE 清理历史脏数据');
+  equal(rowsOf('students').size, 0, '整表 300 行被物理删光');
+  assert(!Object.prototype.hasOwnProperty.call(result.data, STUDENTS_KEY),
+    '同步结果里不该再出现 pe_students 这一格');
+});
+
+await test('㉗ 老前端 POST pe_students → writeData 直接拒绝（retired/rejected，0 次 upsert）', async () => {
+  const { client, rowsOf, calls, accesses } = makeFakeSupabase({ students: [{ id: 'S1', data: {} }] });
+  const report = await writeData(STUDENTS_KEY, [{ id: 'S9', name: '李四' }], { client });
+  equal(report.status, 'retired', '明确回 retired');
+  equal(report.retired, true, 'retired 标记');
+  equal(report.rejected, true, '明确标记「写入被拒绝」');
+  equal(report.table, 'students', '回包说清拦在哪张表');
+  equal(report.count, 0, '一行都没写');
+  equal(accesses.filter(item => item.op === 'upsert' && item.table === 'students').length, 0, '零次 upsert');
+  equal(rowsOf('students').size, 1, '云端历史行原封不动，交给 purge 统一删');
+  equal(calls.filter(call => call.type === 'insert').length, 0, '也不许 insert');
+});
+
+await test('㉘ 旧迁移脚本 { values } 里的 pe_students → 明确回 retired，students 表一根汗毛不动', async () => {
+  const { client, rowsOf, accesses } = makeFakeSupabase({ students: [{ id: 'S1' }] });
+  const report = await writeMany({ pe_lesson_plans: [{ id: 'L1' }], [STUDENTS_KEY]: [{ id: 'S2' }] }, { client });
+  const item = report.find(entry => entry.key === STUDENTS_KEY);
+  equal(item?.status, 'retired', '退役键要出现在报告里，而不是无声消失');
+  equal(item?.rejected, true, '写明被拒绝');
+  equal(item?.count, 0, '没写任何行');
+  equal(rowsOf('students').size, 1, '旧名单数据一行都没被写进去');
+  equal(rowsOf('lesson_plans').size, 1, '其它键照常迁移');
+  assert(!accesses.some(entry => entry.op === 'upsert' && entry.table === 'students'), 'students 零次 upsert');
+});
+
+await test('㉙ purgeRetiredKeys 把 students 整表几百行物理删光；unit_designs 仍只删指定行', async () => {
+  const legacy = Array.from({ length: 300 }, (_, i) => ({ id: `S${i}`, data: {} }));
+  const { client, rowsOf, calls } = makeFakeSupabase({
+    students: legacy,
+    unit_designs: [{ id: UNIT_KEY, data: hollowUnit() }, { id: 'keep-me', data: fullUnit() }],
+  });
+  const report = await purgeRetiredKeys(client);
+  const students = report.find(item => item.key === STUDENTS_KEY);
+  equal(students?.status, 'ok', '整表清理成功');
+  equal(students?.wholeTable, true, '标记为整表清理');
+  equal(students?.count, 300, '300 行全删');
+  equal(rowsOf('students').size, 0, 'students 表彻底清空');
+  equal(rowsOf('unit_designs').size, 1, 'unit_designs 只删 id=key 那一行，别的不动');
+  assert(calls.some(call => call.type === 'delete' && call.table === 'students'), '确实发了 DELETE');
+});
+
+await test('㉚ 手动 DROP TABLE 之后：清理识别为 dropped，不再当成失败刷告警', async () => {
+  const missing = { code: '42P01', message: 'relation "public.students" does not exist' };
+  const thenable = { then: (onOk, onErr) => Promise.reject(missing).then(onOk, onErr) };
   const client = {
-    from(name) {
-      const api = base.client.from(name);
-      api.eq = (column, value) => ({
-        maybeSingle: async () => ({
-          data: [...base.rowsOf(name).values()].find(row => row[column] === value) || null,
-          error: null,
-        }),
-      });
-      return api;
-    },
+    from: () => ({ delete: () => ({ neq: () => thenable, eq: () => thenable }) }),
   };
-  const logs = [];
-  const origin = console.log;
-  console.log = (...args) => { logs.push(args.join(' ')); };
-  let report;
-  try {
-    report = await writeData(UNIT_KEY, fullUnit(), { client });
-  } finally {
-    console.log = origin;
-  }
-  assert(report.verified, 'report 要带回读结果');
-  equal(report.verified.exists, true, '库里确实有这一行');
-  assert(report.verified.filledFields.includes('objectives'), '读回来的不是空壳');
-  assert(logs.some(line => line.includes('回读校验') && line.includes('行存在=true')), '日志要打印回读结论');
+  const report = await purgeRetiredKeys(client, [STUDENTS_KEY]);
+  equal(report[0].status, 'dropped', '表已不存在，回 dropped 而不是 error');
+  equal(report[0].count, 0, '没有行可删');
+});
+
+await test('㉛ inspect 诊断 + 接口层 POST：都认得 pe_students 已退役', async () => {
+  const { client, accesses } = makeFakeSupabase({ students: [{ id: 'S1' }] });
+  const info = await inspectKey(STUDENTS_KEY, { client });
+  equal(info.retired, true, '诊断明确说它已退役');
+  equal(info.table, 'students', '指向历史表');
+  equal(info.wholeTable, true, '说明它是整表型旧数据');
+  equal(accesses.filter(item => item.op === 'select').length, 0, 'inspect 不查表、更不删行');
+
+  process.env.SUPABASE_URL = process.env.SUPABASE_URL || 'https://example.supabase.co';
+  process.env.SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'test-anon-key';
+  process.env.ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'e2e-admin-secret';
+  const { handleDataRequest } = require(path.join(ROOT, 'lib/data-api.js'));
+  const req = {
+    method: 'POST', url: '/api/data',
+    headers: { 'x-admin-password': process.env.ADMIN_PASSWORD },
+    body: { key: STUDENTS_KEY, value: [{ id: 'S9' }] },
+    on() {},
+  };
+  let status = 0;
+  let payload = null;
+  const res = {
+    headersSent: false, writableEnded: false,
+    writeHead(code) { status = code; },
+    end(body) { payload = body ? JSON.parse(body) : null; this.writableEnded = true; },
+  };
+  await handleDataRequest(req, res);
+  equal(status, 200, '老客户端不报错（避免重试风暴）');
+  equal(payload?.report?.[0]?.status, 'retired', '接口层明确回 retired，不谎报 ok');
+  equal(payload?.report?.[0]?.rejected, true, '接口层明确回「写入被拒绝」');
+  equal(payload?.report?.[0]?.count, 0, '绝不能回 count:1');
 });
 
 const failed = results.filter(result => !result.ok);

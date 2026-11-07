@@ -48,8 +48,8 @@ const LOCK_PREFIX = 'pe_store_unconfirmed_v1::';
  */
 function createEnv({ admin = false } = {}) {
   const storage = new Map([
-    ['pe_students', JSON.stringify([{ id: 'S1', name: '张三' }])],
-    [`${LOCK_PREFIX}pe_students`, JSON.stringify({ at: Date.now(), critical: true, clear: false, attempts: 1 })],
+    ['pe_attendance', JSON.stringify([{ id: 'S1', name: '张三' }])],
+    [`${LOCK_PREFIX}pe_attendance`, JSON.stringify({ at: Date.now(), critical: true, clear: false, attempts: 1 })],
   ]);
   if (admin) {
     storage.set('isAdmin', 'true');
@@ -69,7 +69,7 @@ function createEnv({ admin = false } = {}) {
       return {
         ok: true,
         status: 200,
-        json: async () => ({ mode: 'supabase', data: { pe_students: [{ id: 'S1', name: '张三' }] } }),
+        json: async () => ({ mode: 'supabase', data: { pe_attendance: [{ id: 'S1', name: '张三' }] } }),
       };
     }
     // 写请求：模拟后端 403（游客无权修改数据）
@@ -168,7 +168,7 @@ await test('② 游客写入：不发请求，只给 3 秒轻提示，不弹窗'
   await env.pump();
   env.Auth._markUserAction();          // 模拟"用户刚刚点了一下"
   const before = env.posts().length;
-  env.Store.write('pe_students', [{ id: 'S9', name: '李四' }]);
+  env.Store.write('pe_attendance', [{ id: 'S9', name: '李四' }]);
   await env.pump();
   equal(env.posts().length, before, '游客写入不能发出任何请求');
   equal(env.modals.length, 0, '不能弹登录框');
@@ -181,7 +181,7 @@ await test('②-2 后台写入（页面初始化迁移）→ 完全静默，不�
   await env.Store.start();
   await env.pump();
   const toastsBefore = env.toasts.length;
-  env.Store.write('pe_students', [{ id: 'S9', name: '李四' }]);   // 没有任何用户操作
+  env.Store.write('pe_attendance', [{ id: 'S9', name: '李四' }]);   // 没有任何用户操作
   await env.pump();
   equal(env.toasts.length, toastsBefore, '后台写入不该冒提示（否则每切一页就烦一次）');
   equal(env.modals.length, 0, '不能弹登录框');
@@ -191,7 +191,7 @@ await test('③ 游客写重要表单（writeCritical）：明确返回"未写�
   const env = createEnv();
   await env.Store.start();
   await env.pump();
-  const result = await env.Store.writeCritical('pe_students', [{ id: 'S9', name: '李四' }], { label: '学生' });
+  const result = await env.Store.writeCritical('pe_attendance', [{ id: 'S9', name: '李四' }], { label: '学生' });
   equal(result.ok, false, '游客写入云端必须失败（不能谎报成功）');
   equal(result.adminRequired, true, '要带上 adminRequired 标记');
   equal(env.posts().length, 0, '不能发出任何写请求');
@@ -208,7 +208,7 @@ await test('④ 后端返回 403（ADMIN_REQUIRED）→ 只轻提示，不弹窗
   env.Auth._markUserAction();
   let rejected = null;
   try {
-    await env.Store._fetchJSON('/api/data', { method: 'POST', body: JSON.stringify({ key: 'pe_students' }) });
+    await env.Store._fetchJSON('/api/data', { method: 'POST', body: JSON.stringify({ key: 'pe_attendance' }) });
   } catch (error) {
     rejected = error;
   }
@@ -237,7 +237,7 @@ await test('⑦ 管理员浏览：写请求照常发出，并带 X-Admin-Passwor
   const env = createEnv({ admin: true });
   await env.Store.start();
   await env.pump();
-  env.Store.write('pe_students', [{ id: 'S9', name: '李四' }]);
+  env.Store.write('pe_attendance', [{ id: 'S9', name: '李四' }]);
   await env.pump();
   const posts = env.posts();
   assert(posts.length > 0, '管理员的写入必须真的发出去');

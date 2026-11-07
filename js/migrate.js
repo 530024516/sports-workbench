@@ -8,7 +8,7 @@
 'use strict';
 
 const MIGRATE_KEY_LABELS = {
-  pe_students: '学生信息（旧模块，已废弃）',
+  // ⛔ pe_students 已彻底退役：不显示在迁移清单里，更不许被导入云端
   pe_fitness_records: '体测数据',
   pe_attendance: '考勤记录',
   pe_lesson_plans: '教案',
@@ -18,7 +18,8 @@ const MIGRATE_KEY_LABELS = {
   pe_todos_v1: '待办清单',
   pe_todo_v1: '待办清单（旧版键）',
   pe_fitness_weekly_log_v1: '健身训练记录',
-  pe_big_unit_design_v1: '大单元设计',
+  // pe_big_unit_design_v1 已退役为「仅本机草稿」，绝不能再迁移上云；
+  // 云端唯一入口是 pe_offline_resources_v1（离线资源库）
   pe_sports_meet_v1: '运动会数据',
   pe_sports_meet_events_v1: '运动会项目库',
   pe_meet_template_config_v1: '报名模板配置',
@@ -38,14 +39,22 @@ function schemaOf(key) {
   return (Store.schema || []).find(item => item.key === key) || null;
 }
 
-/** 本机所有相关键：内置键 + localStorage 里任何 pe_* / sportsMeet*（排除备份副本） */
+/** 大单元主键是纯本机草稿，不允许出现在迁移清单里（云端只收离线资源库） */
+const LOCAL_ONLY_KEY = 'pe_big_unit_design_v1';
+/** 🗑️ 已彻底退役的键：整个模块都没了，绝不能被旧迁移脚本重新推上云端 */
+const RETIRED_KEYS = ['pe_students'];
+
+/** 本机所有相关键：内置键 + localStorage 里任何 pe_* / sportsMeet*（排除备份副本 / 退役键 / 纯本地键） */
 function collectLocalKeys() {
   const keys = new Set(STORE_KEYS);
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i);
-    if (!key || key.includes('__local_backup')) continue;
+    if (!key || key.includes('__local_backup') || key === LOCAL_ONLY_KEY) continue;
+    if (RETIRED_KEYS.some(retired => key === retired || key.startsWith(`${retired}__`))) continue;
     if (/^pe_/.test(key) || /^sportsMeet/i.test(key)) keys.add(key);
   }
+  keys.delete(LOCAL_ONLY_KEY);
+  RETIRED_KEYS.forEach(key => keys.delete(key));
   return [...keys];
 }
 

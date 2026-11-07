@@ -8,7 +8,7 @@
  * 因此 clearKey() 必须做到四件事：
  *   ① 内存 / localStorage / 本地备份 / 防覆盖锁 一次清干净；
  *   ② 云端收到带 clearIntent: true 的清空请求；
- *   ③ 只清体测数据（学生名单、教案一律不动）；
+ *   ③ 只清体测数据（考勤、教案一律不动；pe_students 已退役，另有用例验证启动清理）；
  *   ④ 绝对不触发"反推自愈" —— 云端回来的旧数据不复活，也不被推回云端。
  */
 import fs from 'node:fs';
@@ -20,7 +20,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORE_SOURCE = fs.readFileSync(path.join(ROOT, 'js/store.js'), 'utf8');
 
 const FITNESS_KEY = 'pe_fitness_records';
-const STUDENTS_KEY = 'pe_students';
+const ATTENDANCE_KEY = 'pe_attendance';
 const PLANS_KEY = 'pe_lesson_plans';
 const LOCK_PREFIX = 'pe_store_unconfirmed_v1::';
 const SIGNAL_KEY = 'pe_meet_purge_epoch_v1';
@@ -29,7 +29,7 @@ const FITNESS_RECORDS = [
   { id: 'F1', studentId: 'S1', testType: 'run50', testName: '50米跑', value: 8.1, unit: '秒', testDate: '2026-10-01' },
   { id: 'F2', studentId: 'S2', testType: 'jumpRope', testName: '1分钟跳绳', value: 120, unit: '个', testDate: '2026-10-01' },
 ];
-const STUDENTS = [
+const ATTENDANCE = [
   { id: 'S1', name: '张三', gender: '男', grade: '三年级', class: '三1班' },
   { id: 'S2', name: '李四', gender: '女', grade: '三年级', class: '三2班' },
 ];
@@ -187,11 +187,11 @@ await test('① 一次清干净：内存 + localStorage + 备份 + 防覆盖锁 
   const env = createStore({
     seed: {
       [FITNESS_KEY]: FITNESS_RECORDS,
-      [STUDENTS_KEY]: STUDENTS,
+      [ATTENDANCE_KEY]: ATTENDANCE,
       [`${FITNESS_KEY}__local_backup`]: FITNESS_RECORDS,
       [`pe_sports_meet_backup_v1::${FITNESS_KEY}`]: { savedAt: Date.now(), key: FITNESS_KEY, data: FITNESS_RECORDS },
     },
-    cloud: () => ({ mode: 'supabase', data: { [FITNESS_KEY]: FITNESS_RECORDS, [STUDENTS_KEY]: STUDENTS } }),
+    cloud: () => ({ mode: 'supabase', data: { [FITNESS_KEY]: FITNESS_RECORDS, [ATTENDANCE_KEY]: ATTENDANCE } }),
   });
   await env.Store.start();
   await env.pump();
@@ -216,12 +216,12 @@ await test('① 一次清干净：内存 + localStorage + 备份 + 防覆盖锁 
   equal(clearCall.body.clearIntent, true, '清空请求必须带 clearIntent=true');
 });
 
-await test('② 只清体测数据：学生名单 / 教案一律不动', async () => {
+await test('② 只清体测数据：考勤 / 教案一律不动', async () => {
   const env = createStore({
-    seed: { [FITNESS_KEY]: FITNESS_RECORDS, [STUDENTS_KEY]: STUDENTS, [PLANS_KEY]: [{ id: 'L1', title: '跳绳教案' }] },
+    seed: { [FITNESS_KEY]: FITNESS_RECORDS, [ATTENDANCE_KEY]: ATTENDANCE, [PLANS_KEY]: [{ id: 'L1', title: '跳绳教案' }] },
     cloud: () => ({
       mode: 'supabase',
-      data: { [FITNESS_KEY]: FITNESS_RECORDS, [STUDENTS_KEY]: STUDENTS, [PLANS_KEY]: [{ id: 'L1', title: '跳绳教案' }] },
+      data: { [FITNESS_KEY]: FITNESS_RECORDS, [ATTENDANCE_KEY]: ATTENDANCE, [PLANS_KEY]: [{ id: 'L1', title: '跳绳教案' }] },
     }),
   });
   await env.Store.start();
@@ -229,20 +229,20 @@ await test('② 只清体测数据：学生名单 / 教案一律不动', async (
   await env.Store.clearKey(FITNESS_KEY, { label: '体测数据' });
   await env.pump();
 
-  equal(env.Store.read(STUDENTS_KEY, []).length, 2, '学生名单不能被清掉');
+  equal(env.Store.read(ATTENDANCE_KEY, []).length, 2, '考勤记录不能被清掉');
   equal(env.Store.read(PLANS_KEY, []).length, 1, '教案不能被清掉');
-  assert(env.storage.getItem(STUDENTS_KEY) !== null, 'localStorage 里的学生名单必须保留');
+  assert(env.storage.getItem(ATTENDANCE_KEY) !== null, 'localStorage 里的考勤记录必须保留');
   assert(env.storage.getItem(PLANS_KEY) !== null, 'localStorage 里的教案必须保留');
-  equal(env.calls.filter(call => call.method === 'POST' && call.body?.key === STUDENTS_KEY).length, 0,
-    '绝不能向云端发学生名单的清空请求');
+  equal(env.calls.filter(call => call.method === 'POST' && call.body?.key === ATTENDANCE_KEY).length, 0,
+    '绝不能向云端发考勤记录的清空请求');
   equal(env.calls.filter(call => call.method === 'POST' && call.body?.key === PLANS_KEY).length, 0,
     '绝不能向云端发教案的清空请求');
 });
 
 await test('③ 清空后云端仍返回旧数据 → 本地不复活、也不反推回云端', async () => {
   const env = createStore({
-    seed: { [FITNESS_KEY]: FITNESS_RECORDS, [STUDENTS_KEY]: STUDENTS },
-    cloud: () => ({ mode: 'supabase', data: { [FITNESS_KEY]: FITNESS_RECORDS, [STUDENTS_KEY]: STUDENTS } }),
+    seed: { [FITNESS_KEY]: FITNESS_RECORDS, [ATTENDANCE_KEY]: ATTENDANCE },
+    cloud: () => ({ mode: 'supabase', data: { [FITNESS_KEY]: FITNESS_RECORDS, [ATTENDANCE_KEY]: ATTENDANCE } }),
   });
   await env.Store.start();
   await env.pump();
@@ -260,8 +260,8 @@ await test('③ 清空后云端仍返回旧数据 → 本地不复活、也不�
 
 await test('④ 清空后云端已是空 → 本地保持空，不触发反推自愈', async () => {
   const env = createStore({
-    seed: { [FITNESS_KEY]: FITNESS_RECORDS, [STUDENTS_KEY]: STUDENTS },
-    cloud: () => ({ mode: 'supabase', data: { [FITNESS_KEY]: [], [STUDENTS_KEY]: STUDENTS } }),
+    seed: { [FITNESS_KEY]: FITNESS_RECORDS, [ATTENDANCE_KEY]: ATTENDANCE },
+    cloud: () => ({ mode: 'supabase', data: { [FITNESS_KEY]: [], [ATTENDANCE_KEY]: ATTENDANCE } }),
   });
   await env.Store.start();
   await env.pump();
@@ -307,6 +307,80 @@ await test('⑥ 过期很久的清空信号一律不认（不会误删新导入�
   env.window.dispatchEvent(new FakeStorageEvent({ key: FITNESS_KEY, newValue: null }));
 
   equal(env.Store.read(FITNESS_KEY, []).length, 2, '过期信号不得清空本地数据');
+});
+
+const RETIRED_KEY = 'pe_students';
+
+await test('⑦ 【退役】启动即清光 pe_students 主键 / 备份 / 锁 / 视图锁，且永不发云端请求', async () => {
+  const legacy = Array.from({ length: 300 }, (_, i) => ({ id: `S${i}`, name: `学生${i}` }));
+  const env = createStore({
+    seed: {
+      [FITNESS_KEY]: FITNESS_RECORDS,
+      [ATTENDANCE_KEY]: ATTENDANCE,
+      [RETIRED_KEY]: legacy,
+      [`${RETIRED_KEY}__local_backup`]: legacy,
+      [`${RETIRED_KEY}__step_backup`]: legacy,
+      [`${LOCK_PREFIX}${RETIRED_KEY}`]: { at: Date.now(), critical: true, attempts: 1 },
+      [`pe_sports_meet_backup_v1::${RETIRED_KEY}`]: { savedAt: Date.now(), key: RETIRED_KEY, data: legacy },
+      pe_store_view_pin_v1: {
+        [RETIRED_KEY]: { at: Date.now(), epoch: 1, reason: '旧版残留' },
+        [ATTENDANCE_KEY]: { at: Date.now(), epoch: 2, reason: '正常键' },
+      },
+    },
+    // 模拟老后端仍把几百条废学生数据下发过来：前端也不许把它写回本地
+    cloud: () => ({ mode: 'supabase', data: { [RETIRED_KEY]: legacy, [FITNESS_KEY]: FITNESS_RECORDS } }),
+  });
+
+  await env.Store.start();
+  await env.pump();
+
+  equal(env.Store.isRetiredKey(RETIRED_KEY), true, '白名单认得这个退役键');
+  [
+    RETIRED_KEY,
+    `${RETIRED_KEY}__local_backup`,
+    `${RETIRED_KEY}__step_backup`,
+    `${LOCK_PREFIX}${RETIRED_KEY}`,
+    `pe_sports_meet_backup_v1::${RETIRED_KEY}`,
+  ].forEach(rawKey => {
+    equal(env.storage.getItem(rawKey), null, `${rawKey} 必须从 localStorage 消失`);
+  });
+  equal(env.Store.read(RETIRED_KEY, []).length, 0, '内存 / 本地都不该再读到废弃学生数据');
+  const pins = JSON.parse(env.storage.getItem('pe_store_view_pin_v1') || '{}');
+  equal(pins[RETIRED_KEY], undefined, '视图锁摘要里的退役键条目要抹掉');
+  assert(pins[ATTENDANCE_KEY], '其它键的视图锁摘要不能被误删');
+  assert(!env.window.CLOUD_KEYS.includes(RETIRED_KEY), 'CLOUD_KEYS 里绝不能再有 pe_students');
+  assert(env.window.RETIRED_LOCAL_KEYS.includes(RETIRED_KEY), '退役名单要暴露给自检');
+  equal(env.calls.filter(call => call.method === 'POST' && JSON.stringify(call.body || {}).includes(RETIRED_KEY)).length, 0,
+    '整个启动流程绝不能把 pe_students POST 上云');
+  equal(env.Store.read(FITNESS_KEY, []).length, 2, '正常业务键不受影响');
+
+  // 旧 JS 页面万一再写一次：就地清掉，不许复活、不许发请求
+  const postsBefore = env.calls.filter(call => call.method === 'POST').length;
+  env.Store.write(RETIRED_KEY, [{ id: 'S999', name: '诈尸' }]);
+  await env.pump();
+  equal(env.storage.getItem(RETIRED_KEY), null, 'write() 兜底也要清掉，不许重新占 localStorage');
+  equal(env.calls.filter(call => call.method === 'POST').length, postsBefore, 'write() 兜底不许发任何 POST');
+});
+
+await test('⑧ 【退役】writeCritical / clearKey 对 pe_students 都不发云端请求', async () => {
+  const env = createStore({
+    seed: { [RETIRED_KEY]: [{ id: 'S1' }], [FITNESS_KEY]: FITNESS_RECORDS },
+    cloud: () => ({ mode: 'supabase', data: { [FITNESS_KEY]: FITNESS_RECORDS } }),
+  });
+  await env.Store.start();
+  await env.pump();
+  const postsBefore = env.calls.filter(call => call.method === 'POST').length;
+
+  const critical = await env.Store.writeCritical(RETIRED_KEY, [{ id: 'S2' }], { label: '学生' });
+  const cleared = await env.Store.clearKey(RETIRED_KEY, { label: '学生' });
+  await env.pump();
+
+  equal(critical.retired, true, 'writeCritical 明确回 retired');
+  equal(critical.ok, false, '不能谎报云端保存成功');
+  equal(cleared.retired, true, 'clearKey 明确回 retired');
+  equal(cleared.cloudCleared, false, '退役键没有云端行可清');
+  equal(env.storage.getItem(RETIRED_KEY), null, '本地保持干净');
+  equal(env.calls.filter(call => call.method === 'POST').length, postsBefore, '两条通道都不许发 POST');
 });
 
 /* ------------------------------ 汇总 ------------------------------ */

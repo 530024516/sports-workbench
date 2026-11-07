@@ -308,6 +308,8 @@ function createUnitEnv() {
     // 空壳防线 / 保存链路
     unitSavePayload, saveUnitData, unitPayloadFilledModules, syncUnitKeyWithResource,
     UNIT_SAVE_LIVE_FIELDS, UNIT_STORAGE_KEY,
+    isUnitViewPinned, unitHasPersistedViewPin, saveUnitToResources, syncUnitStore,
+    isLegacyUnitShape, readLocalUnitDraftNow, loadUnitData,
     // 下面几个在 unit-model.js 里以「接收 unit」的纯函数形态存在，这里绑到页面的 unitData 上
     missingStructureNumbers: () => missingStructureNumbers(unitData),
     buildUnitExportHTML: () => buildUnitExportHTML(unitData),
@@ -2348,7 +2350,7 @@ await test('㊿m 主键已有完整数据时，空壳视图连本地都不许覆
   equal(env.context.__writes.length, 0, '整个保存必须被跳过');
 });
 
-await test('㊿n 有内容的大单元 → 正常推云端，日志报出模块数', async () => {
+await test('㊿n 有内容的大单元 → 只写本机草稿，绝不推云端', async () => {
   const env = createUnitEnv();
   const full = env.api.createEmptyUnit();
   full.objectives = '运动能力：能完成急停急起变向运球。';
@@ -2358,7 +2360,7 @@ await test('㊿n 有内容的大单元 → 正常推云端，日志报出模块�
   env.api.saveUnitData({ silent: true });
   const writes = env.context.__writes;
   equal(writes.length, 1, '写一次');
-  equal(writes[0].options, undefined, 'cloud=true → 不带 push:false，正常推云端');
+  equal(writes[0].options?.push, false, '架构解耦后一律 push:false，永不 POST /api/data');
   assert(String(writes[0].value.objectives).includes('急停急起'), '提交的是完整内容，不是空壳');
 });
 
@@ -2380,6 +2382,75 @@ await test('㊿o 保存到资源库后：空记录绝不覆盖主表，完整记
   assert(synced, '有内容的记录要正常同步');
   equal(String(synced.objectives), full.objectives, '写进主键的是完整 10 模块数据');
   assert(env.context.__writes.length > 0, '要真的写到 Store');
+});
+
+await test('㊿p 保存状态提示改为「草稿已自动保存至本机浏览器」', async () => {
+  const env = createUnitEnv();
+  const messages = [];
+  env.context.showUnitStatus = (msg, type) => messages.push({ msg, type });
+  const full = env.api.createEmptyUnit();
+  full.objectives = '运动能力：能完成急停急起变向运球。';
+  env.api.setUnit(full);
+  env.api.saveUnitData({ silent: false });
+  assert(messages.some(item => item.msg.includes('草稿已自动保存至本机浏览器')),
+    `提示文案没改，实际：${JSON.stringify(messages)}`);
+  assert(!messages.some(item => /同步到云端|已同步云端/.test(item.msg)), '不能再宣称草稿同步上云');
+});
+
+await test('㊿q 视图优先级锁在大单元键上失效；同步资源只写本地', async () => {
+  const env = createUnitEnv();
+  equal(env.api.isUnitViewPinned(), false, '该键不再有视图锁');
+  equal(env.api.unitHasPersistedViewPin(), false, '不再读盘上的旧锁摘要');
+
+  const full = env.api.createEmptyUnit();
+  full.objectives = '运动能力：能完成急停急起变向运球。';
+  env.context.OfflineResources = { unitFromRecord: () => full };
+  env.context.__writes = [];
+  const synced = env.api.syncUnitKeyWithResource({ id: 'ur_local' });
+  assert(synced, '有内容的记录要同步进本机草稿');
+  equal(env.context.__writes.length, 1, '只写一次');
+  equal(env.context.__writes[0].options?.push, false, '只落本地，不发云端 POST');
+  assert(String(env.context.__writes[0].value.objectives).includes('急停急起'), '写的是完整数据');
+});
+
+await test('㊿r 保存到离线资源库成功 → 提示「已存入资源库并同步云端」', async () => {
+  const env = createUnitEnv();
+  const full = env.api.createEmptyUnit();
+  full.objectives = '运动能力：能完成急停急起变向运球。';
+  full.lessons[0].objectives = '能说出屈膝含胸的发力顺序。';
+  env.api.setUnit(full);
+  const messages = [];
+  env.context.showUnitStatus = (msg, type) => messages.push({ msg, type });
+  env.context.OfflineResources = {
+    saveUnit: () => ({ ok: true, created: true, record: { id: 'ur1', content: '篮球大单元', source: 'ai' } }),
+    unitFromRecord: () => full,
+    get: () => null,
+  };
+  env.api.saveUnitToResources();
+  assert(messages.some(item => item.msg.includes('已存入资源库并同步云端')),
+    `成功提示不对，实际：${JSON.stringify(messages)}`);
+});
+
+await test('㊿s 现代教案缺 structure 字段时绝不能被误判成旧版（否则模块 4/5 会被清空）', async () => {
+  const env = createUnitEnv();
+  const modern = env.api.createEmptyUnit();
+  modern.unitTitle = '三年级篮球大单元';
+  modern.objectives = '运动能力：能完成急停急起变向运球。';
+  modern.teachingContent = '模块4：行进间运球、传切配合、急停急起。';
+  modern.keyDifficulties = { learning: '模块5：重心转换时机', content: '', organization: '', method: '' };
+  delete modern.structure;    // unitCompactForStorage 会裁掉空的 structure
+  equal(env.api.isLegacyUnitShape(modern), false, '现代教案不能走 migrateLegacyUnit');
+  const normalized = env.api.normalizeUnit(modern);
+  equal(normalized.teachingContent, modern.teachingContent, '模块 4 必须原样保留');
+  equal(normalized.keyDifficulties.learning, '模块5：重心转换时机', '模块 5 必须原样保留');
+  equal(normalized.unitTitle, '三年级篮球大单元', '标题必须保留');
+
+  const legacy = {
+    theme: '旧天天单元', objectives: { ability: '旧能力', health: '旧健康', character: '旧品德' },
+    keyPoints: '旧重点', difficulties: '旧难点', coreQuestion: '旧核心问题',
+  };
+  equal(env.api.isLegacyUnitShape(legacy), true, '真·旧版数据仍要走迁移');
+  equal(env.api.migrateLegacyUnit(legacy).unitTitle, '旧天天单元', '旧版迁移没被破坏');
 });
 
 const failed = results.filter(result => !result.ok);

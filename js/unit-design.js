@@ -47,6 +47,21 @@ const UNIT_LESSON_BATCHES = Array.from({ length: 18 }, (_, index) => [index + 1,
 /** 单个步骤失败后的重试次数：只重试失败的那一步，已经写好的模块一律保留 */
 const UNIT_STAGE_RETRY = 2;
 
+/**
+ * 只有「真·旧版」数据才走 migrateLegacyUnit()。
+ * ⚠️ 以前判据是 `!saved.structure && saved.objectives` —— 但现代教案经过
+ *    unitCompactForStorage() 裁掉空的 structure 字段后同样满足这个条件，
+ *    于是被当成旧版迁移：migrateLegacyUnit() 会把 teachingContent 置空、
+ *    keyDifficulties.learning 置空 → 刷新 / 切页回来模块 4、5 凭空消失。
+ *    旧版独有的字段（theme / keyPoints / difficulties / coreQuestion / evaluationSummary）
+ *    才是可靠的判断依据。
+ */
+function isLegacyUnitShape(saved) {
+  if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return false;
+  return ['theme', 'keyPoints', 'difficulties', 'coreQuestion', 'evaluationSummary']
+    .some(field => saved[field] !== undefined);
+}
+
 /** 旧版数据（分步生成那套）迁移到新结构，避免老师以前的内容白丢 */
 function migrateLegacyUnit(saved) {
   const empty = createEmptyUnit();
@@ -81,22 +96,17 @@ function migrateLegacyUnit(saved) {
 }
 
 function loadUnitData() {
-  /* 🛑 幽灵覆盖总闸门：只要当前 unitData 非空且已载入离线资源，
-     【任何形式】的 loadUnitData() 自动执行都直接返回内存里的这份视图，
-     绝不重新读取 pe_big_unit_design_v1 主键（主键可能还是旧的半截数据）。
-     清空重来时 unitData 已被清空，这里自然放行。 */
-  if (typeof unitViewIsProtected === 'function' && unitViewIsProtected()) {
-    console.warn('[大单元] ⚠️ 试图在切换Tab时重载数据，已阻止。'
-      + '（loadUnitData() 被自动调用）当前视图非空且已载入离线资源，直接返回内存中的 unitData');
-    return unitData;
-  }
+  /* 🗑️ 「幽灵覆盖总闸门」已下线：它当年防的是【云端旧快照】盖掉刚载入的视图。
+     主键现在只在 localStorage，且每次编辑 / 每个生成步骤都同步落盘 ——
+     盘上那份永远是最完整、最新的真本。
+     若这里因为「内存里 unitData 非空」就短路，页面重建时偶发的半截初始化
+     反而会把模块 4/5 留在屏幕上（E2E 实测到的切页丢数据）。
+     切页不丢改由 Store.onReady 的 unitReadyHandled + guardTabSwitchReload 负责。 */
   try {
     const saved = Store.read(UNIT_STORAGE_KEY, null);
-    /* 🔒 视图优先级锁生效时，主键是唯一可信副本：分步物理备份可能来自更早的旧数据，
-       绝不允许用它把旧模块补回刚载入 / 刚保存的当前视图（切页诈尸的最后一条缝）。 */
-    const viewPinned = (typeof isUnitViewPinned === 'function' && isUnitViewPinned())
-      || (typeof unitHasPersistedViewPin === 'function' && unitHasPersistedViewPin());
-    const backup = viewPinned ? null : readUnitStepBackup();
+    /* 🗑️ 视图优先级锁已随「主键不上云」下线：没有云端快照会来覆盖本地草稿，
+       直接拿分步物理备份做缺模块兜底即可（只补缺的，不整份替换）。 */
+    const backup = readUnitStepBackup();
     /* 🛟 物理备份兜底：主数据比备份少了核心模块（同步把旧快照盖回来了），
        就用备份里那些模块补齐。只补【缺的】，绝不整份替换 —— 用户后来的手工修改要保留。 */
     if (backup) {
@@ -114,7 +124,7 @@ function loadUnitData() {
       }
     }
     if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return createEmptyUnit();
-    if (!saved.structure && saved.objectives) return migrateLegacyUnit(saved);   // 旧版数据
+    if (isLegacyUnitShape(saved)) return migrateLegacyUnit(saved);   // 真·旧版数据
     return normalizeUnit(saved);
   } catch (error) {
     console.error('读取大单元数据失败', error);
@@ -122,35 +132,47 @@ function loadUnitData() {
   }
 }
 
-let unitData = createEmptyUnit();
+/**
+ * 🏠 启动即读【本机草稿】：不等 Store.onReady、不等云端 GET。
+ * pe_big_unit_design_v1 是纯本地键，localStorage 里那份就是唯一真本，
+ * Store.read() 在缓存还没灌时也会同步从 localStorage 补齐（见 store.js read()）。
+ * ☁️ 跨设备的内容走离线资源库页面 / ?resource=xx 载入。
+ */
+function readLocalUnitDraftNow() {
+  if (typeof localStorage === 'undefined') return createEmptyUnit();
+  try {
+    const raw = localStorage.getItem(UNIT_STORAGE_KEY);
+    if (!raw) return createEmptyUnit();
+    const saved = JSON.parse(raw);
+    if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return createEmptyUnit();
+    if (isLegacyUnitShape(saved)) return migrateLegacyUnit(saved);   // 真·旧版数据
+    return normalizeUnit(saved);
+  } catch (error) {
+    console.warn('[大单元] 本机草稿读取失败，按空白模板启动', error);
+    return createEmptyUnit();
+  }
+}
+let unitData = readLocalUnitDraftNow();
 let unitGenerating = false;
 const unitExpanded = new Set(['lessons', 'structure']);
 /**
- * 🔒 当前视图的「最高优先级」标记：用户主动从离线资源库载入后，
- * 任何 store:sync / 后台同步 / 本地旧缓存都不许重读覆盖 unitData。
- * ⚠️ 判定只认 Store 里【持久化】的视图优先级锁（pe_store_view_pin_v1）。
- *    以前这里还要求页内变量 unitViewPriority，切到资源库页再切回来时页面重建、
- *    页内变量归零，锁判定就失效了 —— 这正是「切页诈尸」的根因。
- *    unitViewPriority 现在只作为「本页确实主动载入过」的辅助信息保留。
+ * 🗑️ 视图优先级锁（pe_store_view_pin_v1）已在大单元主键上退役。
+ * 它存在的唯一理由是「防云端旧快照盖掉刚载入的视图」；主键现在只在
+ * localStorage，云端根本不碰它，锁就成了多余的启动复杂度。
+ * 保留下面两个页内标记，只负责「切页不丢数据」：
+ *   unitReadyHandled —— 本页已载入过视图，之后 store:sync 不再重赋值 unitData；
+ *   unitExplicitReset —— 用户亲手点【清空重来】，唯一允许重新载入的例外。
  */
-let unitViewPriority = null;
-let unitReadyHandled = false;      // 本页是否已经载入过视图（载入后禁止任何自动重赋值）
-let unitExplicitReset = false;     // 用户亲手点【清空重来】：唯一允许重新载入的例外
+let unitViewPriority = null;       // 仅记录本页是否主动载入过资源（不再上锁）
+let unitReadyHandled = false;
+let unitExplicitReset = false;
 
+/** 该键已无视图锁（Store.isViewPinned 对仅本地键永远返回 false） */
 function isUnitViewPinned() {
-  return typeof Store !== 'undefined'
-    && typeof Store.isViewPinned === 'function'
-    && Store.isViewPinned(UNIT_STORAGE_KEY);
+  return false;
 }
-
-/**
- * 盘上是否已有持久化视图锁。
- * 切回页面时 Store 实例可能还没跑完 _restoreViewPins()，只问 Store 会漏判，
- * 于是又掉进 loadUnitData() 那条旧路。这里直接看 localStorage 摘要兜底。
- */
 function unitHasPersistedViewPin() {
-  try { return Boolean(localStorage.getItem('pe_store_view_pin_v1')); }
-  catch (error) { return false; }
+  return false;
 }
 
 /** 当前 unitData 是否已经有真实内容（空模板 / 默认量规 / 空结构图一律不算） */
@@ -169,11 +191,9 @@ function unitViewHasContent() {
   return false;
 }
 
-/** 当前视图「已载入离线资源 + 非空」：这是禁止任何自动重载的最高条件 */
+/** 当前视图「已载入 + 非空」：禁止任何自动重载（不再依赖云端视图锁） */
 function unitViewIsProtected() {
-  if (typeof unitViewHasContent !== 'function' || !unitViewHasContent()) return false;
-  if (typeof isUnitViewPinned === 'function' && isUnitViewPinned()) return true;
-  return typeof unitViewPriority !== 'undefined' && Boolean(unitViewPriority);
+  return typeof unitViewHasContent === 'function' && unitViewHasContent();
 }
 
 /**
@@ -185,8 +205,7 @@ function guardTabSwitchReload(reason) {
   if (!unitReadyHandled || !unitViewHasContent() || unitExplicitReset) return false;
   console.warn('[大单元] ⚠️ 试图在切换Tab时重载数据，已阻止。'
     + `（${reason}）当前视图「${unitData.unitTitle || unitData.meta?.unitTitle || '未命名'}」非空`
-    + `${isUnitViewPinned() ? '，且视图优先级锁仍锁定' : ''}`
-    + '；不调用 loadUnitData()，也不重新赋值 unitData。');
+    + '；本机草稿已自动保存，不调用 loadUnitData()、不重新赋值 unitData。');
   return true;
 }
 
@@ -250,6 +269,17 @@ document.getElementById('page-content').innerHTML = `
 
   <section id="ud2Modules" class="ud2-modules"></section>
 `;
+
+/* 🏠 首屏【立即】用本机草稿渲染，不等 Store.onReady，也就完全不等云端 GET。
+   unitData 已在脚本开头由 readLocalUnitDraftNow() 同步从 localStorage 读好。
+   Store.onReady 之后仍会幂等地再跑一次（负责 ?resource= 载入与熔断自愈），
+   数据完全相同，不会闪回旧内容。 */
+try {
+  populateUnitSelectors();
+  renderUnitModules();
+} catch (error) {
+  console.warn('[大单元] 首屏本机草稿渲染失败，等 Store.onReady 再试', error);
+}
 
 /* ---------------- 三个下拉框联动 ---------------- */
 
@@ -832,78 +862,45 @@ function unitSavePayload() {
 
 /**
  * 保存大单元数据。
- * @param {{silent?: boolean, cloud?: boolean}} options
- *   cloud=false → 只落本地（push:false），生成过程中的高频保存走这条，
- *                 避免一轮生成往云端 POST 十几遍整份数据（那是 502 的真正来源）。
- *   cloud=true（默认）→ 本地 + 云端各写一次。
- *   allowEmpty=true → 用户亲手点【清空重来】，允许写入空数据（走 Store.clearKey 的云端删行通道）。
+ * @param {{silent?: boolean, step?: string, allowEmpty?: boolean}} options
+ *   🏠 本函数【永远只写本机】：pe_big_unit_design_v1 是纯本地草稿，没有任何云端分支。
+ *   allowEmpty=true → 用户亲手点【清空重来】，允许把空模板写回本机草稿。
  */
-function saveUnitData({ silent = false, cloud = true, step = '', allowEmpty = false } = {}) {
+function saveUnitData({ silent = false, step = '', allowEmpty = false } = {}) {
   const payload = unitSavePayload();
   const filled = unitPayloadFilledModules(payload);
 
-  /* ⛔ 空壳防线（本次「保存到资源库后主表没数据」的直接凶手）：
-     unitSavePayload() 对 createEmptyUnit() 也会吐出一份 13 个字段、约 3KB 的 JSON
-     （meta 全空 + 18 个空格子 + 默认量规模板）。选题变更时的 persistUnitSelection()
-     会调本函数，于是这份空壳被 POST 到 /api/data → 后端 isEmptyPayload() 只看
-     「有没有 key」就放行 → unit_designs 那一行被覆盖成空壳，页面自然"没有数据"。
-     现在：空壳绝不推云端；若主键里已有完整数据，连本地都不许覆盖。 */
+  /* ⛔ 空壳防线：unitSavePayload() 对空模板也会吐出 13 个字段 / 18 个空格子 /
+     默认量规模板。选题变更时只要本地草稿已有内容，就绝不允许空视图把它覆盖掉。 */
   if (!filled.length && !allowEmpty) {
     let existingFilled = [];
     try {
       if (typeof Store !== 'undefined' && typeof Store.read === 'function') {
         existingFilled = unitPayloadFilledModules(Store.read(UNIT_STORAGE_KEY, null));
       }
-    } catch (error) { /* 读不到就当成"主键没内容" */ }
+    } catch (error) { /* 读不到就当成"本地草稿没内容" */ }
     if (existingFilled.length) {
       console.warn(
-        `[大单元] ⛔ 当前视图是空壳（0/${UNIT_SAVE_LIVE_FIELDS.length} 模块有内容），而主键已有 `
-        + `${existingFilled.length} 个模块有内容 → 整个跳过本次保存（本地与云端都不写），`
-        + '避免把 unit_designs 洗成空数据。',
+        `[大单元] ⛔ 当前视图是空壳（0/${UNIT_SAVE_LIVE_FIELDS.length} 模块有内容），而本机草稿已有 `
+        + `${existingFilled.length} 个模块有内容 → 跳过本次保存，避免把草稿洗空。`,
       );
       return payload;
     }
-    console.warn(
-      `[大单元] ⛔ 本次保存的是空壳（0/${UNIT_SAVE_LIVE_FIELDS.length} 模块有内容，多半只是选题变更）`
-      + ' → 只落本地保留选题，绝不 POST /api/data。',
-    );
-    cloud = false;
+    console.log(`[大单元] ℹ️ 空壳草稿（多半只是选题变更）→ 只落本地保留选题。`);
   }
 
-  /* ① 生成一步存一步：先写一份【物理备份】，不经过 Store、不受任何云端同步影响。
-        主数据哪怕被别的地方覆盖，这份也一直在盘上，loadUnitData 会自动拿它补回来。
-        同步写（localStorage.setItem），绝不 await —— 拿到模块那一刻就已经落盘。 */
+  /* ① 生成一步存一步：先写一份【物理备份】，同步落盘，绝不 await。 */
   writeUnitStepBackup(payload, step);
-  /* ② 主数据照常写：生成中只落本地（cloud:false），避免每步都推云端把 /api/data 打爆 */
+  /* ② 🏠 主数据【只写本机】：pe_big_unit_design_v1 是纯本地草稿，
+        Store 的仅本地白名单会彻底切断云端 POST；这里再明确传 push:false 双保险。
+        ☁️ 要跨设备共享，请用【保存到离线资源库】按钮（pe_offline_resources_v1）。 */
   try {
-    if (cloud) {
-      const bytes = typeof unitPayloadBytes === 'function'
-        ? unitPayloadBytes(payload) : JSON.stringify(payload).length;
-      console.log(
-        `[大单元] 📤 即将推云端 ${UNIT_STORAGE_KEY}：${(bytes / 1024).toFixed(1)} KB，`
-        + `${filled.length}/${UNIT_SAVE_LIVE_FIELDS.length} 个模块有内容`
-        + (filled.length < UNIT_SAVE_LIVE_FIELDS.length
-          ? `，缺：${UNIT_SAVE_LIVE_FIELDS.filter(field => !filled.includes(field)).join('、')}` : ''),
-      );
-      Store.write(UNIT_STORAGE_KEY, payload);
-    } else {
-      Store.write(UNIT_STORAGE_KEY, payload, { push: false });
-    }
-    if (!silent && !unitGenerating) showUnitStatus('✓ 已自动保存', 'success');
-    /* ✅ 保存成功：立刻把这份最新 payload 硬写进 Store 内存缓存与 localStorage 主键，
-       并保持 / 补回视图优先级锁。切回页面时 read() 读到的绝对是这一版。 */
-    if (typeof Store !== 'undefined' && typeof Store.commitView === 'function') {
-      const committed = Store.commitView(UNIT_STORAGE_KEY, payload, {
-        reason: '大单元保存成功',
-        userModified: Boolean(unitViewPriority) || isUnitViewPinned(),
-      });
-      if (!silent && !unitGenerating) {
-        console.log('[大单元] ✅ 保存成功：已强制刷新 Store 内存缓存与 localStorage 主键'
-          + `${committed?.userModified ? '，视图优先级锁保持锁定（切页也不会重读旧数据）' : ''}`);
-      }
+    Store.write(UNIT_STORAGE_KEY, payload, { push: false });
+    if (!silent && !unitGenerating) {
+      showUnitStatus('✅ 草稿已自动保存至本机浏览器', 'success');
     }
   } catch (error) {
-    console.error('保存大单元数据失败', error);
+    console.error('保存大单元草稿失败', error);
     showUnitStatus(`保存失败：${error.message}`, 'error');
   }
   // ③ 长生成的心跳：刷新冻结信号时间戳，避免 60 分钟 TTL 到期后同步提前解冻
@@ -1603,8 +1600,8 @@ async function runUnitLessonGroup(lessons, selection) {
     );
     if (result.ok) {
       mergeUnitStage(result.data, selection, 'lesson_single');
-      // 生成一步存一步：只写本地，流水线结束再整份推云端
-      saveUnitData({ silent: true, cloud: false, step: `第 ${step.no} 课时` });
+      // 生成一步存一步：同步写进本机草稿（无云端请求）
+      saveUnitData({ silent: true, step: `第 ${step.no} 课时` });
       renderUnitModuleBlocks(['lessons']);       // 这一课立刻上屏
     } else {
       failures.push(`第 ${step.no} 课时：${result.error}`);
@@ -1667,14 +1664,14 @@ async function generateWholeUnit() {
         continue;
       }
       mergeUnitStage(result.data, selection, step.stage);
-      // ⚠️ 生成过程中【只写本地】：一轮生成有 20+ 步，每步都整份推云端必然把 /api/data 打爆（502）
-      saveUnitData({ silent: true, cloud: false, step: step.label });
+      // 🏠 生成过程中每一步都同步写进本机草稿（一轮 20+ 步，零云端请求）
+      saveUnitData({ silent: true, step: step.label });
       renderUnitModuleBlocks(step.modules);      // 局部渲染：这一步的内容立刻可见
     }
 
     // 结构图节点没写全时，按课时表标题兜底补齐（不动老师的 canvas，只给默认归属）
     if (missingStructureNumbers(unitData).length) unitData = autoFillStructure(unitData);
-    // 全部生成完毕 —— 这时才把成品一次性推上云端
+    // 全部生成完毕 —— 成品同步落进本机草稿
     saveUnitData({ silent: true });
     renderUnitModules();
 
@@ -1697,10 +1694,10 @@ async function generateWholeUnit() {
       showUnitStatus(`✓ 18 课时齐全，但模块 ${missingTailLabel(missing)} 还缺内容（纯文本里没匹配到对应分隔符），可在相应面板手工补写。`, 'warning');
       showToast('生成完成，但有部分内容需要人工检查', 'error');
     } else {
-      showUnitStatus('✓ 流水线完成：10 个模块 + 18 课时已全部生成并保存，请按教学实际复核。', 'success');
+      showUnitStatus('✅ 流水线完成：10 个模块 + 18 课时已全部生成，草稿已自动保存至本机浏览器，请按教学实际复核。', 'success');
       showToast('大单元设计已生成', 'success');
     }
-    syncUnitStore();     // 收尾：完整落盘 + 触发一次云端同步
+    syncUnitStore();     // 收尾：确认本机草稿已落盘（零云端请求）
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     showUnitStatus(`生成失败：${message}`, 'error');
@@ -1711,16 +1708,12 @@ async function generateWholeUnit() {
 }
 
 /**
- * 流水线跑完：把最终结果完整落盘，并触发一次云端同步。
- * ⚠️ 成品写入由调用方的 saveUnitData({silent:true})（cloud=true）完成 ——
- *    这里【不再重复写一次】，否则收尾会连发两次一模一样的 POST /api/data。
+ * 流水线跑完的收尾：🏠 草稿已由 saveUnitData() 同步写进 localStorage，
+ * 【不再触发任何云端同步】—— 大单元主键是纯本地键，云端入口只有离线资源库。
+ * 保留这个函数是为了不改动流水线调用点；调用它只会打一条本机保存日志。
  */
 function syncUnitStore() {
-  try {
-    if (typeof Store !== 'undefined' && typeof Store.sync === 'function') Store.sync();
-  } catch (error) {
-    console.warn('大单元同步失败：', error);
-  }
+  console.log('[大单元] ✅ 草稿已自动保存至本机浏览器（未发起任何云端同步）');
 }
 
 function missingTailLabel(missingTail) {
@@ -1808,7 +1801,7 @@ async function generateLessonTableOnly() {
       renderUnitModuleBlocks(['rubric']);
     }
     if (missingStructureNumbers(unitData).length) unitData = autoFillStructure(unitData);
-    // 全部生成完毕 —— 这时才把成品一次性推上云端
+    // 全部生成完毕 —— 成品同步落进本机草稿
     saveUnitData({ silent: true });
     renderUnitModules();
     syncUnitStore();
@@ -2060,20 +2053,15 @@ function clearUnitDesign() {
   unitExpanded.clear();
   // 分步物理备份也要清掉，否则下次加载会把刚清空的内容"补"回来
   try { localStorage.removeItem(UNIT_STEP_BACKUP_KEY); } catch (error) { /* 忽略 */ }
-  /* 🧹 用户亲手清空 = 走 Store.clearKey() 的专属通道（云端删行 + 解除视图锁 + 清备份）。
-     绝不能再走 saveUnitData() 写空壳：现在后端会拒绝空壳（400），
-     而且空壳会把 unit_designs 那一行覆盖成"有 key 没内容"的空数据。 */
+  /* 🧹 用户亲手清空 = 只清本机草稿（主键 / 镜像 / 分步备份 / 视图锁摘要），
+     Store.clearKey() 对「仅本地白名单」的键会自动走纯本地分支，不发任何云端 DELETE。
+     清空后把「选题」meta 写回本地，下次进来下拉框还在。 */
   if (typeof Store !== 'undefined' && typeof Store.clearKey === 'function') {
     Promise.resolve(Store.clearKey(UNIT_STORAGE_KEY, { label: '大单元设计' }))
-      .then(() => {
-        // 清空后再把「选题」meta 写回本地（push:false，不碰云端），下次进来下拉框还在
-        try { Store.write(UNIT_STORAGE_KEY, unitData, { push: false }); } catch (error) { /* 忽略 */ }
-        console.log('[大单元] ✅ 清空重来：云端 unit_designs 行已删除');
-      })
-      .catch(error => console.warn('[大单元] ⚠️ 云端清空失败，本机已清空', error));
-  } else {
-    saveUnitData({ silent: true, allowEmpty: true, cloud: false });
+      .catch(error => console.warn('[大单元] ⚠️ 清空本机草稿失败', error));
   }
+  try { Store.write(UNIT_STORAGE_KEY, unitData, { push: false }); } catch (error) { /* 忽略 */ }
+  console.log('[大单元] ✅ 清空重来：本机草稿已清空（未发任何云端请求）');
   renderUnitModules();
   showUnitStatus('已清空，可重新选择题目后生成。', 'info');
 }
@@ -2112,23 +2100,23 @@ function autoRecoverStoreCircuit(reason = '') {
 }
 
 /**
- * ✅ 保存到离线资源库成功后：把【资源库里那份完全相同的数据】强制同步进 pe_big_unit_design_v1。
+ * ✅ 保存到离线资源库成功后：把【资源库里那份完全相同的数据】同步进本机草稿主键。
  * 以前这里走 saveUnitData() → unitSavePayload() 的裁剪版，长模块会被 clip 成半截，
  * 主键与资源库从此不一致；切回 Tab 时读到半截主键，完整视图就"消失"了。
- * 现在：
+ * 现在（架构解耦后）：
  *   ① OfflineResources.unitFromRecord(record) 还原出与【载入】一模一样的完整 unit；
- *   ② Store.write 立刻写内存缓存 + localStorage 主键，并发起云端 POST；
- *   ③ Store.commitView 再硬写一次缓存 / 主键（绕过任何合并），保持 userModified 视图锁；
- *   ④ 同步刷新分步物理备份，绝不留下旧半截备份。
+ *   ② Store.write(..., { push:false }) 只写内存缓存 + localStorage，【不发任何云端请求】；
+ *   ③ 同步刷新分步物理备份，绝不留下旧半截备份。
+ * ☁️ 跨设备共享由 pe_offline_resources_v1（离线资源库）独立承担。
  */
 function syncUnitKeyWithResource(record, reason = '保存到离线资源库') {
   const payload = (typeof OfflineResources !== 'undefined'
     && typeof OfflineResources.unitFromRecord === 'function'
     ? OfflineResources.unitFromRecord(record) : null) || unitData;
 
-  /* ✅ 保存自检：提交给 pe_big_unit_design_v1 的 value 必须是完整成品，绝不能是空壳。
+  /* ✅ 保存自检：写进本机草稿的 value 必须是完整成品，绝不能是空壳。
      unitFromRecord() 在 record.modules_json 为空时会 normalizeUnit({}) 造出一份空模板 ——
-     那份空模板以前被 writeCritical 直接推上云端，覆盖掉 unit_designs 里已有的数据。 */
+     那份空模板会覆盖掉本地已有的完整草稿，所以这里必须拦下。 */
   const filled = unitPayloadFilledModules(payload);
   const bytes = typeof unitPayloadBytes === 'function'
     ? unitPayloadBytes(payload) : JSON.stringify(payload).length;
@@ -2139,37 +2127,26 @@ function syncUnitKeyWithResource(record, reason = '保存到离线资源库') {
       ? `（缺：${UNIT_SAVE_LIVE_FIELDS.filter(field => !filled.includes(field)).join('、')}）` : ''),
   );
   if (!filled.length) {
-    console.error(`[大单元] ⛔ ${reason}：资源库记录里 10 个模块全空，已拒绝写入主键，云端 unit_designs 保持不变。`);
+    console.error(`[大单元] ⛔ ${reason}：资源库记录里 10 个模块全空，已拒绝覆盖本机草稿。`);
     if (typeof showUnitStatus === 'function') {
       showUnitStatus('保存失败：资源库这条记录是空的，未覆盖主表。请重新生成或从资源库选一条有内容的记录。', 'error');
     }
     return null;
   }
 
-  if (typeof Store !== 'undefined') {
-    /* 用户主动点保存 = 明确的云端写入指令：先退出【加载离线资源】留下的静默本地模式，
-       否则这次 POST 会被静默态 / cloudState=off 短路，云端仍停在旧半截数据上。 */
-    if (typeof Store.exitQuietLocalMode === 'function') Store.exitQuietLocalMode();
-    /* 强制云端写入：writeCritical 不受 cloudState=off 影响，直接 await /api/data 确认；
-       失败不弹红框，数据完整留在本机，由保护锁在网络恢复后自动续传。 */
-    if (typeof Store.writeCritical === 'function') {
-      Promise.resolve(Store.writeCritical(UNIT_STORAGE_KEY, payload, { label: reason }))
-        .then(result => console.log(`[大单元] ✅ ${reason}：云端写入${result?.ok ? '已确认' : '未完成（完整数据已留本机）'}`))
-        .catch(error => console.warn(`[大单元] ⚠️ ${reason}：云端写入失败，完整数据保留在本机`, error));
-    } else if (typeof Store.write === 'function') {
-      Store.write(UNIT_STORAGE_KEY, payload);
-    }
-    if (typeof Store.commitView === 'function') {
-      Store.commitView(UNIT_STORAGE_KEY, payload, { userModified: true, reason });
-    }
+  /* 🏠 主键只写本机草稿：不碰云端、不碰 view pin、不碰静默本地模式。
+     ☁️ 真正上云的是【离线资源库】pe_offline_resources_v1 —— 由 saveUnitToResources()
+        里的 OfflineResources.saveUnit() 走正常 Store.write（writeCritical）完成。 */
+  if (typeof Store !== 'undefined' && typeof Store.write === 'function') {
+    Store.write(UNIT_STORAGE_KEY, payload, { push: false });
   }
   writeUnitStepBackup(payload, reason);
-  console.log(`[大单元] ✅ ${reason}：已强制同步 pe_big_unit_design_v1`
-    + '（Store 内存缓存 + localStorage 主键 + 云端写入 + 分步备份），与离线资源库数据绝对一致');
+  console.log(`[大单元] ✅ ${reason}：已把资源库这份完整数据同步进本机草稿`
+    + '（Store 内存缓存 + localStorage 主键 + 分步备份）；云端由离线资源库负责');
   return payload;
 }
 
-/** 【保存到离线资源库】：立即可用在工作副本 + 离线资源库，联网后自动同步 Supabase */
+/** 【保存到离线资源库】：☁️ 唯一的云端入口 —— 写入 pe_offline_resources_v1 并同步上云 */
 function saveUnitToResources() {
   if (typeof OfflineResources === 'undefined') {
     showUnitStatus('离线资源库模块未加载，请刷新页面重试。', 'error');
@@ -2227,15 +2204,14 @@ function saveUnitToResources() {
   }
   unitData.meta.resourceId = result.record.id;
   unitData.meta.source = result.record.source;
-  /* ✅ 关键修复：把【资源库那份完整数据】强制同步进主键（缓存 + 本地 + 云端），
-     不再用 unitSavePayload() 的裁剪版，保证主键与资源库绝对一致。
+  /* ✅ 把【资源库那份完整数据】同步进本机草稿（不再用 unitSavePayload() 的裁剪版）。
      返回 null = 资源库记录是空壳，同步已被拒绝 —— 不能谎报"保存成功"。 */
   const synced = syncUnitKeyWithResource(result.record);
   renderUnitModules();
   if (!synced) return;
   showUnitStatus(
-    `✓ 已${result.created ? '新建' : '更新'}离线资源：${result.record.content || result.record.id}`
-    + '。数据已存在本机，断网也能查看；联网后会自动同步到 Supabase。',
+    `✅ 已存入资源库并同步云端：${result.record.content || result.record.id}`
+    + '。这份资源可在其它设备打开；本机草稿也已同步更新。',
     'success',
   );
   // ③ 保存成功 → 顺手把之前 502 熔断的键解锁重推
@@ -2288,34 +2264,21 @@ function loadUnitFromResource(record) {
     unitData = unit;
     unitReadyHandled = true;      // 载入即锁定当前视图，之后任何 store:sync 都不许重赋值
     unitExplicitReset = false;
-    /* 🔒 视图最高优先级：把刚载入的资源钉在 Store 主键上。
-       之后云端旧快照、后台同步、未确认锁、其它 iframe 的旧缓存都盖不掉它；
-       store:sync 触发的 onReady 重绘也会跳过（见文件末尾）。 */
+    /* 🏠 只更新本机草稿：unitReadyHandled + 非空视图已经保证切页不丢数据，
+       不再需要 pe_store_view_pin_v1 云端视图锁（该锁在本键上已失效）。 */
     unitViewPriority = { at: Date.now(), reason: '从离线资源库加载', id: record?.id || '' };
-    if (typeof Store !== 'undefined' && typeof Store.pinLocalView === 'function') {
-      try {
-        /* userModified:true = 最高级别标记：刷新后任何时光机备份 / 云端旧快照都不许覆盖这份数据 */
-        const pinned = Store.pinLocalView(UNIT_STORAGE_KEY, unit, '从离线资源库加载', { userModified: true });
-        unitViewPriority.epoch = pinned?.epoch || 0;
-      } catch (error) {
-        console.warn('[大单元] 视图优先级锁写入失败（不影响本机载入）', error);
-      }
-    }
     unitExpanded.clear();
     unitExpanded.add('structure');
     unitExpanded.add('lessons');
-    /* 只更新本地视图：cloud:false 仅写 localStorage 与物理备份，绝不推 /api/data。
-       以前这里用默认的 cloud:true，一载入就往云端写整份大单元 —— 加载动作不该写云端，
-       更不该覆盖当前正在编辑的数据。要同步由用户手动点保存。 */
-    saveUnitData({ silent: true, cloud: false });
+    saveUnitData({ silent: true });
     populateUnitSelectors();          // 把选题回填到三个下拉框
     renderUnitModules();
     showUnitStatus(
       `✓ 已从离线资源库载入「${unit.unitTitle || record.content || record.id}」（未调用 AI）。`
-      + '仅载入到本机视图，已锁定为最高优先级（后台旧数据不会覆盖）；确认无误后手动保存即可。',
+      + '✅ 草稿已自动保存至本机浏览器；确认无误后可点【保存到离线资源库】同步云端。',
       'success',
     );
-    showToast('已从离线资源库载入（未写云端）', 'success');
+    showToast('✅ 已载入本机草稿', 'success');
   } finally {
     if (release) release();
   }
@@ -2427,25 +2390,18 @@ window.addEventListener('pageshow', () => guardTabSwitchReload('pageshow → 切
 window.addEventListener('focus', () => guardTabSwitchReload('focus → 窗口重新聚焦'));
 
 Store.onReady(() => {
-  /* 🔒 切页诈尸的总闸门：本页已经载入过视图、且 unitData 非空时，
-     任何 store:sync（云端同步 / 后台补推 / 兄弟 iframe 旧缓存）都不许重新赋值 unitData。
-     判定不依赖页内变量，持久化视图锁（Store.isViewPinned）跨页面重建仍生效。 */
+  /* 🛑 切页诈尸的总闸门：本页已载入过视图且非空时，任何 store:sync 都不许重新赋值
+     unitData。判定只看【本页视图内容】，不再依赖任何云端视图优先级锁。 */
   if (unitReadyHandled && unitViewHasContent() && !unitExplicitReset) {
-    console.log(`[大单元] 🔒 当前视图已有数据${isUnitViewPinned() ? '，且视图优先级锁仍锁定' : ''}`
-      + '：忽略 store:sync 重绘，不重新 loadUnitData()、不重新赋值 unitData');
+    console.log('[大单元] 🔒 当前视图已有数据：忽略 store:sync 重绘，'
+      + '不重新 loadUnitData()、不重新赋值 unitData');
     return;
   }
   if (unitExplicitReset) unitExplicitReset = false;
   unitReadyHandled = true;
-  /* 切回 Tab（页面重建）：只要持久化视图锁还在，就【绝不调用 loadUnitData()】，
-     直接从已被 syncUnitKeyWithResource() 写完整的主键恢复完整视图。 */
-  if (unitHasPersistedViewPin() || isUnitViewPinned()) {
-    unitData = normalizeUnit(Store.read(UNIT_STORAGE_KEY, null) || createEmptyUnit());
-    console.log('[大单元] 🔒 切回页面：直接从受保护主键恢复完整视图，'
-      + '不调用 loadUnitData()；视图优先级锁保持锁定');
-  } else {
-    unitData = loadUnitData();
-  }
+  /* 🏠 首屏 / 切回页面一律【直接读本机草稿】：loadUnitData() 只读 localStorage
+     与分步物理备份，不等云端 GET，也不存在被云端旧快照覆盖的可能。 */
+  unitData = loadUnitData();
   populateUnitSelectors();
   // 幂等性：资源库页点【编辑】会带上 ?resource=xx，这里直接把那份资源载进来
   if (!loadUnitFromUrl()) renderUnitModules();

@@ -108,7 +108,7 @@ function newFitnessRecordId() {
 const DB = {
   // ===== 存储键 =====
   KEYS: {
-    STUDENTS: 'pe_students',
+    // ⛔ pe_students 已彻底退役：学生信息模块删除，名册由体测记录派生
     FITNESS_RECORDS: 'pe_fitness_records',
     ATTENDANCE: 'pe_attendance',
     LESSON_PLANS: 'pe_lesson_plans',
@@ -327,21 +327,14 @@ const DB = {
   },
 
   /**
-   * 一次性迁移：把老数据（studentId 指向旧学生名单、且没有 gender）改成新体系。
+   * 一次性迁移：把老数据（studentId 指向旧学号）改成新体系。
    *   · studentId → 由「姓名+班级+年级」算出的哈希 id
-   *   · gender   → 优先用记录自带，其次从旧名单回填（回填完就不再依赖旧名单）
+   *   · gender   → 只认记录自带的值（旧学生名单 pe_students 已彻底退役，不再回填）
    * 幂等：已经是新体系的记录不会被改动。
    */
   migrateFitnessRecords() {
     const records = this.getFitnessRecords();
     if (!records.length) return { changed: false, updated: 0 };
-    let legacy = [];
-    try {
-      legacy = this.get(this.KEYS.STUDENTS) || [];
-    } catch (error) {
-      legacy = [];
-    }
-    const legacyById = new Map(legacy.map(student => [String(student.id ?? ''), student]));
 
     let changed = false;
     const next = records.map(record => {
@@ -349,7 +342,7 @@ const DB = {
       const grade = String(record.grade ?? '').trim();
       const className = String(record.class ?? '').trim();
       if (!name) return record;                       // 没有姓名就保持原样，不乱合并
-      const gender = record.gender || legacyById.get(String(record.studentId ?? ''))?.gender || '';
+      const gender = record.gender || '';
       const studentId = this.makeFitnessStudentId({ name, grade, class: className });
       if (studentId === record.studentId && gender === record.gender) return record;
       changed = true;

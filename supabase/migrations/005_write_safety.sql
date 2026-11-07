@@ -36,7 +36,7 @@ left join pg_attrdef d on d.adrelid = c.oid and d.adnum = a.attnum
 where n.nspname = 'public'
   and c.relkind = 'r'
   and c.relname in (
-    'fitness_records', 'students', 'attendance', 'lesson_plans', 'resources',
+    'fitness_records', 'attendance', 'lesson_plans', 'resources',
     'courses', 'todos', 'fitness_logs', 'course_schedule', 'unit_designs',
     'sports_meet', 'app_settings', 'offline_resources'
   )
@@ -53,10 +53,10 @@ order by sequencename;
 --   id 是主键时这里必然是 0 行；如果这里查出了东西，说明表结构和代码里的
 --   "id 为主键" 假设不一致，必须先修表再谈别的。
 -- -------------------------------------------------------------
+-- ⛔ public.students 已退役（学生模块删除），不再出现在体检清单里，
+--    否则执行过 006_drop_students.sql 的库会在这条语句上报 "relation does not exist"。
 select 'fitness_records' as table_name, id, count(*) as cnt
 from public.fitness_records group by id having count(*) > 1
-union all
-select 'students', id, count(*) from public.students group by id having count(*) > 1
 union all
 select 'lesson_plans', id, count(*) from public.lesson_plans group by id having count(*) > 1;
 
@@ -119,7 +119,7 @@ declare
   idx text;
 begin
   foreach t in array array[
-    'fitness_records', 'students', 'attendance', 'lesson_plans', 'resources',
+    'fitness_records', 'attendance', 'lesson_plans', 'resources',
     'courses', 'todos', 'fitness_logs', 'course_schedule', 'unit_designs',
     'sports_meet', 'app_settings', 'offline_resources'
   ]::text[] loop
@@ -159,7 +159,7 @@ declare
   t text;
 begin
   foreach t in array array[
-    'fitness_records', 'students', 'attendance', 'lesson_plans', 'resources',
+    'fitness_records', 'attendance', 'lesson_plans', 'resources',
     'courses', 'todos', 'fitness_logs', 'course_schedule', 'unit_designs',
     'sports_meet', 'app_settings', 'offline_resources'
   ]::text[] loop
@@ -189,7 +189,7 @@ declare
   t text;
 begin
   foreach t in array array[
-    'fitness_records', 'students', 'attendance', 'lesson_plans', 'resources',
+    'fitness_records', 'attendance', 'lesson_plans', 'resources',
     'courses', 'todos', 'fitness_logs', 'course_schedule', 'unit_designs',
     'sports_meet', 'app_settings', 'offline_resources'
   ]::text[] loop

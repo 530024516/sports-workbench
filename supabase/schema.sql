@@ -3,19 +3,14 @@
 -- 执行方式：Supabase 控制台 → SQL Editor → 粘贴执行（幂等，可重复运行）
 --
 -- 设计说明：
---   * 每张表对应工作台里的一类数据（学生、体测、教案、健身记录……）。
+--   * 每张表对应工作台里的一类数据（体测、教案、健身记录……）。
 --   * 业务字段统一存放在 data(jsonb) 中：历史 localStorage 数据字段不固定，
 --     这样迁移零损耗，也不会因为补字段而反复改表。
 --   * id：单条记录的主键（集合型=记录 id；单例型=存储键名）。
 --   * ord：集合型数据的显示顺序。
+--   * ⛔ public.students 已退役：学生信息模块删除，名册由体测记录派生。
+--     建表语句已移除；已在库里的旧表请执行 migrations/006_drop_students.sql 彻底 Drop。
 -- =============================================================
-
-create table if not exists public.students (
-  id text primary key,
-  data jsonb not null default '{}'::jsonb,
-  ord integer not null default 0,
-  updated_at timestamptz not null default now()
-);
 
 create table if not exists public.fitness_records (
   id text primary key,
@@ -122,7 +117,6 @@ create table if not exists public.app_settings (
 --    若要多人使用或公网部署，请改为 Supabase Auth + 按 user_id 限定的策略。
 -- =============================================================
 
-alter table public.students enable row level security;
 alter table public.fitness_records enable row level security;
 alter table public.attendance enable row level security;
 alter table public.lesson_plans enable row level security;
@@ -141,7 +135,7 @@ declare
   t text;
 begin
   foreach t in array array[
-    'students','fitness_records','attendance','lesson_plans','resources','courses',
+    'fitness_records','attendance','lesson_plans','resources','courses',
     'course_schedule','todos','fitness_logs','unit_designs','offline_resources','sports_meet','app_settings'
   ]
   loop

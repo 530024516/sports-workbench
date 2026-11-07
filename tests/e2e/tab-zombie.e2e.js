@@ -13,6 +13,8 @@
  *   ④ 点击「保存到离线资源库」
  *   ⑤ 点击左侧导航「体测数据」→ 再点击「大单元设计」切回
  *   ⑥ 断言：模块 4 / 5 内容还在，模块 1 的修改还在，绝不能变回旧半截数据
+ *   ⑦ 架构解耦验收：pe_big_unit_design_v1 只存本机（零云端 POST）、视图锁已失效；
+ *      pe_offline_resources_v1 仍是唯一云端入口；本地刷新 / 切页不丢数据
  *
  * 产物：tests/e2e/tab-zombie-pass.png（截图）、tests/e2e/tab-zombie-run.log（完整终端日志）
  */
@@ -143,7 +145,7 @@ async function main() {
     page.on('console', msg => {
       const text = `[browser:${msg.type()}] ${msg.text()}`;
       browserConsole.push(text);
-      if (/⚠️ 试图在切换Tab|🔒 切回页面|✅ 保存到离线资源库|已强制同步|忽略 store:sync/.test(msg.text())) {
+      if (/⚠️ 试图在切换Tab|🔒 切回页面|✅ 保存到离线资源库|已把资源库这份完整数据同步进本机草稿|忽略 store:sync|草稿已自动保存至本机浏览器/.test(msg.text())) {
         log(text);
       }
     });
@@ -276,6 +278,11 @@ async function main() {
       key: JSON.parse(localStorage.getItem('pe_big_unit_design_v1') || '{}'),
       list: JSON.parse(localStorage.getItem('pe_offline_resources_v1') || '[]'),
       cache: Store.read('pe_big_unit_design_v1', null),
+      status: document.getElementById('ud2Status')?.textContent || '',
+      localOnly: typeof Store.isLocalOnly === 'function'
+        && Store.isLocalOnly('pe_big_unit_design_v1'),
+      resourcesLocalOnly: typeof Store.isLocalOnly === 'function'
+        && Store.isLocalOnly('pe_offline_resources_v1'),
     }));
     check('保存后主键已含模块 4 完整内容', String(afterSave.key.teachingContent || '').includes(M4));
     check('保存后主键已含模块 5 完整内容',
@@ -287,7 +294,15 @@ async function main() {
     check('保存后 Store 内存缓存也是最新版',
       String(afterSave.cache?.teachingContent || '').includes(M4)
       && String(afterSave.cache?.objectives || '').includes(EDIT));
-    log('已真实点击「保存到离线资源库」；主键缓存 / 本地 / 资源库三处均为完整数据');
+    /* 🏠 架构解耦：主键只存本机、离线资源库才是唯一云端入口 */
+    check('主键已加入「仅本地」白名单', afterSave.localOnly === true);
+    check('离线资源库仍走云端同步（不在仅本地白名单里）', afterSave.resourcesLocalOnly === false);
+    check('保存成功提示为「已存入资源库并同步云端」',
+      afterSave.status.includes('已存入资源库并同步云端'), afterSave.status.slice(0, 100));
+    check('保存过程没有把主键 POST 到 /api/data',
+      !postBodies.some(body => body.includes('pe_big_unit_design_v1')),
+      `实际 POST ${postBodies.length} 次`);
+    log('已真实点击「保存到离线资源库」；主键缓存 / 本地 / 资源库三处均为完整数据，且主键零云端请求');
 
     /* ---------- ⑥ 真实点击左侧导航：体测数据 → 大单元设计 ---------- */
     await clickNav(page, 'fitness');
@@ -298,14 +313,31 @@ async function main() {
       { timeout: 25000 });
     await sleep(1200);   // 给后台 store:sync 一个真实窗口，确认它不会覆盖视图
 
-    const back = await page.evaluate(() => ({
-      m1: document.querySelector('[data-unit-path="objectives"]')?.value || '',
-      m4: document.querySelector('[data-unit-path="teachingContent"]')?.value || '',
-      m5: document.querySelector('[data-unit-path="keyDifficulties.learning"]')?.value || '',
-      title: document.querySelector('.ud2-modules-title h2')?.textContent || '',
-      key: JSON.parse(localStorage.getItem('pe_big_unit_design_v1') || '{}'),
-      pinned: typeof Store.isViewPinned === 'function' && Store.isViewPinned('pe_big_unit_design_v1'),
-    }));
+    const back = await page.evaluate(() => {
+      const diag = source => ({
+        title: String(source?.unitTitle || source?.meta?.unitTitle || '').slice(0, 40),
+        m1: String(source?.objectives || '').slice(0, 40),
+        m4: String(source?.teachingContent || '').slice(0, 40),
+        m5: String(source?.keyDifficulties?.learning || '').slice(0, 40),
+      });
+      return {
+        m1: document.querySelector('[data-unit-path="objectives"]')?.value || '',
+        m4: document.querySelector('[data-unit-path="teachingContent"]')?.value || '',
+        m5: document.querySelector('[data-unit-path="keyDifficulties.learning"]')?.value || '',
+        title: document.querySelector('.ud2-modules-title h2')?.textContent || '',
+        key: JSON.parse(localStorage.getItem('pe_big_unit_design_v1') || '{}'),
+        pinned: typeof Store.isViewPinned === 'function' && Store.isViewPinned('pe_big_unit_design_v1'),
+        hasGuard: typeof guardTabSwitchReload === 'function',
+        startReadsLocalOnly: typeof readLocalUnitDraftNow === 'function',
+        diag: {
+          localStorage: diag(JSON.parse(localStorage.getItem('pe_big_unit_design_v1') || '{}')),
+          cache: diag(Store.read('pe_big_unit_design_v1', null)),
+          unitData: typeof unitData !== 'undefined' ? diag(unitData) : 'NO_unitData',
+          stepBackup: diag((JSON.parse(localStorage.getItem('pe_big_unit_design_v1__step_backup') || '{}').data) || {}),
+        },
+      };
+    });
+    log(`切回后诊断：${JSON.stringify(back.diag)}`);
     log(`切回后标题：${back.title}`);
     log(`切回后模块 4：${back.m4.slice(0, 60)}`);
     log(`切回后模块 5：${back.m5.slice(0, 60)}`);
@@ -319,23 +351,49 @@ async function main() {
       !back.title.includes(STALE_TITLE) && !back.m1.includes(STALE_OBJ) && !back.m4.includes(STALE_OBJ));
     check('切回后 localStorage 主键仍是完整数据',
       String(back.key.teachingContent || '').includes(M4) && String(back.key.objectives || '').includes(EDIT));
-    check('切回后视图优先级锁仍锁定', back.pinned === true);
-    /* 本 E2E 以纯本地模式启动 server.js（未配置 Supabase，Store.cloudState=off）。
-       按 Store 既有的断网 / 未连接设计，writeCritical 会安静把完整数据留在本机、
-       不向不可用的云端发 POST；联网环境才真实推送 /api/data。
-       因此这里断言的是「云端写入通道确实被调用」，而不是「本地模式也有 POST」。 */
-    check('保存动作确实调用云端写入通道 Store.writeCritical（浏览器日志确认）',
-      browserConsole.some(line => line.includes('保存到离线资源库：云端写入')));
-    log(`云端写入：本地模式 cloudState=off，按设计不向云端发 POST（实际 POST ${postBodies.length} 次）；`
-      + '联网环境由 Store.writeCritical 真实推送 /api/data');
-    check('浏览器日志出现「切回页面不调用 loadUnitData()」',
-      browserConsole.some(line => line.includes('切回页面') && line.includes('不调用 loadUnitData')));
+    check('【架构解耦】该键的视图优先级锁已失效（不再需要防云端覆盖）', back.pinned === false);
+    /* 🏠 主键永不发云端请求。本 E2E 以纯本地模式启动（cloudState=off），
+       离线资源库本来也不会真的 POST；但无论哪种模式，POST 里都绝不能出现主键。 */
+    check('【架构解耦】整个流程零次「主键上云」的 POST',
+      !postBodies.some(body => body.includes('pe_big_unit_design_v1')),
+      `实际 POST ${postBodies.length} 次`);
+    check('浏览器日志确认「主键只同步本机草稿、云端由资源库负责」',
+      browserConsole.some(line => line.includes('已把资源库这份完整数据同步进本机草稿'))
+      && browserConsole.some(line => line.includes('云端由离线资源库负责')));
+    log(`架构解耦验收：主键零云端 POST（实际总 POST ${postBodies.length} 次），`
+      + '离线资源库仍是唯一云端入口');
+    check('切页保护仍在：guardTabSwitchReload + 启动直读本机草稿',
+      back.hasGuard === true && back.startReadsLocalOnly === true);
+    check('没有出现任何页面脚本异常',
+      !browserConsole.some(line => line.startsWith('[pageerror]')));
     check('浏览器日志没有出现「已从分步物理备份补回」（旧备份没被塞回）',
       !browserConsole.some(line => line.includes('已从分步物理备份补回')));
 
+    /* ---------- ⑧ 真实 F5 刷新：本机草稿必须原样恢复 ---------- */
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await readyUnitPage(page, '保存后刷新');
+    await page.waitForSelector('[data-unit-path="teachingContent"]', { timeout: 20000 });
+    await sleep(800);   // 给后台同步一个窗口，确认它不会覆盖本机草稿
+    const afterReload = await page.evaluate(() => ({
+      m1: document.querySelector('[data-unit-path="objectives"]')?.value || '',
+      m4: document.querySelector('[data-unit-path="teachingContent"]')?.value || '',
+      m5: document.querySelector('[data-unit-path="keyDifficulties.learning"]')?.value || '',
+      key: JSON.parse(localStorage.getItem('pe_big_unit_design_v1') || '{}'),
+      pinned: typeof Store.isViewPinned === 'function' && Store.isViewPinned('pe_big_unit_design_v1'),
+    }));
+    check('【核心】刷新后模块 4 内容仍在', afterReload.m4.includes(M4));
+    check('【核心】刷新后模块 5 内容仍在', afterReload.m5.includes(M5));
+    check('【核心】刷新后模块 1 的修改仍在', afterReload.m1.includes(EDIT));
+    check('刷新后 localStorage 主键仍是完整数据',
+      String(afterReload.key.teachingContent || '').includes(M4)
+      && String(afterReload.key.objectives || '').includes(EDIT));
+    check('刷新后依然不需要视图优先级锁', afterReload.pinned === false);
+    log('真实 F5 刷新验收通过：本机草稿完整恢复，视图锁已不再需要');
+
     await page.screenshot({ path: SHOT, fullPage: false });
     log(`截图已保存：${SHOT}`);
-    log('🎉 E2E 全部断言通过：切走再切回，模块 4/5 完整、模块 1 修改保留，旧半截数据没有诈尸');
+    log('🎉 E2E 全部断言通过：切走再切回 + F5 刷新，模块 4/5 完整、模块 1 修改保留，'
+      + '旧半截数据没有诈尸；主键零云端请求，离线资源库是唯一云端入口');
 
     return { ok: true };
   } finally {

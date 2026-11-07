@@ -703,6 +703,191 @@ await test('㉛ pullCloudOnly()：只拉不推（零 POST），且无视未确�
   equal(posts.length, 0, '纯拉取：绝对不许发出任何 POST');
 });
 
+/* ============ 🏠 架构解耦：pe_big_unit_design_v1 是「仅本机草稿」 ============ */
+const UNIT_KEY_LOCAL = 'pe_big_unit_design_v1';
+const RESOURCES_KEY = 'pe_offline_resources_v1';
+const LOCAL_DRAFT = {
+  meta: { unitTitle: '篮球大单元' }, objectives: '运动能力：能完成急停急起变向运球。',
+  lessons: [{ no: 1, objectives: '能说出屈膝含胸的发力顺序。', content: '', method: '' }],
+};
+
+function postsAbout(env, key) {
+  return env.calls.filter(call => call.method === 'POST'
+    && (call.body?.key === key
+      || (call.body?.values && Object.prototype.hasOwnProperty.call(call.body.values, key))
+      || JSON.stringify(call.body || {}).includes(key)));
+}
+
+await test('㉜ 仅本地白名单：write() 只落 localStorage，一个 POST 都不发', async () => {
+  const env = createStore({
+    seed: { [UNIT_KEY_LOCAL]: LOCAL_DRAFT },
+    cloud: () => ({ mode: 'supabase', data: {} }),
+  });
+  await env.Store.start();
+  await env.pump();
+  const before = env.calls.length;
+  env.Store.write(UNIT_KEY_LOCAL, { ...LOCAL_DRAFT, objectives: '改过的本机草稿' });
+  await env.pump();
+  equal(postsAbout(env, UNIT_KEY_LOCAL).length, 0, '主键绝不产生任何云端写请求');
+  equal(env.calls.slice(before).filter(call => call.method === 'POST').length, 0, '连其它 POST 都不该因它触发');
+  equal(env.Store.read(UNIT_KEY_LOCAL).objectives, '改过的本机草稿', '内存缓存已更新');
+  equal(JSON.parse(env.storage.getItem(UNIT_KEY_LOCAL)).objectives, '改过的本机草稿', 'localStorage 已落盘');
+  equal(env.Store.isLocalOnly(UNIT_KEY_LOCAL), true, '白名单认得这个键');
+  equal(env.Store.isLocalOnly(RESOURCES_KEY), false, '离线资源库必须仍走云端');
+});
+
+await test('㉝ _applyCloud 碰到云端旧草稿：不覆盖本地、也不反推云端', async () => {
+  const env = createStore({
+    seed: { [UNIT_KEY_LOCAL]: LOCAL_DRAFT },
+    // 模拟旧服务端 / 历史脏数据仍把这个键带回来
+    cloud: () => ({ mode: 'supabase', data: { [UNIT_KEY_LOCAL]: { meta: {}, objectives: '' } } }),
+  });
+  await env.Store.start();
+  await env.pump();
+  equal(env.Store.read(UNIT_KEY_LOCAL).objectives, LOCAL_DRAFT.objectives, '本机草稿原封不动');
+  equal(postsAbout(env, UNIT_KEY_LOCAL).length, 0, '不会把本地草稿反推回云端');
+  equal(env.Store.isViewPinned(UNIT_KEY_LOCAL), false, '该键的视图优先级锁已失效');
+});
+
+await test('㉞ writeCritical / clearKey 遇到该键也不发任何云端请求', async () => {
+  const env = createStore({
+    seed: { [UNIT_KEY_LOCAL]: LOCAL_DRAFT },
+    cloud: () => ({ mode: 'supabase', data: {} }),
+  });
+  await env.Store.start();
+  await env.pump();
+  const before = env.calls.length;
+  const critical = await env.Store.writeCritical(UNIT_KEY_LOCAL, { ...LOCAL_DRAFT, assessment: '达标' });
+  equal(critical.ok, true, '返回保存成功（指本机保存成功）');
+  equal(critical.localOnly, true, '明确标记只存本机');
+  await env.pump();
+  equal(postsAbout(env, UNIT_KEY_LOCAL).length, 0, 'writeCritical 不发 POST');
+  const cleared = await env.Store.clearKey(UNIT_KEY_LOCAL);
+  equal(cleared.cloudCleared, false, '清空不涉及云端');
+  equal(cleared.cloudSkipped, true, '明确标记云端跳过');
+  await env.pump();
+  equal(env.calls.slice(before).filter(call => call.method === 'POST').length, 0, '整段零 POST');
+  equal(env.storage.getItem(UNIT_KEY_LOCAL), null, '本机主键已清掉');
+});
+
+await test('㉟ 启动不等云端：GET 一直挂着，本地草稿也能立刻读到', async () => {
+  const env = createStore({
+    seed: { [UNIT_KEY_LOCAL]: LOCAL_DRAFT },
+    cloud: () => null,                 // 故意让云端请求永远 pending
+  });
+  await env.Store.start();             // 有本地缓存 → 立即 _finishStart()，不等云端
+  equal(env.Store.isReady, true, '首屏已就绪，没有被云端拖住');
+  equal(env.Store.read(UNIT_KEY_LOCAL).objectives, LOCAL_DRAFT.objectives, '直接从本地读到草稿');
+});
+
+await test('㊱ hardResetAll 连本机草稿 / 分步备份 / 云端锁一起清干净', async () => {
+  const env = createStore({
+    seed: {
+      [UNIT_KEY_LOCAL]: LOCAL_DRAFT,
+      [`${UNIT_KEY_LOCAL}__step_backup`]: { savedAt: Date.now(), data: LOCAL_DRAFT },
+      [`${UNIT_KEY_LOCAL}__local_backup`]: LOCAL_DRAFT,
+      [`${LOCK_PREFIX}${UNIT_KEY_LOCAL}`]: JSON.stringify({ at: Date.now(), clear: false }),
+      'pe_store_view_pin_v1': JSON.stringify({ [UNIT_KEY_LOCAL]: { epoch: 1, at: Date.now() } }),
+    },
+    cloud: () => ({ mode: 'supabase', data: {} }),
+  });
+  await env.Store.start();
+  await env.pump();
+  env.Store.hardResetAll({ reload: false });
+  equal(env.storage.getItem(UNIT_KEY_LOCAL), null, '主键已清');
+  equal(env.storage.getItem(`${UNIT_KEY_LOCAL}__step_backup`), null, '分步备份已清');
+  equal(env.storage.getItem(`${UNIT_KEY_LOCAL}__local_backup`), null, '镜像备份已清');
+  equal(env.storage.getItem('pe_store_view_pin_v1'), null, '旧视图锁摘要已清');
+  equal(env.Store.read(UNIT_KEY_LOCAL, null), null, '读出来是干净的空值');
+});
+
+await test('㊲ 离线资源库仍是唯一云端入口：写它会正常 POST', async () => {
+  const env = createStore({
+    seed: {},
+    cloud: () => ({ mode: 'supabase', data: {} }),
+  });
+  await env.Store.start();
+  await env.pump();
+  const before = env.calls.length;
+  env.Store.write(RESOURCES_KEY, [{ id: 'ur1', content: '篮球大单元', modules_json: LOCAL_DRAFT }]);
+  await env.pump();
+  const posts = env.calls.slice(before).filter(call => call.method === 'POST');
+  assert(posts.length > 0, '离线资源库必须照常推云端');
+  assert(JSON.stringify(posts[0].body || {}).includes(RESOURCES_KEY), 'POST 里带的是资源库键');
+  equal(env.Store.isLocalOnly(RESOURCES_KEY), false, '资源库不在仅本地白名单里');
+});
+
+/* ============ 🗑️ pe_students 彻底退役：不再拉、不再存、不再推 ============ */
+const RETIRED_STUDENTS_KEY = 'pe_students';
+
+await test('㊳ 启动即清掉 pe_students 全套本地残留；云端就算下发也不落本地、不反推', async () => {
+  const legacy = Array.from({ length: 300 }, (_, i) => ({ id: `S${i}`, name: `学生${i}` }));
+  const env = createStore({
+    seed: {
+      [MEET_KEY]: makeMeetData(2),
+      [RETIRED_STUDENTS_KEY]: legacy,
+      [`${RETIRED_STUDENTS_KEY}__local_backup`]: legacy,
+      [`${RETIRED_STUDENTS_KEY}__step_backup`]: legacy,
+      [`${LOCK_PREFIX}${RETIRED_STUDENTS_KEY}`]: JSON.stringify({ at: Date.now(), critical: true }),
+      [`pe_sports_meet_backup_v1::${RETIRED_STUDENTS_KEY}`]: legacy,
+      'pe_store_view_pin_v1': JSON.stringify({
+        [RETIRED_STUDENTS_KEY]: { epoch: 1, at: Date.now() },
+        [MEET_KEY]: { epoch: 2, at: Date.now() },
+      }),
+    },
+    // 老后端仍把废弃学生数据下发：前端必须完全无视
+    cloud: () => ({ mode: 'supabase', data: { [RETIRED_STUDENTS_KEY]: legacy, [MEET_KEY]: makeMeetData(2) } }),
+  });
+  await env.Store.start();
+  await env.pump();
+
+  equal(env.Store.isRetiredKey(RETIRED_STUDENTS_KEY), true, '退役名单认得它');
+  equal(env.Store.isLocalOnly(RETIRED_STUDENTS_KEY), false, '它不是「仅本机草稿」—— 是完全不存在');
+  assert(!env.window.CLOUD_KEYS.includes(RETIRED_STUDENTS_KEY), 'CLOUD_KEYS 里绝不能有它');
+  assert(env.window.RETIRED_LOCAL_KEYS.includes(RETIRED_STUDENTS_KEY), '退役名单要暴露给自检');
+  [
+    RETIRED_STUDENTS_KEY,
+    `${RETIRED_STUDENTS_KEY}__local_backup`,
+    `${RETIRED_STUDENTS_KEY}__step_backup`,
+    `${LOCK_PREFIX}${RETIRED_STUDENTS_KEY}`,
+    `pe_sports_meet_backup_v1::${RETIRED_STUDENTS_KEY}`,
+  ].forEach(key => equal(env.storage.getItem(key), null, `${key} 已从 localStorage 释放`));
+  const pins = JSON.parse(env.storage.getItem('pe_store_view_pin_v1') || '{}');
+  equal(pins[RETIRED_STUDENTS_KEY], undefined, '视图锁摘要里的退役键条目被抹掉');
+  assert(pins[MEET_KEY], '其它键的视图锁摘要不受影响');
+  equal(env.Store.read(RETIRED_STUDENTS_KEY, []).length, 0, '云端下发的废数据没有落到本地');
+  equal(env.calls.filter(call => call.method === 'POST'
+    && JSON.stringify(call.body || {}).includes(RETIRED_STUDENTS_KEY)).length, 0,
+  '没有任何一次 POST 把它推回云端');
+  equal(env.Store.read(MEET_KEY).athletes.length, 2, '正常业务数据照常可用');
+});
+
+await test('㊴ 退役键所有写入通道零请求（write / writeCritical / _persist / clearKey）', async () => {
+  const env = createStore({
+    seed: { [MEET_KEY]: makeMeetData(2) },
+    cloud: () => ({ mode: 'supabase', data: { [MEET_KEY]: makeMeetData(2) } }),
+  });
+  await env.Store.start();
+  await env.pump();
+  const before = env.calls.length;
+
+  env.Store.write(RETIRED_STUDENTS_KEY, [{ id: 'S9' }]);
+  const critical = await env.Store.writeCritical(RETIRED_STUDENTS_KEY, [{ id: 'S8' }]);
+  const persisted = await env.Store._persist(RETIRED_STUDENTS_KEY, [{ id: 'S7' }]);
+  const clearPushed = await env.Store._persistClear(RETIRED_STUDENTS_KEY);
+  const cleared = await env.Store.clearKey(RETIRED_STUDENTS_KEY);
+  await env.pump();
+
+  equal(critical.retired, true, 'writeCritical 明确回 retired');
+  equal(critical.ok, false, '不能谎报云端保存成功');
+  equal(persisted, false, '_persist 直接短路');
+  equal(clearPushed, false, '_persistClear 直接短路');
+  equal(cleared.retired, true, 'clearKey 明确回 retired');
+  equal(cleared.cloudCleared, false, '没有云端行可清');
+  equal(env.storage.getItem(RETIRED_STUDENTS_KEY), null, '本地不许复活');
+  equal(env.calls.slice(before).filter(call => call.method === 'POST').length, 0, '整段零 POST');
+});
+
 const failed = results.filter(result => !result.ok);
 console.log(`\n${failed.length ? '❌' : '✅'} ${results.length - failed.length}/${results.length} 通过\n`);
 if (failed.length) process.exitCode = 1;

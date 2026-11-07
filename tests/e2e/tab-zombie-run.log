@@ -1,100 +1,89 @@
-[E2E 17:08:11.265] 已临时停用 .env.local（server.js 走本地模式；结束自动恢复）
-[E2E 17:08:11.292] [server:err] ◇ injected env (0) from .env
-[E2E 17:08:11.293] [server:err] ◇ injected env (0) from .env
+[E2E 02:46:19.690] 已临时停用 .env.local（server.js 走本地模式；结束自动恢复）
+[E2E 02:46:19.713] [server:err] ◇ injected env (0) from .env
+[E2E 02:46:19.713] [server:err] ◇ injected env (0) from .env
 ◇ injected env (0) from .env.local
-[E2E 17:08:11.315] [server] 体育教师工作台运行中: http://localhost:5199
-[E2E 17:08:11.315] [server] 数据存储: localStorage（未检测到 SUPABASE_URL / SUPABASE_ANON_KEY）
-[E2E 17:08:11.527] server.js 已启动：http://127.0.0.1:5199（PID 3619）
-[E2E 17:08:11.916] 真实 Chrome 已启动：Chrome/156.0.8078.80
-[E2E 17:08:12.043] 首次打开：unit-design.html 已就绪
-[E2E 17:08:12.044] 已预置：离线资源库 1 条【模块 1-6 完整】资源；主键 pe_big_unit_design_v1 = 旧半截数据
-[E2E 17:08:12.082] [browser:warn] [大单元] ⚠️ 试图在切换Tab时重载数据，已阻止。（pageshow → 切回页面）当前视图「未命名」非空；不调用 loadUnitData()，也不重新赋值 unitData。
-[E2E 17:08:12.089] 预置后重载：unit-design.html 已就绪
-[E2E 17:08:12.089] ✅ 预置生效：主键确实是旧半截数据
-[E2E 17:08:12.090] ✅ 预置生效：资源库里的资源含模块 4/5
-[E2E 17:08:12.652] 载入按钮诊断：{"html":"<button class=\"btn btn-primary\" type=\"button\" onclick=\"OfflineResources.pick('e2e-full-unit')\" data-admin-checked=\"admin\">载入到设计页</button>","rect":{"x":479,"y":599,"w":116,"h":36},"topElement":"<button class=\"btn btn-primary\" type=\"button\" onclick=\"OfflineResources.pick('e2e-full-unit')\" data-admin-checked=\"admin","disabled":false,"pickerSet":true}
-[E2E 17:08:12.652] 已真实点击「📦 从离线资源库加载」，选择弹窗已打开
-[E2E 17:08:13.262] 载入诊断：{"listLen":1,"hasGet":true,"modalCount":0,"unitTitle":"E2E 完整大单元（模块 1-6 齐全）","m4":"模块4完整内容-E2E-知识技术战术体能比赛活动","status":"✓ 已从离线资源库载入「E2E 完整大单元（模块 1-6 齐全）」（未调用 AI）。仅载入到本机视图，已锁定为最高优先级（后台旧数据不会覆盖）；确认无误后手动保存即可。","modulesHTML":"<div class=\"ud2-modules-head\">\n      <div class=\"ud2-modules-title\">\n        <h2>E2E 完整大单元（模块 1-6 齐全）</h2>\n        <p>未记录选题\n          　<span class=\"ud2-bound-ta"}
-[E2E 17:08:13.263] ✅ 载入完整资源：模块 4 有内容
-[E2E 17:08:13.263] ✅ 载入完整资源：模块 5 有内容
-[E2E 17:08:13.263] 已真实点击「载入到设计页」，模块 4 / 5 均已渲染
-[E2E 17:08:13.288] ✅ 模块 1 真实键入修改 — 模块1修改标记-E2E-老师改过的教学目标
-[E2E 17:08:13.288] 已在模块 1 真实键入：模块1修改标记-E2E-老师改过的教学目标
-[E2E 17:08:13.300] [browser:log] [大单元] 🔒 当前视图已有数据，且视图优先级锁仍锁定：忽略 store:sync 重绘，不重新 loadUnitData()、不重新赋值 unitData
-[E2E 17:08:13.300] [browser:log] [大单元] ✅ 保存到离线资源库：已强制同步 pe_big_unit_design_v1（Store 内存缓存 + localStorage 主键 + 云端写入 + 分步备份），与离线资源库数据绝对一致
-[E2E 17:08:13.301] [browser:log] [大单元] ✅ 保存到离线资源库：云端写入未完成（完整数据已留本机）
-[E2E 17:08:13.304] ✅ 保存后主键已含模块 4 完整内容
-[E2E 17:08:13.304] ✅ 保存后主键已含模块 5 完整内容
-[E2E 17:08:13.304] ✅ 保存后主键已含模块 1 修改
-[E2E 17:08:13.304] ✅ 保存后主键与资源库数据绝对一致
-[E2E 17:08:13.304] ✅ 保存后 Store 内存缓存也是最新版
-[E2E 17:08:13.304] 已真实点击「保存到离线资源库」；主键缓存 / 本地 / 资源库三处均为完整数据
-[E2E 17:08:14.179] 已真实点击左侧导航 → fitness（当前 URL：http://127.0.0.1:5199/fitness.html）
-[E2E 17:08:14.184] 已在体测数据页停留（页面已完整重建，页内 unitData 归零）
-[E2E 17:08:14.215] [browser:log] [大单元] 🔒 切回页面：直接从受保护主键恢复完整视图，不调用 loadUnitData()；视图优先级锁保持锁定
-[E2E 17:08:14.220] [browser:warn] [大单元] ⚠️ 试图在切换Tab时重载数据，已阻止。（pageshow → 切回页面）当前视图「E2E 完整大单元（模块 1-6 齐全）」非空，且视图优先级锁仍锁定；不调用 loadUnitData()，也不重新赋值 unitData。
-[E2E 17:08:14.220] 已真实点击左侧导航 → unit-design（当前 URL：http://127.0.0.1:5199/unit-design.html）
-[E2E 17:08:15.424] 切回后标题：E2E 完整大单元（模块 1-6 齐全）
-[E2E 17:08:15.425] 切回后模块 4：模块4完整内容-E2E-知识技术战术体能比赛活动
-[E2E 17:08:15.425] 切回后模块 5：模块5完整内容-E2E-学习重难点
-[E2E 17:08:15.425] 切回后模块 1：模块1修改标记-E2E-老师改过的教学目标
-[E2E 17:08:15.425] ✅ 【核心】切回后模块 4 内容仍在
-[E2E 17:08:15.425] ✅ 【核心】切回后模块 5 内容仍在
-[E2E 17:08:15.425] ✅ 【核心】切回后模块 1 的修改仍保留
-[E2E 17:08:15.425] ✅ 【核心】视图没有变回旧半截数据
-[E2E 17:08:15.425] ✅ 切回后 localStorage 主键仍是完整数据
-[E2E 17:08:15.425] ✅ 切回后视图优先级锁仍锁定
-[E2E 17:08:15.425] ✅ 保存动作确实调用云端写入通道 Store.writeCritical（浏览器日志确认）
-[E2E 17:08:15.425] 云端写入：本地模式 cloudState=off，按设计不向云端发 POST（实际 POST 0 次）；联网环境由 Store.writeCritical 真实推送 /api/data
-[E2E 17:08:15.425] ✅ 浏览器日志出现「切回页面不调用 loadUnitData()」
-[E2E 17:08:15.425] ✅ 浏览器日志没有出现「已从分步物理备份补回」（旧备份没被塞回）
-[E2E 17:08:15.453] 截图已保存：/Users/dengyinhong/Desktop/Personal/01_进行中/体育教师工作台/tests/e2e/tab-zombie-pass.png
-[E2E 17:08:15.453] 🎉 E2E 全部断言通过：切走再切回，模块 4/5 完整、模块 1 修改保留，旧半截数据没有诈尸
-[E2E 17:08:15.522] server.js 已关闭
-[E2E 17:08:15.522] .env.local 已原样恢复
+[E2E 02:46:19.732] [server] 体育教师工作台运行中: http://localhost:5199
+[E2E 02:46:19.732] [server] 数据存储: localStorage（未检测到 SUPABASE_URL / SUPABASE_ANON_KEY）
+[E2E 02:46:19.957] server.js 已启动：http://127.0.0.1:5199（PID 17072）
+[E2E 02:46:20.373] 真实 Chrome 已启动：Chrome/156.0.8078.80
+[E2E 02:46:20.462] 首次打开：unit-design.html 已就绪
+[E2E 02:46:20.465] 已预置：离线资源库 1 条【模块 1-6 完整】资源；主键 pe_big_unit_design_v1 = 旧半截数据
+[E2E 02:46:20.498] [browser:warn] [大单元] ⚠️ 试图在切换Tab时重载数据，已阻止。（pageshow → 切回页面）当前视图「旧半截数据-E2E」非空；本机草稿已自动保存，不调用 loadUnitData()、不重新赋值 unitData。
+[E2E 02:46:20.506] 预置后重载：unit-design.html 已就绪
+[E2E 02:46:20.508] ✅ 预置生效：主键确实是旧半截数据
+[E2E 02:46:20.508] ✅ 预置生效：资源库里的资源含模块 4/5
+[E2E 02:46:21.039] 载入按钮诊断：{"html":"<button class=\"btn btn-primary\" type=\"button\" onclick=\"OfflineResources.pick('e2e-full-unit')\" data-admin-checked=\"admin\">载入到设计页</button>","rect":{"x":479,"y":599,"w":116,"h":36},"topElement":"<button class=\"btn btn-primary\" type=\"button\" onclick=\"OfflineResources.pick('e2e-full-unit')\" data-admin-checked=\"admin","disabled":false,"pickerSet":true}
+[E2E 02:46:21.040] 已真实点击「📦 从离线资源库加载」，选择弹窗已打开
+[E2E 02:46:21.675] 载入诊断：{"listLen":1,"hasGet":true,"modalCount":0,"unitTitle":"E2E 完整大单元（模块 1-6 齐全）","m4":"模块4完整内容-E2E-知识技术战术体能比赛活动","status":"✓ 已从离线资源库载入「E2E 完整大单元（模块 1-6 齐全）」（未调用 AI）。✅ 草稿已自动保存至本机浏览器；确认无误后可点【保存到离线资源库】同步云端。","modulesHTML":"<div class=\"ud2-modules-head\">\n      <div class=\"ud2-modules-title\">\n        <h2>E2E 完整大单元（模块 1-6 齐全）</h2>\n        <p>未记录选题\n          　<span class=\"ud2-bound-ta"}
+[E2E 02:46:21.679] ✅ 载入完整资源：模块 4 有内容
+[E2E 02:46:21.679] ✅ 载入完整资源：模块 5 有内容
+[E2E 02:46:21.679] 已真实点击「载入到设计页」，模块 4 / 5 均已渲染
+[E2E 02:46:21.716] ✅ 模块 1 真实键入修改 — 模块1修改标记-E2E-老师改过的教学目标
+[E2E 02:46:21.716] 已在模块 1 真实键入：模块1修改标记-E2E-老师改过的教学目标
+[E2E 02:46:21.726] [browser:log] [大单元] ✅ 保存到离线资源库：已把资源库这份完整数据同步进本机草稿（Store 内存缓存 + localStorage 主键 + 分步备份）；云端由离线资源库负责
+[E2E 02:46:21.732] ✅ 保存后主键已含模块 4 完整内容
+[E2E 02:46:21.732] ✅ 保存后主键已含模块 5 完整内容
+[E2E 02:46:21.732] ✅ 保存后主键已含模块 1 修改
+[E2E 02:46:21.732] ✅ 保存后主键与资源库数据绝对一致
+[E2E 02:46:21.732] ✅ 保存后 Store 内存缓存也是最新版
+[E2E 02:46:21.732] ✅ 主键已加入「仅本地」白名单
+[E2E 02:46:21.732] ✅ 离线资源库仍走云端同步（不在仅本地白名单里）
+[E2E 02:46:21.732] ✅ 保存成功提示为「已存入资源库并同步云端」 — ✅ 已存入资源库并同步云端：e2e-full-unit。这份资源可在其它设备打开；本机草稿也已同步更新。
+[E2E 02:46:21.732] ✅ 保存过程没有把主键 POST 到 /api/data — 实际 POST 0 次
+[E2E 02:46:21.732] 已真实点击「保存到离线资源库」；主键缓存 / 本地 / 资源库三处均为完整数据，且主键零云端请求
+[E2E 02:46:22.860] 已真实点击左侧导航 → fitness（当前 URL：http://127.0.0.1:5199/fitness.html）
+[E2E 02:46:22.864] 已在体测数据页停留（页面已完整重建，页内 unitData 归零）
+[E2E 02:46:22.890] 已真实点击左侧导航 → unit-design（当前 URL：http://127.0.0.1:5199/unit-design.html）
+[E2E 02:46:22.895] [browser:warn] [大单元] ⚠️ 试图在切换Tab时重载数据，已阻止。（pageshow → 切回页面）当前视图「E2E 完整大单元（模块 1-6 齐全）」非空；本机草稿已自动保存，不调用 loadUnitData()、不重新赋值 unitData。
+[E2E 02:46:24.102] 切回后诊断：{"localStorage":{"title":"E2E 完整大单元（模块 1-6 齐全）","m1":"模块1修改标记-E2E-老师改过的教学目标","m4":"模块4完整内容-E2E-知识技术战术体能比赛活动","m5":"模块5完整内容-E2E-学习重难点"},"cache":{"title":"E2E 完整大单元（模块 1-6 齐全）","m1":"模块1修改标记-E2E-老师改过的教学目标","m4":"模块4完整内容-E2E-知识技术战术体能比赛活动","m5":"模块5完整内容-E2E-学习重难点"},"unitData":{"title":"E2E 完整大单元（模块 1-6 齐全）","m1":"模块1修改标记-E2E-老师改过的教学目标","m4":"模块4完整内容-E2E-知识技术战术体能比赛活动","m5":"模块5完整内容-E2E-学习重难点"},"stepBackup":{"title":"E2E 完整大单元（模块 1-6 齐全）","m1":"模块1修改标记-E2E-老师改过的教学目标","m4":"模块4完整内容-E2E-知识技术战术体能比赛活动","m5":"模块5完整内容-E2E-学习重难点"}}
+[E2E 02:46:24.102] 切回后标题：E2E 完整大单元（模块 1-6 齐全）
+[E2E 02:46:24.102] 切回后模块 4：模块4完整内容-E2E-知识技术战术体能比赛活动
+[E2E 02:46:24.102] 切回后模块 5：模块5完整内容-E2E-学习重难点
+[E2E 02:46:24.102] 切回后模块 1：模块1修改标记-E2E-老师改过的教学目标
+[E2E 02:46:24.102] ✅ 【核心】切回后模块 4 内容仍在
+[E2E 02:46:24.102] ✅ 【核心】切回后模块 5 内容仍在
+[E2E 02:46:24.102] ✅ 【核心】切回后模块 1 的修改仍保留
+[E2E 02:46:24.102] ✅ 【核心】视图没有变回旧半截数据
+[E2E 02:46:24.102] ✅ 切回后 localStorage 主键仍是完整数据
+[E2E 02:46:24.103] ✅ 【架构解耦】该键的视图优先级锁已失效（不再需要防云端覆盖）
+[E2E 02:46:24.103] ✅ 【架构解耦】整个流程零次「主键上云」的 POST — 实际 POST 0 次
+[E2E 02:46:24.103] ✅ 浏览器日志确认「主键只同步本机草稿、云端由资源库负责」
+[E2E 02:46:24.103] 架构解耦验收：主键零云端 POST（实际总 POST 0 次），离线资源库仍是唯一云端入口
+[E2E 02:46:24.103] ✅ 切页保护仍在：guardTabSwitchReload + 启动直读本机草稿
+[E2E 02:46:24.103] ✅ 没有出现任何页面脚本异常
+[E2E 02:46:24.103] ✅ 浏览器日志没有出现「已从分步物理备份补回」（旧备份没被塞回）
+[E2E 02:46:24.135] [browser:warn] [大单元] ⚠️ 试图在切换Tab时重载数据，已阻止。（pageshow → 切回页面）当前视图「E2E 完整大单元（模块 1-6 齐全）」非空；本机草稿已自动保存，不调用 loadUnitData()、不重新赋值 unitData。
+[E2E 02:46:24.142] 保存后刷新：unit-design.html 已就绪
+[E2E 02:46:24.949] ✅ 【核心】刷新后模块 4 内容仍在
+[E2E 02:46:24.949] ✅ 【核心】刷新后模块 5 内容仍在
+[E2E 02:46:24.949] ✅ 【核心】刷新后模块 1 的修改仍在
+[E2E 02:46:24.949] ✅ 刷新后 localStorage 主键仍是完整数据
+[E2E 02:46:24.949] ✅ 刷新后依然不需要视图优先级锁
+[E2E 02:46:24.949] 真实 F5 刷新验收通过：本机草稿完整恢复，视图锁已不再需要
+[E2E 02:46:24.996] 截图已保存：/Users/dengyinhong/Desktop/Personal/01_进行中/体育教师工作台/tests/e2e/tab-zombie-pass.png
+[E2E 02:46:24.996] 🎉 E2E 全部断言通过：切走再切回 + F5 刷新，模块 4/5 完整、模块 1 修改保留，旧半截数据没有诈尸；主键零云端请求，离线资源库是唯一云端入口
+[E2E 02:46:25.073] server.js 已关闭
+[E2E 02:46:25.073] .env.local 已原样恢复
 
 ----- 浏览器完整 console -----
-[browser:log] [Store] 载入 store.js v9-终极清理 hardResetAll + 视图优先级锁 2026-11-06
+[browser:log] [Store] 载入 store.js v11-pe_students 彻底退役 / 启动自动清理本地废弃键 2026-11-07
 [browser:error] Failed to load resource: the server responded with a status of 404 (Not Found)
-[browser:log] [Store] 载入 store.js v9-终极清理 hardResetAll + 视图优先级锁 2026-11-06
-[browser:warn] [大单元] ⚠️ 试图在切换Tab时重载数据，已阻止。（pageshow → 切回页面）当前视图「未命名」非空；不调用 loadUnitData()，也不重新赋值 unitData。
+[browser:warn] [大单元] 首屏本机草稿渲染失败，等 Store.onReady 再试 ReferenceError: Cannot access 'unitMatrixFrame' before initialization
+[browser:log] [Store] 载入 store.js v11-pe_students 彻底退役 / 启动自动清理本地废弃键 2026-11-07
+[browser:warn] [大单元] ⚠️ 试图在切换Tab时重载数据，已阻止。（pageshow → 切回页面）当前视图「旧半截数据-E2E」非空；本机草稿已自动保存，不调用 loadUnitData()、不重新赋值 unitData。
 [browser:log] [Store] 🤫 静默本地模式（加载离线资源）：取消 0 个在飞 GET，10 秒内不发云端请求、不报超时，数据全部走本地缓存
 [browser:log] [Store] 🌐 加载离线资源：已延期隔离 0 条历史待写数据（数据与保护锁完整保留，不再自动 POST；网络恢复 / online 事件后自动回到队列）
 [browser:log] [Store] ⏸ 后台上传重试已暂停（加载离线资源）：停掉 0 个续传定时器，待写队列 0 条原样保留
-[browser:log] [Store] 🔒 视图优先级锁 #1（从离线资源库加载）：pe_big_unit_design_v1 以刚载入的数据为最高优先级，已打上 userModified:true（刷新后备份与云端都不许覆盖）；解除用 Store.clearViewPins()
-[browser:log] [Store] ▶ 后台上传重试恢复（加载离线资源），仍被「后台上传已暂停（静默本地模式：加载离线资源、视图优先级锁：等待用户确认）」挡住
-[browser:log] [大单元] 📤 即将推云端 pe_big_unit_design_v1：4.7 KB，7/10 个模块有内容，缺：structure_nodes、main_projects、lessons
-[browser:log] [大单元] 📤 即将推云端 pe_big_unit_design_v1：4.7 KB，7/10 个模块有内容，缺：structure_nodes、main_projects、lessons
-[browser:log] [大单元] 📤 即将推云端 pe_big_unit_design_v1：4.7 KB，7/10 个模块有内容，缺：structure_nodes、main_projects、lessons
-[browser:log] [大单元] 📤 即将推云端 pe_big_unit_design_v1：4.7 KB，7/10 个模块有内容，缺：structure_nodes、main_projects、lessons
-[browser:log] [大单元] 📤 即将推云端 pe_big_unit_design_v1：4.7 KB，7/10 个模块有内容，缺：structure_nodes、main_projects、lessons
-[browser:log] [大单元] 📤 即将推云端 pe_big_unit_design_v1：4.7 KB，7/10 个模块有内容，缺：structure_nodes、main_projects、lessons
-[browser:log] [大单元] 📤 即将推云端 pe_big_unit_design_v1：4.7 KB，7/10 个模块有内容，缺：structure_nodes、main_projects、lessons
-[browser:log] [大单元] 📤 即将推云端 pe_big_unit_design_v1：4.7 KB，7/10 个模块有内容，缺：structure_nodes、main_projects、lessons
-[browser:log] [大单元] 📤 即将推云端 pe_big_unit_design_v1：4.7 KB，7/10 个模块有内容，缺：structure_nodes、main_projects、lessons
-[browser:log] [大单元] 📤 即将推云端 pe_big_unit_design_v1：4.7 KB，7/10 个模块有内容，缺：structure_nodes、main_projects、lessons
-[browser:log] [大单元] 📤 即将推云端 pe_big_unit_design_v1：4.7 KB，7/10 个模块有内容，缺：structure_nodes、main_projects、lessons
-[browser:log] [大单元] 📤 即将推云端 pe_big_unit_design_v1：4.7 KB，7/10 个模块有内容，缺：structure_nodes、main_projects、lessons
-[browser:log] [大单元] 📤 即将推云端 pe_big_unit_design_v1：4.7 KB，7/10 个模块有内容，缺：structure_nodes、main_projects、lessons
-[browser:log] [大单元] 📤 即将推云端 pe_big_unit_design_v1：4.7 KB，7/10 个模块有内容，缺：structure_nodes、main_projects、lessons
-[browser:log] [大单元] 📤 即将推云端 pe_big_unit_design_v1：4.7 KB，7/10 个模块有内容，缺：structure_nodes、main_projects、lessons
-[browser:log] [大单元] 📤 即将推云端 pe_big_unit_design_v1：4.7 KB，7/10 个模块有内容，缺：structure_nodes、main_projects、lessons
-[browser:log] [大单元] 📤 即将推云端 pe_big_unit_design_v1：4.7 KB，7/10 个模块有内容，缺：structure_nodes、main_projects、lessons
-[browser:log] [大单元] 📤 即将推云端 pe_big_unit_design_v1：4.7 KB，7/10 个模块有内容，缺：structure_nodes、main_projects、lessons
-[browser:log] [大单元] 📤 即将推云端 pe_big_unit_design_v1：4.7 KB，7/10 个模块有内容，缺：structure_nodes、main_projects、lessons
-[browser:log] [大单元] 📤 即将推云端 pe_big_unit_design_v1：4.7 KB，7/10 个模块有内容，缺：structure_nodes、main_projects、lessons
-[browser:log] [大单元] 📤 即将推云端 pe_big_unit_design_v1：4.7 KB，7/10 个模块有内容，缺：structure_nodes、main_projects、lessons
+[browser:log] [Store] ▶ 后台上传重试恢复（加载离线资源），仍被「后台上传已暂停（静默本地模式：加载离线资源）」挡住
 [browser:log] [大单元] 📦 保存前自检：7/10 个模块有内容，缺：structure_nodes、main_projects、lessons
 [browser:log] [大单元] Payload 大小: 0.9 KB （裁剪前 4.8 KB，阈值 4MB）
 [browser:log] [离线资源库] Payload 大小: 1.1 KB （裁剪前 5.0 KB，共 1 条资源）
 [browser:log] [大单元] 📦 保存到离线资源库 → 主键 payload 4.8 KB，7/10 个模块有内容（缺：structure_nodes、main_projects、lessons）
-[browser:error] [Store] 重要数据 pe_big_unit_design_v1 未能写入云端：云端存储未连接（服务端未配置 Supabase，或网络不可用）；已完整保留在本地
-[browser:log] [大单元] 🔒 当前视图已有数据，且视图优先级锁仍锁定：忽略 store:sync 重绘，不重新 loadUnitData()、不重新赋值 unitData
-[browser:log] [大单元] ✅ 保存到离线资源库：已强制同步 pe_big_unit_design_v1（Store 内存缓存 + localStorage 主键 + 云端写入 + 分步备份），与离线资源库数据绝对一致
-[browser:log] [大单元] ✅ 保存到离线资源库：云端写入未完成（完整数据已留本机）
-[browser:log] [Store] 载入 store.js v9-终极清理 hardResetAll + 视图优先级锁 2026-11-06
-[browser:log] [Store] 🔒 刷新后恢复 1 个视图优先级锁：优先使用本机刚载入的数据，历史保护锁已作废，后台旧队列不参与补推
-[browser:log] [Store] 载入 store.js v9-终极清理 hardResetAll + 视图优先级锁 2026-11-06
-[browser:log] [Store] 🔒 刷新后恢复 1 个视图优先级锁：优先使用本机刚载入的数据，历史保护锁已作废，后台旧队列不参与补推
-[browser:log] [大单元] 🔒 切回页面：直接从受保护主键恢复完整视图，不调用 loadUnitData()；视图优先级锁保持锁定
-[browser:warn] [大单元] ⚠️ 试图在切换Tab时重载数据，已阻止。（pageshow → 切回页面）当前视图「E2E 完整大单元（模块 1-6 齐全）」非空，且视图优先级锁仍锁定；不调用 loadUnitData()，也不重新赋值 unitData。
+[browser:log] [大单元] ✅ 保存到离线资源库：已把资源库这份完整数据同步进本机草稿（Store 内存缓存 + localStorage 主键 + 分步备份）；云端由离线资源库负责
+[browser:log] [Store] 载入 store.js v11-pe_students 彻底退役 / 启动自动清理本地废弃键 2026-11-07
+[browser:warn] [大单元] 首屏本机草稿渲染失败，等 Store.onReady 再试 ReferenceError: Cannot access 'unitMatrixFrame' before initialization
+[browser:log] [Store] 载入 store.js v11-pe_students 彻底退役 / 启动自动清理本地废弃键 2026-11-07
+[browser:warn] [大单元] ⚠️ 试图在切换Tab时重载数据，已阻止。（pageshow → 切回页面）当前视图「E2E 完整大单元（模块 1-6 齐全）」非空；本机草稿已自动保存，不调用 loadUnitData()、不重新赋值 unitData。
+[browser:warn] [大单元] 首屏本机草稿渲染失败，等 Store.onReady 再试 ReferenceError: Cannot access 'unitMatrixFrame' before initialization
+[browser:log] [Store] 载入 store.js v11-pe_students 彻底退役 / 启动自动清理本地废弃键 2026-11-07
+[browser:warn] [大单元] ⚠️ 试图在切换Tab时重载数据，已阻止。（pageshow → 切回页面）当前视图「E2E 完整大单元（模块 1-6 齐全）」非空；本机草稿已自动保存，不调用 loadUnitData()、不重新赋值 unitData。

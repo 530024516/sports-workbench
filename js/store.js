@@ -31,7 +31,9 @@
 
 // 仅需知道键名；表结构与落库方式由服务端决定
 const STORE_KEYS = [
-  'pe_students',
+  // ⛔ pe_students 已彻底退役：学生信息模块已删除，名册由体测记录派生。
+  //    它不再属于 STORE_KEYS，因此 CLOUD_KEYS 里也没有它 —— 启动不会再拉几百条废数据。
+  //    本地残留（主键 / 备份 / 锁）由 _purgeRetiredLocalKeys() 在启动时一次清光。
   'pe_fitness_records',
   'pe_attendance',
   'pe_lesson_plans',
@@ -62,9 +64,40 @@ const MEET_DATA_KEYS = [
   'sportsMeetTitle',
 ];
 
-/** 大单元设计主键 */
+/** 大单元设计主键（🏠 仅本机草稿） */
 const UNIT_DESIGN_KEY = 'pe_big_unit_design_v1';
-/** 大单元「核心模块」字段：云端少任何一个、本地却有内容 → 绝不允许覆盖 */
+
+/**
+ * 🏠 「仅本地」白名单 —— 架构解耦的总开关。
+ *
+ * pe_big_unit_design_v1 从此只是浏览器 localStorage 里的一份【草稿】：
+ *   ✋ 任何 write / _persist / _persistClear / writeCritical / clearKey 遇到它，
+ *      都只操作内存缓存 + localStorage，绝不向 /api/data 发出任何 POST；
+ *   ✋ 任何 _applyCloud / _mirrorLocal / storage 事件也绝不拿云端结果覆盖它；
+ *   ✋ 启动时直接读本地，不等云端拉这个键。
+ * ☁️ 大单元要跨设备共享，唯一入口是【离线资源库】pe_offline_resources_v1
+ *    （仍走原来的 writeCritical / 正常云端同步，一点没动）。
+ *
+ * ⚠️ 特意保留它在 STORE_KEYS 里：这样 _loadLocal() 仍会灌本地缓存、
+ *    _hardClearLocalStorage() 仍会清掉它、所有 STORE_KEYS.includes(key) 校验仍通过。
+ *    真正参与云端同步的键用下面的 CLOUD_KEYS。
+ */
+const LOCAL_ONLY_KEYS = [UNIT_DESIGN_KEY];
+const CLOUD_KEYS = STORE_KEYS.filter(key => !LOCAL_ONLY_KEYS.includes(key));
+
+/**
+ * 🗑️ 「彻底退役」名单 —— 与 LOCAL_ONLY_KEYS 的区别：
+ *   · LOCAL_ONLY_KEYS：还活着，只是【只存本机】（大单元草稿，页面要能正常读写）；
+ *   · RETIRED_LOCAL_KEYS：整个模块都删了，本地一份数据都不该留，也不许再被写回来。
+ *
+ * pe_students：学生信息模块已删除，名册改由体测记录派生（DB.getFitnessStudents()）。
+ * 老版本可能在 localStorage 里留下主键、__local_backup / __step_backup 镜像、
+ * 未确认锁、时光机分槽备份、视图锁摘要 —— 启动第一件事就是把它们全清掉，
+ * 顺带释放 localStorage 配额。云端对应的 students 表由服务端同步时整表 DELETE。
+ */
+const RETIRED_LOCAL_KEYS = ['pe_students'];
+
+/** 大单元「核心模块」字段（留作判空与兼容旧逻辑，云端防覆盖强锁已下线） */
 const UNIT_DESIGN_CORE_FIELDS = [
   'objectives', 'textbookAnalysis', 'studentAnalysis', 'teachingContent',
   'keyDifficulties', 'structure_nodes', 'main_projects', 'lessons',
@@ -81,7 +114,7 @@ const UNIT_GENERATING_TTL_MS = 60 * 60 * 1000;
  *    localStorage，表现就是"刷新一下主键立刻变 0 条"，日志还会打"本次无差异"。
  *    如果你的控制台里看不到下面这行，说明浏览器还在用缓存里的旧 store.js —— 先硬刷（Cmd+Shift+R）。
  */
-const STORE_BUILD = 'v9-终极清理 hardResetAll + 视图优先级锁 2026-11-06';
+const STORE_BUILD = 'v11-pe_students 彻底退役 / 启动自动清理本地废弃键 2026-11-07';
 /**
  * 「静默本地模式」持续时间：载入离线资源等纯本地操作期间，
  * 不发 GET、不重连、云端失败也不弹超时，时间一到自动恢复（无需定时器，惰性判断）。
@@ -323,6 +356,9 @@ const Store = {
     this._bindCrossDocumentSync();
     // 先认下当前世代号：之后 storage 事件里只要世代号前进了，就说明别人执行了明确的一键清空
     this._purgeEpochSeen = this._storedPurgeSignal().epoch;
+    /* 🗑️ 必须排在 _loadLocal() 之前：已退役模块的本地残留（pe_students 及备份 / 锁）
+       会让 hasCache 误判为 true，还会被 _restoreUnconfirmed() 当成待补推数据 POST 上云。 */
+    this._purgeRetiredLocalKeys();
     const hasCache = this._loadLocal();
     /* 🧹 启动就清掉历史遗留 / 超期的 __local_backup 镜像，别让它们无限期堆积 */
     this._clearStaleLocalBackups();
@@ -390,6 +426,80 @@ const Store = {
       }
     });
     return hasCache;
+  },
+
+  /** 已彻底退役的存储键（整个模块都删了，本地一份数据都不该留） */
+  isRetiredKey(key) {
+    return RETIRED_LOCAL_KEYS.includes(key);
+  },
+
+  /**
+   * 🧹 把一个退役键从本机连根拔起：
+   *   主键 + __local_backup / __step_backup 镜像 + 未确认锁 + 时光机分槽备份
+   *   + 视图锁摘要里的条目 + 内存里的缓存 / 待写 / 熔断 / 延期 / 补推定时器。
+   * 既在 start() 里跑（释放 localStorage 配额），也在 write() 兜底时跑
+   * （万一某个缓存着旧 JS 的页面又把它写回来）。
+   */
+  _purgeRetiredLocalKey(key) {
+    const candidates = new Set([
+      key,
+      `${key}__local_backup`,
+      `${key}__step_backup`,
+      this._lockKeyOf(key),
+      this._backupKeyOf(key),
+    ]);
+    try {
+      for (let i = 0; i < localStorage.length; i += 1) {
+        const raw = localStorage.key(i);
+        if (!raw) continue;
+        if (raw === key || raw.startsWith(`${key}__`) || raw.endsWith(`::${key}`)) candidates.add(raw);
+      }
+    } catch (error) { /* 枚举失败就用内置候选清单继续 */ }
+
+    let removed = 0;
+    candidates.forEach(rawKey => {
+      try {
+        if (localStorage.getItem(rawKey) === null) return;
+        localStorage.removeItem(rawKey);
+        removed += 1;
+      } catch (error) { /* 隐私模式下可能抛 SecurityError，跳过这一个键 */ }
+    });
+
+    /* 视图优先级锁是「所有键共用一个 JSON 摘要」，退役键的条目要单独抹掉，
+       否则 _restoreViewPins() 会把它当成一个还要保护的键重新压回缓存。 */
+    try {
+      const raw = localStorage.getItem(VIEW_PIN_KEY);
+      if (raw !== null) {
+        const pins = JSON.parse(raw) || {};
+        if (Object.prototype.hasOwnProperty.call(pins, key)) {
+          delete pins[key];
+          const rest = Object.keys(pins).filter(item => !this.isRetiredKey(item));
+          if (rest.length) localStorage.setItem(VIEW_PIN_KEY, JSON.stringify(pins));
+          else localStorage.removeItem(VIEW_PIN_KEY);
+        }
+      }
+    } catch (error) { /* 摘要损坏就整份丢掉，不影响其它键 */ }
+
+    this.cache.delete(key);
+    this._localWrites.delete(key);
+    this._pendingWrites.delete(key);
+    this._failedWrites.delete(key);
+    this._deferredWrites.delete(key);
+    this._pendingClearKeys.delete(key);
+    this._viewPins.delete(key);
+    const timer = this._criticalTimers.get(key);
+    if (timer) { clearTimeout(timer); this._criticalTimers.delete(key); }
+    return removed;
+  },
+
+  _purgeRetiredLocalKeys() {
+    let removed = 0;
+    RETIRED_LOCAL_KEYS.forEach(key => { removed += this._purgeRetiredLocalKey(key); });
+    if (removed) {
+      console.log(`[Store] 🧹 已清理 ${removed} 个退役键的本地残留（${RETIRED_LOCAL_KEYS.join('、')}）：`
+        + '不再占用 localStorage，也不会参与任何云端同步');
+    }
+    return removed;
   },
 
   _finishStart() {
@@ -527,6 +637,9 @@ const Store = {
 
   /** 这个键正被「用户主动载入」的视图优先级锁保护？ */
   isViewPinned(key) {
+    /* 🗑️ 仅本机草稿不需要这把锁：它存在的唯一理由是"防云端旧快照盖掉刚载入的视图"，
+       而该键已经完全不上云，留着锁只会让启动逻辑更复杂、还会暂停后台推送。 */
+    if (this.isLocalOnly(key) || this.isRetiredKey(key)) return false;
     if (!this._viewPins.has(key)) return false;
     this._expireViewPins();
     return this._viewPins.has(key);
@@ -558,6 +671,23 @@ const Store = {
    */
   pinLocalView(key, value, reason = '用户主动载入本地数据', options = {}) {
     if (!STORE_KEYS.includes(key)) return { ok: false, reason: `未知存储键 ${key}` };
+    /* 🏠 仅本机草稿：直接把这份数据写进缓存 + localStorage 就够了。
+       不上视图锁、不暂停后台推送 —— 没有云端来覆盖它，锁纯属多余。 */
+    if (this.isLocalOnly(key)) {
+      this._pendingWrites.delete(key);
+      this._failedWrites.delete(key);
+      this._deferredWrites.delete(key);
+      this._pendingClearKeys.delete(key);
+      this._localWrites.delete(key);
+      try { localStorage.removeItem(this._lockKeyOf(key)); } catch (error) { /* 忽略 */ }
+      this.cache.set(key, value);
+      try { localStorage.setItem(key, JSON.stringify(value)); } catch (error) {
+        console.warn(`[Store] 🏠 写入本机草稿失败：${key}`, error);
+      }
+      this._viewPins.delete(key);
+      this._persistViewPins();                 // 顺手清掉旧版本留下的这个键的锁摘要
+      return { ok: true, key, epoch: 0, localOnly: true, pinned: false };
+    }
     /* 🔒 userModified=true：用户亲手载入的数据，最高级别标记。
        刷新后不被 TTL 淘汰，任何备份 / 云端都不许覆盖（直到手动解除或终极清理）。 */
     const userModified = options.userModified === true;
@@ -597,6 +727,17 @@ const Store = {
    */
   commitView(key, value, options = {}) {
     if (!STORE_KEYS.includes(key)) return { ok: false, reason: `未知存储键 ${key}` };
+    /* 🏠 仅本机草稿：硬写缓存 / localStorage 即可，不再续锁、不再暂停后台推送 */
+    if (this.isLocalOnly(key)) {
+      this.cache.set(key, value);
+      try { localStorage.setItem(key, JSON.stringify(value)); } catch (error) {
+        console.warn(`[Store] 🏠 保存本机草稿失败：${key}`, error);
+        return { ok: false, reason: error?.message || String(error) };
+      }
+      this._dropLocalBackup(key);
+      this._viewPins.delete(key);
+      return { ok: true, key, pinned: false, userModified: false, localOnly: true };
+    }
     this.cache.set(key, value);
     try {
       localStorage.setItem(key, JSON.stringify(value));
@@ -624,6 +765,12 @@ const Store = {
 
   /** 解除某个键的视图优先级锁 */
   unpinLocalView(key, reason = '') {
+    /* 🏠 仅本机草稿：没有云端要防，只负责清掉旧版本残留的锁摘要 */
+    if (this.isLocalOnly(key)) {
+      const stale = this._viewPins.delete(key);
+      if (stale) this._persistViewPins();
+      return stale;
+    }
     const removed = this._viewPins.delete(key);
     this._persistViewPins();
     if (!this._viewPins.size) this._releaseViewPinHold();
@@ -651,7 +798,12 @@ const Store = {
   _persistViewPins() {
     try {
       const pins = {};
-      this._viewPins.forEach((pin, key) => { pins[key] = pin; });
+      this._viewPins.forEach((pin, key) => {
+        /* 🗑️ 仅本机草稿的锁已失效 / 已退役模块的锁一律丢弃：
+           旧版摘要里若还留着，写回时顺手抹掉 */
+        if (this.isLocalOnly(key) || this.isRetiredKey(key)) return;
+        pins[key] = pin;
+      });
       if (Object.keys(pins).length) localStorage.setItem(VIEW_PIN_KEY, JSON.stringify(pins));
       else localStorage.removeItem(VIEW_PIN_KEY);
     } catch (error) { /* 忽略 */ }
@@ -663,7 +815,8 @@ const Store = {
     try { pins = JSON.parse(localStorage.getItem(VIEW_PIN_KEY) || '{}') || {}; } catch (error) { pins = {}; }
     let restored = 0;
     Object.entries(pins).forEach(([key, info]) => {
-      if (!STORE_KEYS.includes(key) || !info) return;
+      // 🗑️ 退役键 / 仅本机草稿的视图锁一律丢弃（它们根本不参与云端同步）
+      if (this.isRetiredKey(key) || !CLOUD_KEYS.includes(key) || !info) return;
       /* 摘要格式版本不符：丢弃，避免旧版本标记诈尸 */
       if (info.version !== undefined && Number(info.version) !== VIEW_PIN_SCHEMA_VERSION) return;
       const userModified = info.userModified === true;
@@ -1070,7 +1223,7 @@ const Store = {
             iframe 全量回写，会把报名页刚落盘的新数据盖成旧数据（用户一刷新就"数据没了"）。 */
       const toMirror = [...new Set([
         ...changed,
-        ...STORE_KEYS.filter(key => this.cache.get(key) === null),
+        ...CLOUD_KEYS.filter(key => this.cache.get(key) === null),
       ])];
       this._mirrorLocal(toMirror);
       this._logOverwrite(changed, before);
@@ -1244,7 +1397,7 @@ const Store = {
       console.warn('[Store] ⏸ 大单元生成中，_applyCloud 空转：云端返回的旧数据一律不落本地');
       return changed;
     }
-    STORE_KEYS.forEach(key => {
+    CLOUD_KEYS.forEach(key => {
       /* 🔒 视图优先级锁（最高优先，连 force:true 也绕不过）：
          用户刚主动从离线资源库载入的这份数据是【当前视图的唯一可信副本】，
          云端旧快照、后台同步结果、未确认锁、反推自愈一律不许碰它。
@@ -1305,23 +1458,9 @@ const Store = {
       const next = data[key] === undefined ? null : data[key];
       const cloudEmpty = this._isEmptyValue(next);
       const localHasData = !this._isEmptyValue(current);
-      /* 🛑 大单元「防覆盖强锁」：
-         云端那份 pe_big_unit_design_v1 缺了核心模块（objectives / textbookAnalysis / …），
-         而本地这些模块是有内容的 → 直接拒绝覆盖并报警。
-         典型现场：生成到模块 6 时，云端还停留在只有模块 1–3 的旧快照，
-         一次静默同步就把刚生成的模块 4、5、6 整份洗掉。
-         force=true 是用户在排障界面【亲手】点的"以云端为准"，才放行。 */
-      if (key === UNIT_DESIGN_KEY && !force && this._isPlainObject(current)) {
-        const missing = UNIT_DESIGN_CORE_FIELDS.filter(field =>
-          this._unitFieldHasData(current[field]) && !this._unitFieldHasData(next?.[field]));
-        if (missing.length) {
-          console.warn(`[Store] ⛔ 云端 ${key} 缺少核心模块 ${missing.join('、')}，本地有内容 → `
-            + '拒绝覆盖本地，并把本地这份反推回云端');
-          report.refused.push(key);
-          this._pushBackToCloud(key, current);
-          return;
-        }
-      }
+      /* 🗑️ 大单元「防云端覆盖强锁」已随架构解耦下线：
+         pe_big_unit_design_v1 现在只在 localStorage 里，云端结果根本不会遍历到它
+         （上面的循环走 CLOUD_KEYS），既不需要拒绝覆盖，也不需要把本地反推回云端。 */
       /* ⛔ 「清空中」的键：云端回来的旧数据一律【不复活到本地】，
          也绝不触发"反推自愈"（把这份旧数据又推回云端）。
          这是"用户亲手清空体测数据"必须绝对可靠的最后一道闸门：
@@ -1411,7 +1550,7 @@ const Store = {
       this.cache.set(key, next);
       changed.push(key);
     });
-    const pinnedKeys = [...this._viewPins.keys()].filter(key => STORE_KEYS.includes(key));
+    const pinnedKeys = [...this._viewPins.keys()].filter(key => CLOUD_KEYS.includes(key));
     if (pinnedKeys.length) {
       console.log(`[Store] 🔒 视图优先级锁保护中（云端一律不覆盖、也不反推）：${pinnedKeys.join('、')}`);
     }
@@ -1426,6 +1565,7 @@ const Store = {
    * 上锁 + 立即重试，保证推送期间云端旧（空）数据也别想再覆盖本地。
    */
   _pushBackToCloud(key, value) {
+    if (this.isLocalOnly(key)) return;             // 🏠 仅本机草稿：绝不反推云端
     if (this._readOnlyPull) return;                // ⛔ 纯拉取模式：绝不向云端发送任何修改
     if (this._cloudPaused) return;                 // ⏸ 暂停期间不上锁、不推送
     if (this._backgroundPushBlocked()) return;     // ⏸ 生成 / 载入期间「反杀云端」也不许发 POST
@@ -1471,8 +1611,10 @@ const Store = {
    *    而各个 iframe 共享同一份 localStorage —— 一个缓存还是旧值的兄弟 iframe
    *    一旦回写，就会把报名页刚落盘的新数据盖成旧数据（锁保得住缓存，保不住 localStorage）。
    */
-  _mirrorLocal(keys = STORE_KEYS) {
+  _mirrorLocal(keys = CLOUD_KEYS) {
     keys.forEach(key => {
+      /* 🏠 仅本机草稿：云端结果一律不许回写它的 localStorage（本地那份才是唯一真本） */
+      if (this.isLocalOnly(key)) return;
       /* 🔒 视图优先级锁：本地镜像已经由 pinLocalView() 写成刚载入的资源，
          云端同步 / 其它页面的旧缓存一律不许再回写覆盖它。 */
       if (this.isViewPinned(key)) return;
@@ -1734,6 +1876,22 @@ const Store = {
    *        （否则 athletes / registrations 从有到无会【抛异常终止写入】）
    */
   write(key, value, options = {}) {
+    /* 🗑️ 已退役的键：整个模块都没了，既不落 localStorage 也不发 POST。
+       老页面（缓存着旧 JS）万一还来写，就地清干净，避免下次启动又诈尸。 */
+    if (this.isRetiredKey(key)) {
+      this._purgeRetiredLocalKey(key);
+      console.warn(`[Store] 🗑️ ${key} 已退役，写入被忽略（学生名册由体测记录派生）`);
+      return value;
+    }
+    /* 🏠 仅本机草稿：先把旧版本可能残留的云端保护锁 / 待写队列全部作废，
+       否则游客分支或补推队列会把它当"未同步数据"处理（甚至挡住本地写入）。 */
+    if (this.isLocalOnly(key)) {
+      this._clearUnconfirmed(key);
+      this._pendingWrites.delete(key);
+      this._failedWrites.delete(key);
+      this._deferredWrites.delete(key);
+      this._pendingClearKeys.delete(key);
+    }
     const before = this._isMeetKey(key) ? this.cache.get(key) : undefined;
     const previousValue = this._isMeetKey(key) ? before : this._readLocalValue(key);
     const merged = this._mergeMeetData(key, value, options);   // ⛔ 空覆盖在这里抛异常
@@ -1760,7 +1918,9 @@ const Store = {
         try { localStorage.setItem(key, JSON.stringify(merged)); } catch (error) { /* 忽略 */ }
         if (this._isMeetKey(key)) this._updateBackup(key, merged, options);
       }
-      if (typeof window !== 'undefined' && typeof window.Auth?.notifyGuest === 'function') {
+      /* 🏠 仅本机草稿不需要登录：游客也能正常编辑并保存在自己浏览器里 */
+      if (!this.isLocalOnly(key) && typeof window !== 'undefined'
+        && typeof window.Auth?.notifyGuest === 'function') {
         window.Auth.notifyGuest();
       }
       return merged;
@@ -1784,6 +1944,20 @@ const Store = {
     this._dropLocalBackup(key);
     if (this._isMeetKey(key)) this._updateBackup(key, merged, options);
     if (options.push === false) return merged;
+
+    /* 🏠 仅本机草稿（pe_big_unit_design_v1）：到这里本地内存 + localStorage 都已写好，
+       后面【整段云端推送逻辑一律跳过】—— 不发 POST、不打未确认锁、不进待写队列。
+       顺手把旧版本留在盘上的云端锁清掉，免得 _flushPending 拿它去补推。 */
+    if (this.isLocalOnly(key)) {
+      this._clearUnconfirmed(key);
+      this._pendingWrites.delete(key);
+      this._failedWrites.delete(key);
+      this._deferredWrites.delete(key);
+      this._pendingClearKeys.delete(key);
+      try { localStorage.removeItem(this._lockKeyOf(key)); } catch (error) { /* 忽略 */ }
+      return merged;
+    }
+
     // 云端可用才需要"未确认保护"（纯本地模式没有云端数据来覆盖）；
     // 重要表单走 writeCritical，它自己会打 critical 标记，不受这里影响
     if (this.cloudState !== 'off') {
@@ -1929,6 +2103,11 @@ const Store = {
       merged[field] = before;
     });
     return merged;
+  },
+
+  /** 🏠 这个键是不是「仅本机草稿」—— 是就一刀切断所有云端读写 */
+  isLocalOnly(key) {
+    return LOCAL_ONLY_KEYS.includes(key);
   },
 
   _isMeetKey(key) {
@@ -2117,6 +2296,20 @@ const Store = {
   async writeCritical(key, value, {
     label = '', attempts = CRITICAL_WRITE_ATTEMPTS, allowEmpty = false, force = false,
   } = {}) {
+    /* 🗑️ 已退役的键：write() 已经就地清干净，这里【绝不等云端确认、也不发任何请求】。 */
+    if (this.isRetiredKey(key)) {
+      this._purgeRetiredLocalKey(key);
+      return { ok: false, mode: 'local', localSaved: false, retired: true, reason: `${key} 已退役，写入被拒绝` };
+    }
+    /* 🏠 仅本机草稿：write() 已经同步落好内存 + localStorage，这里【绝不发任何请求】。
+       大单元要上云请写 pe_offline_resources_v1（离线资源库），它仍走下面完整的云端确认流程。
+       返回 ok:true = "已保存到本机"，语义与调用方的成功提示一致。 */
+    if (this.isLocalOnly(key)) {
+      const saved = this.write(key, value, { push: false, allowEmpty, force });
+      this._clearUnconfirmed(key);
+      this._dispatchSync([key], { localWrite: true, cloudConfirmed: false, critical: true, localOnly: true });
+      return { ok: true, mode: 'local', localSaved: true, localOnly: true, value: saved };
+    }
     /* ⛔ 游客模式（只读身份）：重要表单也不写云端。
        必须在最前面拦：一旦走到后面，就会打上"保护锁"并留下待推记录，
        锁留在盘上会挡住云端把最新数据同步下来，游客反而看到过期数据。 */
@@ -2392,6 +2585,19 @@ const Store = {
     }
     locks.forEach(lockKey => {
       const key = lockKey.slice(UNCONFIRMED_LOCK_PREFIX.length);
+      /* 🗑️ 旧版本给已退役模块留过云端保护锁：直接删掉，绝不恢复成待写队列补推。 */
+      if (this.isRetiredKey(key)) {
+        this._purgeRetiredLocalKey(key);
+        return;
+      }
+      /* 🏠 旧版本给「仅本机草稿」留过云端保护锁：直接删掉，绝不恢复成待写队列，
+         否则启动时又会试图把这份草稿 POST 上云。 */
+      if (this.isLocalOnly(key)) {
+        try { localStorage.removeItem(lockKey); } catch (error) { /* 忽略 */ }
+        this._pendingWrites.delete(key);
+        this._deferredWrites.delete(key);
+        return;
+      }
       /* 🔒 用户刚主动载入的资源是最高优先级：这个键的历史保护锁全部作废，
          绝不允许「旧缓存 + 未确认锁」在刷新后诈尸、把新资源顶掉。 */
       if (this.isViewPinned(key)) {
@@ -2594,6 +2800,18 @@ const Store = {
    *    唯一例外 options.allowEmpty —— 用户在界面上亲手点的清空 / 删除（clearIntent / force）。
    */
   async _persist(key, value, options = {}) {
+    /* 🗑️ 已退役键的【最后一道铁闸】：哪怕有一条老锁被恢复成待补推，
+       走到这里也绝不发出 POST /api/data，并顺手把本地残留再清一次。 */
+    if (this.isRetiredKey(key)) {
+      this._purgeRetiredLocalKey(key);
+      return false;
+    }
+    /* 🏠 仅本机草稿的【最后一道铁闸】：不管是谁（write / 补推队列 / 反杀云端 /
+       断线续传 / 旧版本留在盘上的锁）走到这里，都绝不发出 POST /api/data。 */
+    if (this.isLocalOnly(key)) {
+      this._clearUnconfirmed(key);
+      return false;
+    }
     // ⏸ 暂停期间不往云端推任何东西（强行恢复后想推，请先 window.resumeCloud()）
     if (this._cloudPaused) return false;
     /* ⛔ 游客模式：一个字节都不发。
@@ -2658,6 +2876,17 @@ const Store = {
    * 自动同步、补推、修复流程【一律】不许调用。
    */
   async _persistClear(key) {
+    /* 🗑️ 已退役键云端根本没有对应入口，绝不能发 DELETE 请求 */
+    if (this.isRetiredKey(key)) {
+      this._purgeRetiredLocalKey(key);
+      this._pendingClearKeys.delete(key);
+      return false;
+    }
+    /* 🏠 仅本机草稿没有云端行可删，绝不能发 DELETE 请求 */
+    if (this.isLocalOnly(key)) {
+      this._pendingClearKeys.delete(key);
+      return false;
+    }
     if (this._cloudPaused) return false;
     /* ⛔ 游客模式：不清云端（也不发请求）。清空是写操作，游客一律无权。 */
     if (!this._canWriteCloud()) {
@@ -2743,6 +2972,11 @@ const Store = {
       return;
     }
     for (const [key, entry] of [...this._pendingWrites]) {
+      /* 🏠 旧版本可能把这个键的云端锁留在盘上 —— 直接丢弃，绝不补推 */
+      if (this.isLocalOnly(key)) {
+        this._clearUnconfirmed(key);
+        continue;
+      }
       try {
         // ⛔ 死规则在这里同样生效：空载荷永远不发；清空只走 _persistClear 且必须新鲜
         const sent = await this._persistEntry(key, entry);
@@ -3024,8 +3258,41 @@ const Store = {
    * @returns {Promise<{ok:boolean, mode:string, key:string, label:string, cloudCleared:boolean, error?:string}>}
    */
   async clearKey(key, options = {}) {
+    /* 🗑️ 退役键已不在 STORE_KEYS：清空只是把本地残留扫干净，不发任何云端请求 */
+    if (this.isRetiredKey(key)) {
+      this._purgeRetiredLocalKey(key);
+      return {
+        ok: true, mode: 'local', key, label: options.label || key,
+        cloudCleared: false, cloudSkipped: true, retired: true,
+      };
+    }
     if (!STORE_KEYS.includes(key)) {
       throw new Error(`未知的存储键：${key}（只允许清空 Store 管理的键）`);
+    }
+    /* 🏠 仅本机草稿：清空只洗本机，绝不发云端 DELETE（云端本来就不该有这一行）。
+       也不会打世代号 / 跨文档清空信号，免得其它 iframe 以为云端刚被清空。 */
+    if (this.isLocalOnly(key)) {
+      const label = options.label || key;
+      this.unpinLocalView(key, '用户明确清空本机草稿');
+      this.cache.delete(key);
+      this._localWrites.delete(key);
+      this._failedWrites.delete(key);
+      this._deferredWrites.delete(key);
+      this._pendingWrites.delete(key);
+      this._pendingClearKeys.delete(key);
+      try { localStorage.removeItem(key); } catch (error) { /* 忽略 */ }
+      try { localStorage.removeItem(`${key}__local_backup`); } catch (error) { /* 忽略 */ }
+      try { localStorage.removeItem(`${key}__step_backup`); } catch (error) { /* 忽略 */ }
+      try { localStorage.removeItem(this._lockKeyOf(key)); } catch (error) { /* 忽略 */ }
+      try { localStorage.removeItem(this._backupKeyOf(key)); } catch (error) { /* 忽略 */ }
+      const timer = this._criticalTimers.get(key);
+      if (timer) { clearTimeout(timer); this._criticalTimers.delete(key); }
+      this._dispatchSync([key], { reason: 'clearKey', cleared: true, cloudCleared: false, localOnly: true });
+      console.log(`[Store] 🧹 已清空本机草稿 ${label}（只动 localStorage，未发任何云端请求）`);
+      return {
+        ok: true, mode: 'local', key, label,
+        cloudCleared: false, cloudSkipped: true, localOnly: true,
+      };
     }
     /* 用户亲手清空是明确的更高优先级指令：先解除视图优先级锁，别让清空失效 */
     this.unpinLocalView(key, '用户明确清空该键');
@@ -3266,7 +3533,17 @@ const Store = {
       try { window.__offlineFromEvent = undefined; } catch (error) { /* 忽略 */ }
     }
 
-    /* ④ 洗地：业务主键 / 备份 / 锁 / 世代号 / 生成信号 / 小票 / 布局 … 一个不留 */
+    /* ④ 洗地：业务主键 / 备份 / 锁 / 世代号 / 生成信号 / 小票 / 布局 … 一个不留。
+       🏠 大单元草稿是纯本地数据，hardResetAll 必须把它连同分步备份 / 云端锁 /
+          镜像全部清掉，否则"一键清空"之后刷新页面又会诈尸。 */
+    [...LOCAL_ONLY_KEYS, ...RETIRED_LOCAL_KEYS].forEach(key => {
+      [
+        key, `${key}__step_backup`, `${key}__local_backup`,
+        this._lockKeyOf(key), this._backupKeyOf(key),
+      ].forEach(rawKey => {
+        try { localStorage.removeItem(rawKey); } catch (error) { /* 忽略 */ }
+      });
+    });
     const removedKeys = this._hardClearLocalStorage({ includeAuth });
     const removedSession = this._hardClearSessionStorage();
 
@@ -3324,12 +3601,18 @@ const Store = {
   /** 洗掉所有与本项目相关的 localStorage 键（枚举 + 内置键兜底） */
   _hardClearLocalStorage({ includeAuth = false } = {}) {
     const candidates = new Set([
-      ...STORE_KEYS, VIEW_PIN_KEY, UNIT_GENERATING_KEY, MEET_BACKUP_KEY, PURGE_SIGNAL_KEY,
+      ...STORE_KEYS, ...RETIRED_LOCAL_KEYS,
+      VIEW_PIN_KEY, UNIT_GENERATING_KEY, MEET_BACKUP_KEY, PURGE_SIGNAL_KEY,
       'pe_offline_resources_pending_v1', `${UNIT_DESIGN_KEY}__step_backup`,
       'pe_sidebar_collapsed', 'pe_sports_meet_sheet_layout', 'pe_todo_v1',
       ...HARD_RESET_MISC_KEYS, ...HARD_RESET_AUTH_KEYS,
     ]);
-    STORE_KEYS.forEach(key => candidates.add(`${key}__local_backup`));
+    [...STORE_KEYS, ...RETIRED_LOCAL_KEYS].forEach(key => {
+      candidates.add(`${key}__local_backup`);
+      candidates.add(`${key}__step_backup`);
+      candidates.add(this._lockKeyOf(key));
+      candidates.add(this._backupKeyOf(key));
+    });
     try {
       if (typeof localStorage.key === 'function' && typeof localStorage.length === 'number') {
         for (let i = 0; i < localStorage.length; i += 1) {
@@ -3452,7 +3735,7 @@ const Store = {
    */
   _backupLocal() {
     let saved = 0;
-    STORE_KEYS.forEach(key => {
+    CLOUD_KEYS.forEach(key => {   // 🏠 仅本机草稿不需要为"拉云端前"做镜像备份
       const raw = localStorage.getItem(key);
       if (raw === null || raw.length > LOCAL_BACKUP_MAX_BYTES) return;
       try { localStorage.setItem(`${key}__local_backup`, raw); saved += 1; } catch (error) { /* 忽略 */ }
@@ -3817,9 +4100,11 @@ const Store = {
    * ⛔ 铁律：只用"本地更全"的那份去覆盖云端，绝不用更少的覆盖更多的；
    *    推送走 upsert（按 id 覆盖），不会把云端其它表清空。
    */
-  async restoreCloudData(keys = STORE_KEYS, options = {}) {
+  async restoreCloudData(keys = CLOUD_KEYS, options = {}) {
     const report = [];
-    const wanted = Array.isArray(keys) && keys.length ? keys : STORE_KEYS;
+    /* 🏠 排障工具也绝不把「仅本机草稿」推回云端 */
+    const wanted = (Array.isArray(keys) && keys.length ? keys : CLOUD_KEYS)
+      .filter(key => !this.isLocalOnly(key));
     const force = options.force === true;
 
     // 先看看云端现在有什么（避免用更少的数据覆盖更多的数据）
@@ -3873,11 +4158,13 @@ const Store = {
     return report;
   },
 
-  /** 迁移工具：把 localStorage 里的旧数据一次性写入云端 */
-  async importFromLocalStorage(keys = STORE_KEYS) {
+  /** 迁移工具：把 localStorage 里的旧数据一次性写入云端（🏠 仅本机草稿不参与） */
+  async importFromLocalStorage(keys = CLOUD_KEYS) {
     const values = {};
     const invalid = [];
-    keys.forEach(key => {
+    const wanted = (Array.isArray(keys) ? keys : CLOUD_KEYS)
+      .filter(key => !this.isLocalOnly(key));
+    wanted.forEach(key => {
       const raw = localStorage.getItem(key);
       if (raw === null) return;
       try {
@@ -3895,7 +4182,7 @@ const Store = {
     }, IMPORT_TIMEOUT);
     const report = payload.report || [];
     invalid.forEach(key => report.push({ key, status: 'invalid', count: 0 }));
-    keys
+    wanted
       .filter(key => !(report.some(item => item.key === key)))
       .forEach(key => report.push({ key, status: 'skipped', count: 0 }));
     // 导入成功后本地缓存同步更新，避免下次打开又推一遍
@@ -3955,4 +4242,10 @@ if (typeof window !== 'undefined') {
   window.clearViewPriority = reason => Store.clearViewPins(reason || '控制台手动解除');
   /* 💥 最狠的一键：localStorage.clear() + 刷新（连登录态都不留，刷新后需重新登录） */
   window.nukeAllStorage = options => Store.nukeAllStorage(options || {});
+  /* 🏠 架构解耦自检：window.LOCAL_ONLY_KEYS / window.CLOUD_KEYS
+     —— 一眼看清哪些键只存本机、哪些键会同步到云端 */
+  window.LOCAL_ONLY_KEYS = LOCAL_ONLY_KEYS;
+  window.CLOUD_KEYS = CLOUD_KEYS;
+  /* 🗑️ 彻底退役的键：启动即清理，既不占 localStorage 也不参与云端同步 */
+  window.RETIRED_LOCAL_KEYS = RETIRED_LOCAL_KEYS;
 }

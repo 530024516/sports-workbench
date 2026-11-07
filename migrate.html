@@ -83,9 +83,9 @@
     <section class="migrate-card">
       <h2>3. 清理残留数据</h2>
       <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">
-        示例数据（教学资源、演示学生等）由旧版代码自动生成，现已停止生成。用下面的按钮把云端和本机的残留记录一次性清空；
-        也可以直接在 Supabase 控制台 SQL Editor 执行：
-        <code class="inline">truncate table public.students, public.fitness_records, public.attendance, public.lesson_plans, public.resources, public.courses, public.course_schedule, public.todos, public.fitness_logs, public.unit_designs, public.sports_meet, public.app_settings;</code>
+        示例数据（教学资源等）由旧版代码自动生成，现已停止生成。用下面的按钮把云端和本机的残留记录一次性清空；
+        也可以直接在 Supabase 控制台 SQL Editor 执行（students 表已退役，不再需要清理）：
+        <code class="inline">truncate table public.fitness_records, public.attendance, public.lesson_plans, public.resources, public.courses, public.course_schedule, public.todos, public.fitness_logs, public.unit_designs, public.sports_meet, public.app_settings;</code>
       </p>
       <div class="migrate-actions">
         <button class="btn btn-danger" type="button" onclick="clearCloudData()">清空云端全部数据</button>
