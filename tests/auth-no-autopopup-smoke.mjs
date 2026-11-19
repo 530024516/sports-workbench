@@ -230,7 +230,7 @@ await test('⑥ 手动点顶栏按钮 → 才允许弹登录框', async () => {
   const env = createEnv();
   env.Auth.toggle();
   equal(env.modals.length, 1, '手动点击必须弹出登录框');
-  assert(String(env.modals[0].title).includes('管理员登录'), '标题要对');
+  assert(/登录/.test(String(env.modals[0].title)), '标题要对（公开版为「登录工作台」，兼容旧「管理员登录」）');
 });
 
 await test('⑦ 管理员浏览：写请求照常发出，并带 X-Admin-Password', async () => {

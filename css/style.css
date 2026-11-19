@@ -440,12 +440,22 @@ body.sidebar-collapsed .sidebar .user-mini {
   display: flex;
   align-items: center;
   gap: 16px;
+  /* 左侧可压缩、右侧绝不压缩：空间不够时只让标题省略，按钮永远不换行 */
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.topbar-left > div {
+  min-width: 0;
 }
 
 .topbar-title {
   font-size: 18px;
   font-weight: 700;
   color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .topbar-breadcrumb {
@@ -461,7 +471,16 @@ body.sidebar-collapsed .sidebar .user-mini {
 .topbar-right {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
+  /* 右侧整块不参与压缩，保证所有按钮/徽章永远单行、不溢出 */
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+/* 🔒 顶栏右侧任何元素都不许换行、不许被挤扁 */
+.topbar-right > * {
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .topbar-date {
@@ -470,6 +489,8 @@ body.sidebar-collapsed .sidebar .user-mini {
   display: flex;
   align-items: center;
   gap: 6px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .topbar-btn {
@@ -483,6 +504,8 @@ body.sidebar-collapsed .sidebar .user-mini {
   font-size: 18px;
   color: var(--text-secondary);
   transition: all 0.2s ease;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .topbar-btn:hover {
@@ -523,6 +546,39 @@ body.sidebar-collapsed .sidebar .user-mini {
   border-color: var(--success);
   color: var(--success);
   background: rgba(6, 167, 125, 0.08);
+}
+
+/* ========== 纯本地版：顶栏【🗑️ 清空】/【📥 导出】==========
+   ⚠️ 文字只有两个字，但仍必须做成自适应宽度的胶囊按钮：
+   .topbar-btn 默认是 36px 正圆，长文案塞进去会竖排、重叠、溢出顶栏。 */
+.local-data-btn {
+  width: auto;
+  min-width: 36px;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  gap: 4px;
+  font-size: 13px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.local-data-btn:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: var(--primary-100, #fff2e8);
+}
+
+#clearLocalDataBtn:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: var(--danger-light, #fff1f0);
+}
+
+.local-data-btn-label {
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .admin-login {
@@ -716,7 +772,8 @@ body.sidebar-collapsed .sidebar .user-mini {
 }
 
 /* 页面打印区：平时藏在屏幕外，点「打印当前页面」时把内容写进来再调它的 print() */
-.fitness-print-frame {
+.fitness-print-frame,
+.lesson-print-frame {
   position: fixed;
   left: -12000px;
   top: 0;
@@ -724,6 +781,36 @@ body.sidebar-collapsed .sidebar .user-mini {
   height: 794px;
   border: 0;
   visibility: hidden;
+}
+
+/* 🖨️ 教案打印：独立 A4 文档写在 iframe 里；下面这套规则保证万一直接打印主页面，
+   也只留教案正文 —— 侧边栏 / 顶栏 / 工具栏 / 操作按钮 / 背景色一律不进 PDF。 */
+@media print {
+  body.lesson-print-mode,
+  body.lesson-print-mode #app,
+  body.lesson-print-mode #page-content {
+    background: #fff !important;
+    box-shadow: none !important;
+  }
+
+  body.lesson-print-mode .sidebar,
+  body.lesson-print-mode .topbar,
+  body.lesson-print-mode .toolbar,
+  body.lesson-print-mode .page-header,
+  body.lesson-print-mode .modal-overlay,
+  body.lesson-print-mode .toast,
+  body.lesson-print-mode button,
+  body.lesson-print-mode [data-admin-only] {
+    display: none !important;
+  }
+
+  body.lesson-print-mode #app,
+  body.lesson-print-mode #page-content {
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+    max-width: none !important;
+  }
 }
 
 /* 表格 */
@@ -797,7 +884,23 @@ table.data-table tbody tr:last-child td {
 /* 🌐 离线状态标签：复用 .tag 的灰底灰字，断网时常驻顶栏右侧。
    [hidden] 必须显式声明，否则 .tag 的 display:inline-flex 会盖过浏览器默认隐藏。 */
 .topbar-offline-badge[hidden] { display: none; }
-.topbar-offline-badge { white-space: nowrap; cursor: default; }
+.topbar-offline-badge { white-space: nowrap; flex-shrink: 0; cursor: default; }
+/* 公开离线版：模式徽章 + 本机数据工具 */
+.public-mode-badge[hidden],
+.local-data-btn[hidden] { display: none !important; }
+.public-mode-badge {
+  white-space: nowrap;
+  flex-shrink: 0;
+  cursor: pointer;
+  background: #e8f3ff;
+  color: #135fa8;
+  border: 1px solid #b9d8f5;
+}
+.ai-disabled {
+  opacity: .45 !important;
+  cursor: not-allowed !important;
+  filter: grayscale(.6);
+}
 
 /* 搜索框 */
 .search-box {
@@ -2738,6 +2841,30 @@ select.form-control {
     width: 40px;
     height: 40px;
   }
+
+  /* 手机端：本机数据工具折叠成纯图标，完整说明留在 title 里 */
+  .local-data-btn {
+    width: 40px;
+    height: 40px;
+    min-width: 40px;
+    padding: 0;
+    border-radius: 50%;
+    font-size: 18px;
+  }
+
+  .local-data-btn-label {
+    display: none;
+  }
+
+  /* 徽章同样只留 emoji：textContent 保持原文案（悬浮 / 读屏可用），视觉上不占地方 */
+  .public-mode-badge,
+  .topbar-offline-badge {
+    font-size: 0;
+    padding: 2px 8px;
+  }
+
+  .public-mode-badge::before { content: '💻'; font-size: 15px; }
+  .topbar-offline-badge::before { content: '🌐'; font-size: 15px; }
 
   .modal-close {
     width: 40px;

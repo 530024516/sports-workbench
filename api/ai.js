@@ -9,7 +9,8 @@ import adminAuth from '../lib/admin-auth.js';
  *   - fitness ：健身训练计划
  * 所有类型均开启 stream: true，并以 SSE（text/event-stream）流式回写给前端。
  *
- * ⛔ 权限闸门：AI 生成属于写操作（消耗额度 + 结果写库），游客一律 403。
+ * ⛔ 权限闸门：AI 生成属于写操作（消耗额度 + 结果写库），游客一律 403；
+ *   只有持有效 AI 体验 JWT（role=ai_guest、12h 内）的公开用户例外，过期票返回 401 TOKEN_EXPIRED。
  */
 
 /**
@@ -23,6 +24,8 @@ export const config = { maxDuration: 120 };
 const AI_TIMEOUT_MS = 120000;
 
 export default async function handler(req, res) {
-  if (!adminAuth.requireAdmin(req, res)) return;
-  await core.handleAiRequest(req, res, { timeoutMs: AI_TIMEOUT_MS });
+  /* 公开体验票（无状态 JWT，role=ai_guest，12h）只放行 AI 路由；
+     过期 / 伪造 → 401 TOKEN_EXPIRED，前端据此清本地状态并提示重新登录。 */
+  if (!adminAuth.requireAdmin(req, res, { allowPublicAI: true })) return;
+  await core.handleAiRequest(req, res, { timeoutMs: AI_TIMEOUT_MS, allowPublicAI: true });
 }

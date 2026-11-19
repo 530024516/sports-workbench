@@ -1,0 +1,37 @@
+[E2E 11:15:51.688] ✅ .env.local 配了 PUBLIC_PASSWORD_AI
+[E2E 11:15:51.689] 已临时摘掉 Supabase 配置，结束自动恢复
+[E2E 11:15:51.711] [server:err] ◇ injected env (0) from .env
+[E2E 11:15:51.711] [server:err] ◇ injected env (0) from .env
+[E2E 11:15:51.711] [server:err] ◇ injected env (6) from .env.local
+[E2E 11:15:51.737] [server] 体育教师工作台运行中: http://localhost:5295
+[E2E 11:15:51.737] [server] 数据存储: localStorage（未检测到 SUPABASE_URL / SUPABASE_ANON_KEY）
+[E2E 11:15:52.270] 真实 Chrome 已启动：Chrome/157.0.8103.79
+[E2E 11:15:53.099] [server] [auth] ✅ 公开版登录成功：AI 体验（JWT 12h）模式
+[E2E 11:15:53.123] 已用 AI 体验密码真实登录：canUseAI=true 且本地有票
+[E2E 11:15:54.219] 已真实点击「生成教案草稿」，等待 401…
+[E2E 11:15:54.245] ✅ 服务端确实收到带 X-Public-AI-Token 的 AI 请求 — 1 次
+[E2E 11:15:54.247] 401 后的页面状态：{"modalText":"\n    \n      \n        AI 智能生成教案\n        ×\n      \n      \n    \n      AI 将生成可阅读、可继续扩写的 Markdown 教案。保存前请核对教学内容与安全安排。不会发送学生个人信息。\n      \n        授课年级一年级二年级三年级四年级五年级六年级\n        班级人数\n      \n      课题\n      AI 需要通过本地服务端调用。请使用 node server.js 启动，并在项目根目录的 .env.local 配置智谱 API Key。\n    \n  \n      \n    取消\n    ✨ 生成教案草稿\n  \n    \n   \n    \n      \n        AI 教案草稿：篮球原地运球\n        ×\n      \n      \n    \n      一年级\n      其他\n      40分钟\n    \n     AI 正在生成教案，内容将实时显示…\n    \n    \n      生成失败：AI 体验权限已过期，请重新输入体验密码登录\n      继续生成 / 续写剩余部分\n    \n  \n      \n    关闭\n    📋 填入教案表单\n    保存教案\n  \n    \n   \n    \n      \n        🔑 AI 体验权限已过期\n        ×\n      \n      \n      \n        AI 体验权限已过期，请重新输入体验密码登录\n        体验票有效期为 12 小时，过期后需要重新输入体验密码。\n      \n    \n      \n      稍后再说\n      重新输入体验密码\n    \n    \n  ","canUseAI":false,"token":"","localMode":true,"aiButtons":[true,true]}
+[E2E 11:15:54.247] ✅ 弹窗包含指定文案「AI 体验权限已过期，请重新输入体验密码登录」 — 
+    
+      
+        AI 智能生成教案
+        ×
+      
+      
+    
+      AI 将生成可阅读、可继续扩写的 Markdown 教案。保存前请核对教学内容与安全安排。不会发送学生个人信息。
+      
+        授课年级一年级二年级三年级四年级五年级六年级
+        班级人数
+      
+      课题
+      AI 需
+[E2E 11:15:54.247] ✅ canUseAI 已被清除
+[E2E 11:15:54.247] ✅ 本地过期票已被清除
+[E2E 11:15:54.247] ✅ 纯本地模式保留（只清 AI 权限，不踢出本地数据环境）
+[E2E 11:15:54.247] ✅ AI 按钮已重新置灰 — [true,true]
+[E2E 11:15:54.544] 截图已保存：/Users/dengyinhong/Desktop/Personal/01_进行中/体育教师工作台/tests/e2e/ai-token-expired-pass.png
+[E2E 11:15:54.900] ✅ 点「重新输入体验密码」能打开登录框
+[E2E 11:15:54.900] 🎉 E2E 全部断言通过：401 自动清票 + 弹窗提示 + 重新登录入口可用
+[E2E 11:15:54.969] server.js 已关闭
+[E2E 11:15:55.002] .env.local 已原样恢复

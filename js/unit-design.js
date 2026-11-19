@@ -249,7 +249,7 @@ document.getElementById('page-content').innerHTML = `
       <div class="ud2-field ud2-actions">
         <span class="ud2-field-label">&nbsp;</span>
         <div class="ud2-field-row">
-          <button data-admin-only id="ud2GenerateBtn" class="btn btn-primary" type="button" onclick="generateWholeUnit()">✨ 一键生成完整大单元</button>
+          <button data-admin-only data-ai-action="true" id="ud2GenerateBtn" class="btn btn-primary" type="button" onclick="generateWholeUnit()">✨ 一键生成完整大单元</button>
           <button class="btn btn-secondary" type="button" onclick="openUnitResourcePicker()">📦 从离线资源库加载</button>
           <button class="btn btn-ghost" type="button" onclick="toggleAllUnitModules()">展开 / 收起全部</button>
           <button class="btn btn-ghost" type="button" onclick="clearUnitDesign()">清空重来</button>
@@ -1296,9 +1296,14 @@ function unitSelectionTopicList() {
     : null;
   const itemId = (found?.item?.id) || meta.itemId || unitSelect('ud2Item').value;
   const levelId = meta.levelId || unitSelect('ud2Level').value;
-  return typeof unitTopicListWithDimension === 'function'
+  const list = typeof unitTopicListWithDimension === 'function'
     ? unitTopicListWithDimension(itemId, levelId)
     : listUnitTopics(itemId, levelId);
+  /* 🛑 单一技术聚焦：选了「垫球」就不把同清单里的传球/发球排进 18 课时，
+     必须与后端 readUnitSelection() 用同一份过滤结果，前后端计划表才不会漂移。 */
+  return typeof unitFocusTopicList === 'function'
+    ? unitFocusTopicList(list, meta.topic || '')
+    : list;
 }
 
 function unitSelectionMeta(selection) {

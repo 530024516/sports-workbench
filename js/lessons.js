@@ -54,7 +54,7 @@ content.innerHTML = `
       <button data-admin-only class="btn btn-secondary" onclick="openAddLesson()">
         <span>📋</span> 新建教案
       </button>
-      <button class="btn btn-secondary" onclick="openAIGeneration()">
+      <button data-ai-action="true" class="btn btn-secondary" onclick="openAIGeneration()">
         <span>✨</span> AI 生成教案
       </button>
       <button data-admin-only class="btn btn-primary" onclick="openAddResource()">
@@ -151,7 +151,9 @@ function renderLessonGrid(visibleLessons = lessons) {
               <strong>${l.content ? '教案摘要：' : '教学目标：'}</strong>${escapeLessonHTML((l.content || l.objectiveSkill || l.objectives || '').split('\n')[0].slice(0, 140))}
             </p>
             <div class="lesson-card-footer">
-              <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();reuseLessonTemplate('${l.id}')">↻ 复用为新教案</button>
+              <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();reuseLessonTemplate('${escapeLessonHTML(l.id)}')">↻ 复用为新教案</button>
+              <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();exportLessonWord('${escapeLessonHTML(l.id)}')" title="导出 Word">📥 Word</button>
+              <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();printLessonPDF('${escapeLessonHTML(l.id)}')" title="打印 / 导出 PDF">🖨️ PDF</button>
               <span>${l.processSteps?.length ? `${l.processSteps.length} 个教学环节` : ''}</span>
             </div>
           </div>
@@ -186,8 +188,10 @@ function renderLessonList(visibleLessons = lessons) {
                   <td>
                     <button class="btn btn-ghost btn-sm" onclick="toggleLessonFavorite('${l.id}')" title="${l.isFavorite ? '取消收藏' : '收藏'}">${l.isFavorite ? '⭐' : '☆'}</button>
                     <button class="btn btn-ghost btn-sm" onclick="reuseLessonTemplate('${l.id}')" title="复用教案">↻</button>
-                    <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();viewLesson('${l.id}')" title="查看">👁️</button>
-                    <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();openEditLesson('${l.id}')" title="编辑">✏️</button>
+                    <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();viewLesson('${escapeLessonHTML(l.id)}')" title="查看">👁️</button>
+                    <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();exportLessonWord('${escapeLessonHTML(l.id)}')" title="导出 Word">📥</button>
+                    <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();printLessonPDF('${escapeLessonHTML(l.id)}')" title="打印 / 导出 PDF">🖨️</button>
+                    <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();openEditLesson('${escapeLessonHTML(l.id)}')" title="编辑">✏️</button>
                     <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();confirmDeleteLesson('${l.id}')" title="删除">🗑️</button>
                   </td>
                 </tr>
@@ -245,6 +249,7 @@ function legacyViewLesson(id) {
   `;
   const footerHTML = `
     <button class="btn btn-ghost" onclick="closeModal(this)">关闭</button>
+    ${lessonExportButtonsHTML(id)}
     <button class="btn btn-primary" onclick="closeModal(this);openEditLesson('${id}')">编辑</button>
   `;
   showModal(`${getSportIcon(l.sport)} ${l.title}`, bodyHTML, footerHTML);
@@ -1208,6 +1213,247 @@ function renderLessonMarkdown(value) {
   return DOMPurify.sanitize(html);
 }
 
+/* ---------------- 教案导出 / 打印（复用大单元导出的 Blob + 独立打印文档思路） ---------------- */
+
+/** 已保存成 Markdown 的教案：按 ## 标题还原成与 === 分段同一套 key */
+function parseLessonMarkdownSections(text) {
+  const lines = String(text || '').split(/\r?\n/);
+  const sections = {};
+  const extras = [];
+  let currentKey = '';
+  let currentTitle = '';
+  let buffer = [];
+  const flush = () => {
+    const body = buffer.join('\n').trim();
+    if (!body) return;
+    if (currentKey) sections[currentKey] = body;
+    else extras.push({ title: currentTitle || '补充内容', body });
+    buffer = [];
+  };
+  lines.forEach(line => {
+    /* ===KEY=== 由 parseLessonSections() 处理，这里不能把它当成正文，更不能把分段内容重复塞进来 */
+    if (/^\s*===\s*[A-Z][A-Z0-9_]*\s*===\s*$/.test(line)) {
+      flush();
+      currentKey = '';
+      currentTitle = '';
+      return;
+    }
+    const heading = line.match(/^\s*#{2,4}\s*(.+?)\s*#*\s*$/);
+    if (!heading) { buffer.push(line); return; }
+    flush();
+    currentTitle = heading[1].trim();
+    const plain = currentTitle.replace(/^[一二三四五六七八九十]+、\s*/, '');
+    const found = Object.entries(LESSON_SECTION_TITLES)
+      .find(([, label]) => label.includes(plain) || plain.includes(label.replace(/^[一二三四五六七八九十]+、\s*/, '')));
+    currentKey = found ? found[0] : '';
+  });
+  flush();
+  return { sections, extras };
+}
+
+/** 汇总一篇教案导出时要呈现的全部文本（兼容 === 分段、Markdown、结构化字段） */
+function lessonExportSections(lesson) {
+  const raw = String(lesson?.content || '');
+  const segmented = parseLessonSections(raw);
+  /* === 分段与 ## 标题二选一：同一篇如果已经是 === 分段，就别再把正文当 Markdown 重复收一遍 */
+  const markdown = segmented.hasSections ? { sections: {}, extras: [] } : parseLessonMarkdownSections(raw);
+  const byKey = key => [segmented.sections[key], markdown.sections[key]]
+    .find(value => String(value || '').trim()) || '';
+  const sections = [];
+  const push = (title, value) => {
+    const body = String(value ?? '').trim();
+    if (body) sections.push({ title, body });
+  };
+  /* 结构化字段与 === 分段同时存在时两份都留，避免"以新盖旧"悄悄丢字 */
+  const merge = (structured, segmentedText) => {
+    const primary = String(structured ?? '').trim();
+    const secondary = String(segmentedText ?? '').trim();
+    if (!primary) return secondary;
+    if (!secondary || primary === secondary) return primary;
+    return `${primary}\n\n${secondary}`;
+  };
+
+  push(LESSON_SECTION_TITLES.CONTENT, byKey('CONTENT'));
+
+  const objectives = [
+    ['知识与认知', lesson.objectiveKnowledge],
+    ['运动技能', lesson.objectiveSkill || lesson.objectives],
+    ['情感态度与社会适应', lesson.objectiveAttitude],
+  ].filter(([, value]) => String(value || '').trim())
+    .map(([label, value]) => `【${label}】${value}`).join('\n');
+  push(LESSON_SECTION_TITLES.TARGET, merge(objectives, byKey('TARGET')));
+
+  const keyPoints = [
+    ['重点', lesson.keyPoints],
+    ['难点', lesson.difficultyPoints],
+  ].filter(([, value]) => String(value || '').trim())
+    .map(([label, value]) => `【${label}】${value}`).join('\n');
+  push(LESSON_SECTION_TITLES.KEYPOINT, merge(keyPoints, byKey('KEYPOINT')));
+  push(LESSON_SECTION_TITLES.EQUIPMENT, merge(lesson.equipment, byKey('EQUIPMENT')));
+
+  const steps = Array.isArray(lesson.processSteps) ? lesson.processSteps : [];
+  if (steps.length) {
+    const body = steps.map(step => {
+      const stage = String(step?.stage || '教学环节').trim();
+      const minutes = String(step?.minutes || '').trim();
+      return `【${stage}${minutes ? `（${minutes} 分钟）` : ''}】\n${String(step?.content || '').trim()}`;
+    }).filter(Boolean).join('\n\n');
+    push('五、教学过程', body);
+  } else {
+    ['PREPARATION', 'BASIC_PART', 'END_PART'].forEach(key => {
+      push(LESSON_SECTION_TITLES[key], byKey(key));
+    });
+    push('五、教学过程', lesson.process);
+  }
+
+  push(LESSON_SECTION_TITLES.DENSITY, merge(lesson.practiceDensity, byKey('DENSITY')));
+  push(LESSON_SECTION_TITLES.REFLECTION, merge(lesson.reflection, byKey('REFLECTION')));
+  markdown.extras.forEach(extra => push(extra.title, extra.body));
+
+  /* 老教案只有一段纯文本：整段导出，绝不丢内容 */
+  if (!sections.length && raw) push('教案正文', raw);
+  return sections;
+}
+
+/** 导出用的 Markdown → HTML：页面里有 marked/DOMPurify 就用，没有则安全回退 */
+function lessonExportMarkdownToHTML(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return '<p>未填写</p>';
+  if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
+    return DOMPurify.sanitize(marked.parse(text, { breaks: true, gfm: true }));
+  }
+  return `<p>${escapeLessonHTML(text).replace(/\r?\n/g, '<br>')}</p>`;
+}
+
+/** 与大单元导出同构：Word 和打印共用一份独立 A4 HTML */
+function buildLessonExportHTML(lessonOrId) {
+  const lesson = typeof lessonOrId === 'object' && lessonOrId !== null
+    ? lessonOrId
+    : (typeof DB !== 'undefined' ? DB.getLessonPlans().find(plan => plan.id === lessonOrId) : null);
+  if (!lesson) return '';
+  const title = String(lesson.title || '体育教案');
+  const sections = lessonExportSections(lesson);
+  const meta = [
+    `年级：${lesson.grade || '未指定'}`,
+    `运动项目：${lesson.sport || '其他'}`,
+    `课时：${lesson.duration || '40分钟'}`,
+    `难度：${lesson.difficulty || '未指定'}`,
+    `状态：${lesson.status || '待上课'}`,
+  ].join('　｜　');
+  const bodyHTML = sections.map(section => `
+    <section class="lesson-export-section">
+      <h2>${escapeLessonHTML(section.title)}</h2>
+      <div class="lesson-export-rich">${lessonExportMarkdownToHTML(section.body)}</div>
+    </section>`).join('\n');
+
+  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>${escapeLessonHTML(title)}</title>
+<style>
+  @page { size: A4 portrait; margin: 18mm 16mm; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #fff !important; color: #111; }
+  body { font-family: "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", Arial, sans-serif; font-size: 11pt; line-height: 1.75; }
+  .lesson-export-doc { width: 100%; }
+  .lesson-export-title { text-align: center; font-size: 20pt; margin: 0 0 10px; line-height: 1.4; }
+  .lesson-export-meta { text-align: center; color: #555; font-size: 10pt; margin: 0 0 22px; }
+  .lesson-export-section { margin: 0 0 18px; }
+  .lesson-export-section h2 { font-size: 14pt; margin: 0 0 8px; padding-bottom: 5px; border-bottom: 1px solid #bbb; page-break-after: avoid; }
+  .lesson-export-rich p, .lesson-export-rich li { margin: 4px 0; line-height: 1.75; }
+  .lesson-export-rich ol, .lesson-export-rich ul { padding-left: 22px; }
+  .lesson-export-rich table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 10pt; }
+  .lesson-export-rich th, .lesson-export-rich td { border: 1px solid #888; padding: 5px 7px; vertical-align: top; text-align: left; }
+  .lesson-export-rich th { background: #f2f2f2; }
+  .lesson-export-rich h3, .lesson-export-rich h4 { font-size: 12pt; margin: 12px 0 4px; }
+  .lesson-export-rich img { max-width: 100%; }
+  section, tr, li { page-break-inside: avoid; }
+  @media print {
+    html, body { background: #fff !important; }
+    .lesson-export-doc { width: auto; }
+    .lesson-export-section h2 { page-break-after: avoid; }
+  }
+</style></head><body>
+<main class="lesson-export-doc">
+  <h1 class="lesson-export-title">${escapeLessonHTML(title)}</h1>
+  <p class="lesson-export-meta">${escapeLessonHTML(meta)}</p>
+  ${bodyHTML}
+</main>
+</body></html>`;
+}
+
+/** 📥 导出 Word（.doc）：BOM + UTF-8 + msword 类型，Word / WPS 直接打开不乱码 */
+function exportLessonWord(id) {
+  const lesson = typeof DB !== 'undefined' ? DB.getLessonPlans().find(plan => plan.id === id) : null;
+  if (!lesson) {
+    if (typeof showToast === 'function') showToast('找不到该教案，无法导出', 'error');
+    return;
+  }
+  const html = buildLessonExportHTML(lesson);
+  const blob = new Blob(['\ufeff', html], { type: 'application/msword;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `${String(lesson.title || '体育教案').replace(/[\\/:*?"<>|]/g, '_')}.doc`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  if (typeof showToast === 'function') showToast('Word 已导出');
+}
+
+/** 🖨️ 打印 / 导出 PDF：写进隐藏 iframe 的独立 A4 文档，再调它的 print() */
+function printLessonPDF(id) {
+  const lesson = typeof DB !== 'undefined' ? DB.getLessonPlans().find(plan => plan.id === id) : null;
+  if (!lesson) {
+    if (typeof showToast === 'function') showToast('找不到该教案，无法打印', 'error');
+    return;
+  }
+  const html = buildLessonExportHTML(lesson);
+  const frame = document.getElementById('lessonPrintFrame');
+  if (!frame) {
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) {
+      if (typeof showToast === 'function') showToast('浏览器阻止了打印窗口，请允许弹出窗口后重试', 'error');
+      return;
+    }
+    printWindow.document.open();
+    printWindow.document.write(html);
+    printWindow.document.close();
+    printWindow.addEventListener('load', () => printWindow.print(), { once: true });
+    return;
+  }
+  const frameWindow = frame.contentWindow;
+  const doc = frameWindow?.document;
+  if (!doc) {
+    if (typeof showToast === 'function') showToast('打印区初始化失败，请刷新页面后重试', 'error');
+    return;
+  }
+  frame.style.width = '660px';    // A4 纵向 210mm - 左右各 16mm 页边距 ≈ 672px
+  frame.style.height = '1030px';
+  doc.open();
+  doc.write(html);
+  doc.close();
+  document.body.classList.add('lesson-print-mode');
+  const cleanup = () => document.body.classList.remove('lesson-print-mode');
+  frameWindow.addEventListener('afterprint', cleanup, { once: true });
+  setTimeout(() => {
+    try {
+      frameWindow.focus();
+      frameWindow.print();
+      if (typeof showToast === 'function') showToast('正在打开打印预览，可另存为 PDF', 'info');
+    } catch (error) {
+      cleanup();
+      if (typeof showToast === 'function') showToast(`打印失败：${error.message}`, 'error');
+    }
+  }, 120);
+  setTimeout(cleanup, 8000);
+}
+
+function lessonExportButtonsHTML(id) {
+  const safeId = escapeLessonHTML(id);
+  return `
+    <button class="btn btn-secondary" type="button" onclick="exportLessonWord('${safeId}')" title="导出为 Word 文档">📥 导出 Word</button>
+    <button class="btn btn-success" type="button" onclick="printLessonPDF('${safeId}')" title="打印或另存为 PDF">🖨️ 打印 / 导出 PDF</button>`;
+}
+
 function viewLesson(id) {
   const lesson = DB.getLessonPlans().find(plan => plan.id === id);
   if (!lesson) return;
@@ -1218,6 +1464,7 @@ function viewLesson(id) {
     `;
     showModal(`${getSportIcon(lesson.sport)} ${escapeLessonHTML(lesson.title)}`, bodyHTML, `
       <button class="btn btn-ghost" onclick="closeModal(this)">关闭</button>
+      ${lessonExportButtonsHTML(id)}
       <button class="btn btn-secondary" onclick="closeModal(this);reuseLessonTemplate('${escapeLessonHTML(id)}')">↻ 复用为新教案</button>
       <button class="btn btn-primary" onclick="closeModal(this);openEditLesson('${escapeLessonHTML(id)}')">编辑</button>
     `);
@@ -1287,7 +1534,7 @@ function openAIGeneration() {
     </form>
   `, `
     <button class="btn btn-ghost" onclick="closeModal(this)">取消</button>
-    <button data-admin-only class="btn btn-primary" id="generateLessonButton" onclick="generateLessonWithAI()"><span>✨</span> 生成教案草稿</button>
+    <button data-admin-only data-ai-action="true" class="btn btn-primary" id="generateLessonButton" onclick="generateLessonWithAI()"><span>✨</span> 生成教案草稿</button>
   `);
 }
 

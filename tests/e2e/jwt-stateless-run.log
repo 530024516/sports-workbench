@@ -1,0 +1,45 @@
+[E2E 11:14:45.320] ✅ .env.local 配了 PUBLIC_PASSWORD_AI
+[E2E 11:14:45.321] ✅ .env.local 配了 PUBLIC_PASSWORD_LOCAL
+[E2E 11:14:45.321] ✅ .env.local 配了 JWT_SECRET — 长度 64
+[E2E 11:14:45.366] 本地 HTTPS mock 上游已就绪：https://127.0.0.1:5292
+[E2E 11:14:45.387] [实例①:err] ◇ injected env (0) from .env
+[E2E 11:14:45.387] [实例①:err] ◇ injected env (0) from .env
+[E2E 11:14:45.387] [实例①:err] ◇ injected env (8) from .env.local
+[E2E 11:14:45.422] [实例①] 体育教师工作台运行中: http://localhost:5291
+[E2E 11:14:45.422] [实例①] 数据存储: Supabase（anon key）
+[E2E 11:14:45.581] [实例①] [auth] ✅ 公开版登录成功：AI 体验（JWT 12h）模式
+[E2E 11:14:45.582] ✅ AI 密码真登录成功 — HTTP 200
+[E2E 11:14:45.582] ✅ 拿到的是 3 段 JWT — eyJhbGciOiJIUzI1NiIsInR5…
+[E2E 11:14:45.583] ✅ payload.role === ai_guest — {"role":"ai_guest","iat":1795086885,"exp":1795130085}
+[E2E 11:14:45.583] ✅ 有效期 12 小时 — 43200 秒
+[E2E 11:14:45.584] [实例①] [auth] ✅ 公开版登录成功：纯本地模式
+[E2E 11:14:45.584] ✅ 本地密码依然能登录，且拿不到 JWT — HTTP 200 / mode=local
+[E2E 11:14:45.587] 实例① 已 SIGTERM 关闭（服务端内存全部清空）
+[E2E 11:14:46.036] [实例②:err] ◇ injected env (0) from .env
+[E2E 11:14:46.037] [实例②:err] ◇ injected env (0) from .env
+[E2E 11:14:46.037] [实例②:err] ◇ injected env (8) from .env.local
+[E2E 11:14:46.068] [实例②] 体育教师工作台运行中: http://localhost:5291
+[E2E 11:14:46.068] [实例②] 数据存储: Supabase（anon key）
+[E2E 11:14:46.199] 实例② 已是全新进程，重新就绪
+[E2E 11:14:46.207] [实例②:err] (node:30480) Warning: Setting the NODE_TLS_REJECT_UNAUTHORIZED environment variable to '0' makes TLS connections and HTTPS requests insecure by disabling certificate verification.
+(Use `node --trace-warnings ...` to show where the warning was created)
+[E2E 11:14:46.213] [mock-upstream] 收到上游请求，Authorization=Bearer e2e-mock-key
+[E2E 11:14:46.215] ✅ 【核心】重启后带旧 JWT 请求 /api/ai 成功（HTTP 200） — HTTP 200 / data: {"choices":[{"delta":{"content":"JWT 无状态验证内容-重启后依然拿到 AI 回复"}}]}
+
+data: [DONE]
+
+
+[E2E 11:14:46.215] ✅ 【核心】SSE 正文完整收到（鉴权通过后真转发了上游） — data: {"choices":[{"delta":{"content":"JWT 无状态验证内容-重启后依然拿到 AI 回复"}}]}
+
+data: [DONE]
+
+
+[E2E 11:14:46.216] [实例②:err] [auth] ⛔ 已拒绝无效 AI 体验票：POST /api/ai（AI 体验票无效（invalid signature））
+[E2E 11:14:46.216] ✅ 伪造 JWT → 401 — HTTP 401
+[E2E 11:14:46.216] ✅ 伪造 JWT → code=TOKEN_EXPIRED — {"error":"AI 体验权限已过期，请重新输入体验密码登录","code":"TOKEN_EXPIRED","tokenExpired":true,"reason":"AI 体验票无效（invalid signature）"}
+[E2E 11:14:46.217] [实例②:err] [auth] ⛔ 已拒绝无效 AI 体验票：POST /api/ai（AI 体验票已过期）
+[E2E 11:14:46.217] ✅ 过期 JWT → 401 + code=TOKEN_EXPIRED — HTTP 401 / {"error":"AI 体验权限已过期，请重新输入体验密码登录","code":"TOKEN_EXPIRED","tokenExpired":true,"reason":"AI 体验票已过期"}
+[E2E 11:14:46.217] ✅ 401 文案提示重新登录 — AI 体验权限已过期，请重新输入体验密码登录
+[E2E 11:14:46.218] [实例②:err] [auth] ⛔ 已拦截未授权的写操作：POST /api/ai（管理员密码不正确）
+[E2E 11:14:46.218] ✅ 没带票请求 AI → 仍是 403 ADMIN_REQUIRED — HTTP 403 / {"error":"游客无权修改数据","code":"ADMIN_REQUIRED","adminRequired":true,"adminConfigured":true}
+[E2E 11:14:46.218] 🎉 E2E 全部断言通过：JWT 无状态，重启后旧票依然能调用 AI

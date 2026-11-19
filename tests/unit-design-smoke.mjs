@@ -19,7 +19,8 @@ const {
   buildUnitRequest, buildUpstreamRequestBody, UNIT_STAGE_MAX_TOKENS, UNIT_LESSON_CHUNK, UNIT_LESSON_BATCHES,
   unitContextBrief, unitDimensionStats, unitDimensionQuota, unitLessonPlan, UNIT_DIMENSION_BRANCH,
   UNIT_FORMAT_ANALYSIS, UNIT_FORMAT_ANALYSIS_PART1, UNIT_FORMAT_ANALYSIS_PART2,
-  UNIT_FORMAT_LESSONS, UNIT_FORMAT_RUBRIC, UNIT_BACKEND_VERSION,
+  UNIT_FORMAT_LESSONS, UNIT_FORMAT_LESSON_SINGLE, UNIT_FORMAT_RUBRIC, UNIT_BACKEND_VERSION,
+  UNIT_FOCUS_PROGRESSION, UNIT_FITNESS_RULES, UNIT_MATCH_RULES, unitStripOtherTechniques,
 } = require(path.join(ROOT, 'lib/ai-core.js'));
 const { repairTruncatedJSON } = require(path.join(ROOT, 'js/json-repair.js'));
 const catalog = require(path.join(ROOT, 'js/unit-catalog.js'));
@@ -2451,6 +2452,125 @@ await test('㊿s 现代教案缺 structure 字段时绝不能被误判成旧版�
   };
   equal(env.api.isLegacyUnitShape(legacy), true, '真·旧版数据仍要走迁移');
   equal(env.api.migrateLegacyUnit(legacy).unitTitle, '旧天天单元', '旧版迁移没被破坏');
+});
+
+/* ============ 🛑 单一技术绝对聚焦：垫球单元不许出现传球 / 发球 ============ */
+const FOCUS_SELECTION = {
+  category: '球类', item: '排球', level: '水平二（3–4 年级）',
+  topic: '垫球：自垫、对垫启蒙', itemId: 'volleyball', levelId: 'L2',
+};
+const FOCUS_OTHER = /传球|发球|扣球|拦网|吊球|轮转|传切|二传/;
+
+await test('㊿t1 单一技术识别 + 清单过滤：垫球选题剔掉同清单里的传球 / 发球 / 轮转', async () => {
+  equal(catalog.unitCoreTechniqueOf(FOCUS_SELECTION.topic), '垫球', '认出核心技术短名');
+  equal(catalog.unitCoreTechniqueOf('双手胸前投篮（小篮球规则、低篮架）'), '',
+    '没有冒号的多技术选题不启用聚焦过滤，避免误伤');
+  const list = catalog.unitTopicListWithDimension('volleyball', 'L2');
+  const focused = catalog.unitFocusTopicList(list, FOCUS_SELECTION.topic);
+  assert(focused.length >= 2 && focused.length < list.length, '清单被收敛但没有清空');
+  assert(focused.some(entry => entry.includes('垫球')), '垫球条目必须保留');
+  assert(!focused.some(entry => FOCUS_OTHER.test(entry)), `过滤后清单不能出现其它技术：${focused.join('；')}`);
+  // 后端请求也必须用这份过滤后的清单
+  const built = buildUnitRequest({ ...FOCUS_SELECTION, stage: 'analysis_part2', topicList: list });
+  const prompt = built.messages[1].content;
+  const planLines = prompt.split('\n').filter(line => /^\s+\d+\. /.test(line)).join('\n');
+  assert(!FOCUS_OTHER.test(planLines.replace(/如发球、传球|传球启蒙|下手发球体验/g, '')),
+    'AI 抓手里不能有其它技术的条目');
+});
+
+await test('㊿t2 18 课时进阶范式：垫球的 18 个标题全是同一技术，且第 7/8、11/12 课精准', async () => {
+  const titles = catalog.unitFocusProgressionTitles(FOCUS_SELECTION.topic);
+  equal(titles.length, 18, '恰好 18 个进阶标题');
+  assert(!titles.some(title => FOCUS_OTHER.test(title)), '18 个标题里绝不能出现其它技术');
+  equal(titles[6], '两人一抛一垫', '第 7 课必须是两人一抛一垫，不许是传球');
+  equal(titles[7], '对垫启蒙', '第 8 课必须是对垫启蒙，不许是传球');
+  equal(titles[10], '前后移动垫球', '第 11 课必须是前后移动垫球');
+  equal(titles[11], '移动对垫', '第 12 课必须是移动对垫，不许是传球综合');
+  assert(UNIT_FOCUS_PROGRESSION.includes('第 7–9 课（双人与合作）'), 'Prompt 必须给出纵向深挖范式');
+  assert(UNIT_FOCUS_PROGRESSION.includes('第 10–12 课（移动与进阶）'), '范式要覆盖移动进阶阶段');
+  assert(UNIT_FITNESS_RULES.includes('半蹲姿势平移') && UNIT_FITNESS_RULES.includes('听哨音反应变向'),
+    '体能规则必须给出与核心动作相关的示例');
+});
+
+await test('㊿t3 结构图 Prompt：18 节点照进阶标题表输出，泳道节点不许大白话或跳主题', async () => {
+  const built = buildUnitRequest({ ...FOCUS_SELECTION, stage: 'structure' });
+  const prompt = built.messages[1].content;
+  assert(prompt.includes('本次大单元的主题是【垫球：自垫、对垫启蒙】'), '死命令要写在 Prompt 首部');
+  assert(prompt.includes('严禁出现任何未在主题中提及的其他技术'), '必须有绝对聚焦死命令');
+  assert(prompt.includes('必须 100% 围绕该核心技术展开'), '必须有 100% 聚焦表述');
+  assert(prompt.includes('18 课次计划表 · 单一技术进阶标题表'), '结构图要拿到 18 个精准标题');
+  assert(prompt.includes('第7课次｜'), '计划表含第 7 课次');
+  assert(!/第7课次｜[^\n]*传球|第11课次｜[^\n]*传球/.test(prompt), '计划表第 7/11 课不许排传球');
+  assert(prompt.includes('节点名称必须是精准动作名'), '禁止大白话节点名');
+  assert(prompt.includes('绝不许出现跳跃的主题'), '禁止泳道主题跳跃');
+  const nodes = prompt.split('\n').filter(line => /第\d+课次｜/.test(line));
+  equal(nodes.length, 18, '计划表恰好 18 行');
+  equal(nodes.filter(line => FOCUS_OTHER.test(line)).length, 0, '18 行里一行都不许出现其它技术');
+});
+
+await test('㊿t4 单课时 Prompt：第 7 / 11 课写明进阶阶段，体能禁止折返跑/深蹲', async () => {
+  [7, 11].forEach(no => {
+    const built = buildUnitRequest({ ...FOCUS_SELECTION, stage: 'lesson_single', lessonNo: no });
+    const prompt = built.messages[1].content;
+    assert(prompt.includes(`本次【只】生成第 ${no} 课次`), `第 ${no} 课 prompt 写明课次`);
+    assert(prompt.includes('单一技术进阶定位'), '写明本课属于哪个进阶阶段');
+    assert(prompt.includes('严禁出现任何未在主题中提及的其他技术'), '带上绝对聚焦死命令');
+    assert(prompt.includes('严禁写笼统的"折返跑""深蹲"'), '体能针对性规则要进 prompt');
+    assert(prompt.includes(`第${no}课次 |`), `格式范文保留第 ${no} 课次号`);
+    assert(!prompt.includes('【核心技术】'), '范文里的占位符必须被替换成实际技术名');
+    assert(prompt.includes('垫球'), '范文技术名已换成垫球');
+  });
+  assert(!UNIT_FORMAT_LESSON_SINGLE.includes('折返跑'), '格式范文自身不许再示范笼统体能');
+  assert(!UNIT_FORMAT_LESSON_SINGLE.includes('传球') && !UNIT_FORMAT_LESSON_SINGLE.includes('发球'),
+    '格式范文自身不许示范其它技术');
+  assert(!UNIT_FORMAT_LESSONS.includes('折返跑') && !UNIT_FORMAT_RUBRIC.includes('传球'),
+    '课时表与量规范文也要去掉其它技术与笼统体能');
+});
+
+await test('㊿t5 上下文清洗：上一阶段混进的传球/发球整句被摘掉', async () => {
+  const text = '主要教学内容：垫球：自垫、对垫启蒙；传球：正面双手传球启蒙；下手发球体验；半蹲准备姿势';
+  const clean = unitStripOtherTechniques(text, FOCUS_SELECTION);
+  assert(clean.includes('垫球'), '核心技术保留');
+  assert(clean.includes('半蹲准备姿势'), '中性内容保留');
+  assert(!clean.includes('传球') && !clean.includes('发球'), '其它技术整句被摘掉');
+  // 多技术选题不做清洗，避免误伤
+  const multi = '垫球与传球组合；发球游戏';
+  equal(unitStripOtherTechniques(multi, { topic: '垫球、传球与发球组合' }), multi,
+    '多技术选题原样保留');
+});
+
+await test('㊿t6 羽毛球高远球：比赛单一 + 杀球/吊球/搓球列为违禁词，连体能都不许写', async () => {
+  const SELECTION = {
+    category: '球类', item: '羽毛球', level: '水平二（3–4 年级）',
+    topic: '击高远球', itemId: 'badminton', levelId: 'L2',
+  };
+  equal(catalog.unitCoreTechniqueOf(SELECTION.topic), '高远球', '无冒号的「击高远球」也要认成单一技术');
+  const list = catalog.unitTopicListWithDimension('badminton', 'L2');
+  const banned = catalog.unitForbiddenTechniques(list, SELECTION.topic);
+  ['杀球', '吊球', '搓球'].forEach(word => assert(banned.includes(word), `违禁词清单要含「${word}」`));
+  assert(UNIT_MATCH_RULES.includes('比赛环节必须单一'), 'Prompt 要写明比赛单一原则');
+  assert(UNIT_MATCH_RULES.includes('综合对抗赛') && UNIT_MATCH_RULES.includes('战术组合赛'),
+    'Prompt 要点名禁止综合对抗赛 / 战术组合赛');
+  assert(UNIT_MATCH_RULES.includes('高远球对拉赛'), 'Prompt 要给纯技术得分的合格示例');
+  assert(UNIT_MATCH_RULES.includes('连续杀球专项体能'), 'Prompt 要点名禁止把违禁技术写成体能');
+  assert(UNIT_MATCH_RULES.includes('悬吊球') && UNIT_MATCH_RULES.includes('悬挂球'),
+    'Prompt 要堵死「悬吊球」这种字面命中违禁词的器材说法');
+
+  [7, 14].forEach(no => {
+    const built = buildUnitRequest({ ...SELECTION, stage: 'lesson_single', lessonNo: no, topicList: list });
+    const prompt = built.messages[1].content;
+    assert(prompt.includes(`本次【只】生成第 ${no} 课次`), `第 ${no} 课 prompt 正确`);
+    assert(prompt.includes('比赛环节必须单一'), '每一课都要看到比赛单一死命令');
+    assert(prompt.includes('违禁词清单'), '每一课都要看到违禁词清单');
+    ['杀球', '吊球', '搓球'].forEach(word => assert(prompt.includes(word), `第 ${no} 课 prompt 要点名违禁词「${word}」`));
+  });
+
+  const cleaned = unitStripOtherTechniques(
+    '高远球对拉赛；杀球专项体能；吊球落点练习；高处定点高远球练习',
+    { topic: SELECTION.topic, forbiddenTechniques: banned },
+  );
+  assert(cleaned.includes('高远球'), '核心技术内容保留');
+  assert(!cleaned.includes('杀球') && !cleaned.includes('吊球'), '上下文里的违禁技术整句被摘掉');
 });
 
 const failed = results.filter(result => !result.ok);

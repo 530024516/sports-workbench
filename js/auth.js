@@ -18,6 +18,11 @@
 const Auth = {
   FLAG_KEY: 'isAdmin',
   PASSWORD_KEY: 'pe_admin_password',
+  /* 公开离线版：本地模式 + AI 权限 + 服务端签发的 AI 票（票不是密码，不落明文） */
+  LOCAL_MODE_KEY: 'isLocalMode',
+  CAN_AI_KEY: 'canUseAI',
+  PUBLIC_MODE_KEY: 'pe_public_mode',
+  PUBLIC_TOKEN_KEY: 'pe_public_ai_token',
   _observer: null,
   _toastAt: 0,
   _modalOpen: false,
@@ -32,11 +37,90 @@ const Auth = {
     try { return localStorage.getItem(this.PASSWORD_KEY) || ''; } catch (error) { return ''; }
   },
 
+  /* ---------------------- 公开离线版权限状态 ---------------------- */
+
+  isLocalMode() {
+    try { return localStorage.getItem(this.LOCAL_MODE_KEY) === 'true'; } catch (error) { return false; }
+  },
+
+  canUseAI() {
+    try { return localStorage.getItem(this.CAN_AI_KEY) === 'true'; } catch (error) { return false; }
+  },
+
+  getPublicToken() {
+    try { return localStorage.getItem(this.PUBLIC_TOKEN_KEY) || ''; } catch (error) { return ''; }
+  },
+
+  setPublicSession(mode, token = '') {
+    try {
+      localStorage.setItem(this.LOCAL_MODE_KEY, 'true');
+      localStorage.setItem(this.CAN_AI_KEY, mode === 'ai' ? 'true' : 'false');
+      localStorage.setItem(this.PUBLIC_MODE_KEY, mode === 'ai' ? 'ai' : 'local');
+      if (token) localStorage.setItem(this.PUBLIC_TOKEN_KEY, String(token));
+      else localStorage.removeItem(this.PUBLIC_TOKEN_KEY);
+    } catch (error) { /* 无痕模式忽略 */ }
+  },
+
+  clearPublicSession() {
+    try {
+      [this.LOCAL_MODE_KEY, this.CAN_AI_KEY, this.PUBLIC_MODE_KEY, this.PUBLIC_TOKEN_KEY]
+        .forEach(key => localStorage.removeItem(key));
+    } catch (error) { /* 忽略 */ }
+  },
+
+  /**
+   * ⏰ AI 体验票过期：只清「AI 权限 + 票」，保留「纯本地模式」。
+   * 这样老师还在本地数据环境里，只是 AI 按钮重新置灰，重新输一次体验密码即可恢复。
+   */
+  expirePublicAI() {
+    try {
+      localStorage.removeItem(this.CAN_AI_KEY);
+      localStorage.removeItem(this.PUBLIC_TOKEN_KEY);
+      localStorage.setItem(this.PUBLIC_MODE_KEY, 'local');
+    } catch (error) { /* 忽略 */ }
+    this.refresh();
+  },
+
+  /** 收到 401 TOKEN_EXPIRED：弹窗说明 + 清掉过期票（不自动弹登录框，点按钮才弹） */
+  notifyPublicTokenExpired() {
+    this.expirePublicAI();
+    if (this._expiryModalOpen) return;
+    const message = 'AI 体验权限已过期，请重新输入体验密码登录';
+    if (typeof showModal !== 'function' || typeof closeModal !== 'function') {
+      if (typeof window !== 'undefined' && typeof window.alert === 'function') window.alert(message);
+      this.openLoginModal(true);
+      return;
+    }
+    this._expiryModalOpen = true;
+    showModal('🔑 AI 体验权限已过期', `
+      <div class="admin-login">
+        <p class="admin-login-tip">${message}</p>
+        <p class="admin-login-tip">体验票有效期为 12 小时，过期后需要重新输入体验密码。</p>
+      </div>
+    `, `
+      <button class="btn btn-ghost" type="button" onclick="Auth.closeExpiryModal(this)">稍后再说</button>
+      <button class="btn btn-primary" type="button" onclick="Auth.reloginAfterExpiry(this)">重新输入体验密码</button>
+    `);
+  },
+
+  closeExpiryModal(button) {
+    this._expiryModalOpen = false;
+    closeModal(button);
+  },
+
+  reloginAfterExpiry(button) {
+    this._expiryModalOpen = false;
+    closeModal(button);
+    /* 等关闭动画走完再开登录框，避免两个弹窗叠在一起 */
+    setTimeout(() => this.openLoginModal(true), 320);
+  },
+
   setAdmin(password) {
     try {
       localStorage.setItem(this.FLAG_KEY, 'true');
       localStorage.setItem(this.PASSWORD_KEY, String(password || ''));
     } catch (error) { /* 无痕模式等写不进去，忽略 */ }
+    this.clearPublicSession();
   },
 
   clearAdmin() {
@@ -44,6 +128,7 @@ const Auth = {
       localStorage.removeItem(this.FLAG_KEY);
       localStorage.removeItem(this.PASSWORD_KEY);
     } catch (error) { /* 忽略 */ }
+    this.clearPublicSession();
   },
 
   /* ------------------------------ 登录 / 退出 ------------------------------ */
@@ -55,9 +140,31 @@ const Auth = {
   async login(password) {
     const value = String(password || '').trim();
     if (!value) {
-      this.toast('请输入管理员密码', 'error');
+      this.toast('请输入密码', 'error');
       return false;
     }
+    /* ① 先试公开离线版双密码：本地密码只解本机功能，AI 密码才拿到服务端票 */
+    try {
+      const publicResponse = await fetch('/api/public-auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: value }),
+      });
+      const publicData = await publicResponse.json().catch(() => ({}));
+      if (publicResponse.ok && publicData.ok) {
+        this.setPublicSession(publicData.mode, publicData.token);
+        this.toast(publicData.mode === 'ai'
+          ? '已进入本地畅玩版：AI 功能已解锁'
+          : '已进入纯本地模式：仅本机功能，AI 已关闭', 'success');
+        this.closeLoginModal();
+        this.refresh();
+        return true;
+      }
+    } catch (error) {
+      /* 老后端没有 /api/public-auth：继续回退到原管理员密码 */
+    }
+
+    /* ② 回退：原有管理员密码（本地私有部署仍可用） */
     try {
       const response = await fetch('/api/admin', {
         method: 'POST',
@@ -107,9 +214,17 @@ const Auth = {
    * @returns {boolean} true = 放行
    */
   guard(action = '这个操作') {
-    if (this.isAdmin()) return true;
+    if (this.isAdmin() || this.isLocalMode()) return true;
     this.notifyGuest();
     console.warn(`[Auth] 游客模式下拦截了「${action}」`);
+    return false;
+  },
+
+  /** AI 专属守卫：纯本地模式一律拦下，并给指定提示 */
+  guardAI(action = 'AI 生成') {
+    if (this.canUseAI() || this.isAdmin()) return true;
+    this.toast('当前为纯本地模式，请使用 AI 体验密码登录才能生成', 'error');
+    console.warn(`[Auth] 纯本地模式下拦截了「${action}」`);
     return false;
   },
 
@@ -163,12 +278,12 @@ const Auth = {
     }
     this._modalOpen = true;
     showModal(
-      '🔒 管理员登录',
+      '🔒 登录工作台',
       `<div class="admin-login">
-         <p class="admin-login-tip">游客只能查看数据；登录后才能新增、编辑、删除和调用 AI 生成。</p>
-         <label class="admin-login-label" for="adminPasswordInput">管理员密码</label>
+         <p class="admin-login-tip">纯本地密码：仅本机功能（无 AI）；AI 体验密码：全部功能可用（含 AI）。</p>
+         <label class="admin-login-label" for="adminPasswordInput">密码</label>
          <input id="adminPasswordInput" class="admin-login-input" type="password"
-           autocomplete="current-password" placeholder="输入管理员密码"
+           autocomplete="current-password" placeholder="输入本地密码或 AI 体验密码"
            onkeydown="if(event.key==='Enter')Auth.submitLogin()">
        </div>`,
       `<button class="btn btn-secondary" type="button" onclick="Auth.closeLoginModal()">取消</button>
@@ -212,6 +327,32 @@ const Auth = {
     return ['POST', 'PUT', 'PATCH', 'DELETE'].includes(String(method || 'GET').toUpperCase());
   },
 
+  isAICall(url) {
+    const value = String(url || '');
+    return value.includes('/api/ai')
+      || value.startsWith('/api/generate-')
+      || value.startsWith('/api/fitness');
+  },
+
+  /**
+   * 公开离线版的 AI 请求加票；非 AI 请求返回 null 交给原来的管理员逻辑。
+   * 本地数据请求 (/api/data) 不管什么票都返回 null —— 前端 Store 直接不发，
+   * 服务端也只认管理员密码，双保险。
+   */
+  withPublicAIHeader(options = {}, url = '') {
+    if (!this.isLocalMode() || !this.isAICall(url)) return null;
+    if (!this.canUseAI() || !this.getPublicToken()) {
+      const error = new Error('当前为纯本地模式，请使用 AI 体验密码登录才能生成');
+      error.publicAIRequired = true;
+      this.toast(error.message, 'error');
+      throw error;
+    }
+    return {
+      ...options,
+      headers: { ...(options.headers || {}), 'X-Public-AI-Token': this.getPublicToken() },
+    };
+  },
+
   /**
    * 给请求加上管理员凭据（写请求才加）
    * @returns {{headers:Object}|null} null = 游客，不能发这个请求
@@ -235,6 +376,16 @@ const Auth = {
    * 全局 fetch 守卫：把不走 Store 的写请求（AI 生成 / 迁移工具）也拦住。
    * Store 自己在 _fetchJSON 里也有一道，这里是兜底（同一个逻辑，重复加头无害）。
    */
+  localFetchResponse(payload) {
+    const text = JSON.stringify(payload);
+    if (typeof Response === 'function') {
+      return Promise.resolve(new Response(text, {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      }));
+    }
+    return Promise.resolve({ ok: true, status: 200, text: async () => text, json: async () => payload });
+  },
+
   installFetchGuard() {
     if (this._fetchPatched || typeof window === 'undefined' || typeof window.fetch !== 'function') return;
     this._fetchPatched = true;
@@ -242,18 +393,60 @@ const Auth = {
     window.fetch = (input, init = {}) => {
       const url = typeof input === 'string' ? input : String(input?.url || '');
       const method = init?.method || (typeof input === 'object' ? input?.method : 'GET') || 'GET';
-      if (this.isWriteMethod(method) && url.includes('/api/') && !url.includes('/api/admin')) {
-        if (!this.isAdmin() || !this.getPassword()) {
+
+      /* 🛑 公开离线版：/api/data 一个字节都不发，全走 localStorage */
+      if (this.isLocalMode() && url.includes('/api/data')) {
+        return this.localFetchResponse({
+          ok: true, mode: 'local', skipped: true, data: null, report: [],
+        });
+      }
+
+      /* 🛑 AI 权限闸门：纯本地模式不许调用任何 AI 路由（含旧地址） */
+      if (this.isAICall(url)) {
+        try {
+          const publicInit = this.withPublicAIHeader(init, url);
+          if (publicInit) init = publicInit;
+        } catch (error) {
+          return Promise.reject(error);
+        }
+      }
+
+      if (this.isWriteMethod(method) && url.includes('/api/')
+          && !url.includes('/api/admin') && !url.includes('/api/public-auth')) {
+        if (this.isLocalMode()) {
+          /* 本地模式的 AI 票已在上面加好；其余写请求不走服务端 */
+          if (!this.isAICall(url)) {
+            return this.localFetchResponse({ ok: true, mode: 'local', skipped: true });
+          }
+        } else if (!this.isAdmin() || !this.getPassword()) {
           // ⚠️ 只给 3 秒轻提示，绝不自动弹登录框（自动弹窗会打断浏览）
           this.notifyGuest();
           return Promise.reject(new Error('请先登录管理员'));
+        } else {
+          init = {
+            ...init,
+            headers: { ...(init.headers || {}), 'X-Admin-Password': this.getPassword() },
+          };
         }
-        init = {
-          ...init,
-          headers: { ...(init.headers || {}), 'X-Admin-Password': this.getPassword() },
-        };
       }
-      return original(input, init);
+      const response = original(input, init);
+      if (!response || typeof response.then !== 'function') return response;
+      /* ⏰ 无状态 JWT 过期 / 伪造：服务端回 401 TOKEN_EXPIRED。
+         用 clone() 偷看错误体，绝不消费调用方要读的响应流（SSE / JSON 都不受影响）。 */
+      return response.then(res => {
+        if (res?.status === 401 && typeof res.clone === 'function') {
+          res.clone().json().then(detail => {
+            if (detail?.code === 'TOKEN_EXPIRED' || detail?.tokenExpired === true) {
+              this.notifyPublicTokenExpired();
+            }
+          }).catch(() => { /* 错误体不是 JSON：忽略，不打断业务 */ });
+        }
+        return res;
+      }, error => {
+        /* Store 等路径自己解析错误体后抛上来的 error.code 也接住 */
+        if (error?.code === 'TOKEN_EXPIRED') this.notifyPublicTokenExpired();
+        throw error;
+      });
     };
   },
 
@@ -321,23 +514,61 @@ const Auth = {
    * 按权限刷新界面：游客隐藏所有写操作按钮，管理员恢复显示。
    * @param {ParentNode} root 默认整个页面
    */
+  isAIButton(node) {
+    if (node?.getAttribute?.('data-ai-action') === 'true') return true;
+    if (['ud2GenerateBtn', 'generateLessonButton', 'fitnessGenerateBtn'].includes(node?.id)) return true;
+    const text = `${node?.textContent || ''} ${node?.title || ''}`;
+    return /一键生成|AI 生成|生成教案草稿|生成今日训练计划|继续生成/.test(text);
+  },
+
   applyAdminUI(root = document.body) {
     if (!root || typeof root.querySelectorAll !== 'function') return;
     const admin = this.isAdmin();
+    const local = this.isLocalMode();
+    const canWrite = admin || local;                  // 公开本地版允许本机写，但不碰云端
+    const aiBlocked = local && !this.canUseAI();
     // 权限状态标记：状态没变 + 这个节点处理过 → 跳过（课表那种上千个节点的页面才不会卡）
-    const stamp = admin ? 'admin' : 'guest';
-    let nodes = [];
-    try {
-      nodes = [...root.querySelectorAll('[data-admin-only], [onclick]')];
-    } catch (error) {
-      return;
-    }
+    const stamp = admin ? 'admin' : local ? (this.canUseAI() ? 'local-ai' : 'local') : 'guest';
+    /* 分三次查：保留老选择器（历史测试与精简 DOM 实现都认它），再补 AI / button 选择器 */
+    const nodes = [];
+    const seen = new Set();
+    ['[data-admin-only], [onclick]', '[data-ai-action]', 'button'].forEach(selector => {
+      let found = [];
+      try { found = [...root.querySelectorAll(selector)]; } catch (error) { found = []; }
+      found.forEach(node => {
+        if (!node || seen.has(node)) return;
+        seen.add(node);
+        nodes.push(node);
+      });
+    });
     nodes.forEach(node => {
       if (node.tagName === 'SCRIPT' || node.tagName === 'STYLE') return;
       if (node.getAttribute?.('data-admin-checked') === stamp) return;
+
+      /* 🛑 纯本地模式：AI 按钮置灰 + 悬浮提示；AI 体验密码登录后自动恢复 */
+      if (this.isAIButton(node)) {
+        if (aiBlocked) {
+          node.disabled = true;
+          node.dataset.aiDisabledByAuth = 'true';
+          node.title = '当前为纯本地模式，请使用 AI 体验密码登录才能生成';
+          node.classList.add('ai-disabled');
+          node.setAttribute('aria-disabled', 'true');
+        } else if (node.dataset.aiDisabledByAuth === 'true') {
+          node.disabled = false;
+          delete node.dataset.aiDisabledByAuth;
+          node.classList.remove('ai-disabled');
+          node.removeAttribute('aria-disabled');
+          node.removeAttribute('title');
+        }
+      }
+
       const forced = node.hasAttribute('data-admin-only');
       const write = forced || this.isWriteAction(this.readActionName(node));
-      if (!admin && write) {
+      /* 云端同步类按钮在本地模式下一律隐藏；管理员登录入口由 refreshTopbar 隐藏 */
+      const cloudSync = local && /云端同步|同步到云端|同步数据/.test(
+        `${node?.textContent || ''} ${node?.title || ''}`,
+      );
+      if ((!canWrite && write) || cloudSync) {
         node.classList.add('admin-only-hidden');
         node.style.setProperty('display', 'none', 'important');
       } else if (node.classList.contains('admin-only-hidden')) {
@@ -351,11 +582,30 @@ const Auth = {
   /** 顶栏按钮：🔒 管理员登录 / 🔓 退出管理 */
   refreshTopbar() {
     const button = document.getElementById('adminToggleBtn');
-    if (!button) return;
-    const admin = this.isAdmin();
-    button.textContent = admin ? '🔓 退出管理' : '🔒 管理员登录';
-    button.title = admin ? '退出管理员模式（回到游客只读）' : '登录后可新增 / 编辑 / 删除数据';
-    button.classList.toggle('is-admin', admin);
+    if (button) {
+      const admin = this.isAdmin();
+      // 公开版禁用管理员登录入口：本地模式下这个按钮彻底不出现
+      button.hidden = this.isLocalMode();
+      button.style.display = this.isLocalMode() ? 'none' : '';
+      button.textContent = admin ? '🔓 退出管理' : '🔒 管理员登录';
+      button.title = admin ? '退出管理员模式（回到游客只读）' : '登录后可新增 / 编辑 / 删除数据';
+      button.classList.toggle('is-admin', admin);
+    }
+    const badge = document.getElementById('publicModeBadge');
+    if (badge) {
+      const local = this.isLocalMode();
+      badge.hidden = !local;
+      badge.textContent = local
+        ? (this.canUseAI() ? '💻 本地畅玩版' : '💻 纯本地版（无AI）')
+        : '';
+      badge.title = local
+        ? (this.canUseAI() ? '本机存储 + AI 生成已解锁（点击切换权限）' : '仅本机存储，AI 生成已关闭（点击切换权限）')
+        : '';
+    }
+    ['clearLocalDataBtn', 'exportLocalDataBtn'].forEach(id => {
+      const button = document.getElementById(id);
+      if (button) button.hidden = !this.isLocalMode();
+    });
   },
 
   /** 一次刷新到位：按钮 + 界面 */
@@ -402,7 +652,7 @@ const Auth = {
 /* 其它标签页登录/退出时，本页跟着变（多个 Tab 同时开着） */
 if (typeof window !== 'undefined') {
   window.addEventListener('storage', event => {
-    if (event.key === Auth.FLAG_KEY) Auth.refresh();
+    if ([Auth.FLAG_KEY, Auth.LOCAL_MODE_KEY, Auth.CAN_AI_KEY].includes(event.key)) Auth.refresh();
   });
 }
 

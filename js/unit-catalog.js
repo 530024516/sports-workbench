@@ -1129,6 +1129,117 @@ function unitTopicListWithDimension(itemId, levelId) {
 }
 
 /**
+ * 🛑 单一技术聚焦：用户只选了「垫球：自垫、对垫启蒙」这种单一技术时，
+ * 不能把同一细项下的 传球 / 发球 / 轮转 等其它技术清单也塞进 AI 的 18 课时计划表。
+ * 实测正是这份"全量清单"让 AI 在第 7/8 课次排了传球、第 11/12 课次排了传球综合。
+ *
+ * 只在【明确选中单一核心技术】时启用：主题第一段 2–6 个字、且该词确实出现在清单里。
+ * 多技术组合主题（如"行进间变向运球、急停急起与运球投篮衔接"）保持原样，避免误伤。
+ */
+const UNIT_OTHER_TECHNIQUE_RE_G = /(传球|发球|扣球|拦网|吊球|背传|顺网|传切|轮转|二传|配合战术|进攻战术|防守阵形|投篮|射门|颠球|托球|接发球)/g;
+const UNIT_NEUTRAL_TOPIC_RE = /(准备姿势|移动步法|低重心移动|并步|交叉步|球感|抛接游戏|灵敏|力量|柔韧|耐力|观察|评价|安全|规则|器材)/;
+/**
+ * 有些老师在下拉里直接选「击高远球 / 正手发高远球」，主题本身没有冒号 —— 同样是单一技术。
+ * 不认出它，清单里的「杀球启蒙 / 正手吊球」就会混进 18 课时（用户实测抓到的漏洞）。
+ */
+const UNIT_SINGLE_TECHNIQUE_HINTS = [
+  { match: /高远球/, core: '高远球' },
+  { match: /^(垫球|自垫|对垫)$/, core: '垫球' },
+];
+/** 核心技术一旦锁定，这些同项目其它击球技术就是违禁词（含用户点名的杀球 / 吊球 / 搓球） */
+const UNIT_FORBIDDEN_BY_CORE = {
+  高远球: ['杀球', '吊球', '搓球', '扑球', '推球', '勾球', '放网', '挑球', '杀上网', '拉吊突击'],
+  垫球: ['传球', '发球', '扣球', '拦网', '吊球'],
+};
+
+function unitCoreTechniqueOf(topic) {
+  const raw = String(topic || '').trim();
+  if (!raw) return '';
+  /* 没有冒号但明确是单一技术（如「击高远球」）：按内置线索认出来。
+     带「与 / 和 / 、 / 组合」的仍视为多技术主题，不启用聚焦过滤，避免误伤。 */
+  if (!/[：:]/.test(raw) && !/(与|和|、|组合|综合)/.test(raw)) {
+    const hint = UNIT_SINGLE_TECHNIQUE_HINTS.find(item => item.match.test(raw));
+    if (hint) return hint.core;
+  }
+  /* ⚠️ 只有「核心技术：具体说明」这种写法才算"明确锁定单一技术"。
+     没有冒号的多技术选题（如"双手胸前投篮（小篮球规则、低篮架）""运球、投篮与传球"）
+     一律不启用聚焦过滤，避免把本来要求覆盖全部维度的多技术单元误伤成单技术。 */
+  if (!/[：:]/.test(raw)) return '';
+  const first = raw.split(/[：:]/)[0].trim();
+  return first.length >= 2 && first.length <= 6 ? first : '';
+}
+
+/**
+ * 本单元违禁技术词：同一细项里被聚焦过滤掉的其它技术 + 该核心技术的内置黑名单。
+ * 前端过滤后的清单已不含原词，所以内置黑名单是"斩草除根"的兜底。
+ */
+function unitForbiddenTechniques(topicList, topic) {
+  const core = unitCoreTechniqueOf(topic);
+  if (!core) return [];
+  const banned = new Set(UNIT_FORBIDDEN_BY_CORE[core] || []);
+  const fullList = Array.isArray(topicList) ? topicList : [];
+  const focused = unitFocusTopicList(fullList, topic);
+  fullList.forEach(entry => {
+    if (focused.indexOf(entry) >= 0) return;
+    const text = String(entry || '');
+    const tokens = text.match(UNIT_OTHER_TECHNIQUE_RE_G) || [];
+    tokens.forEach(token => {
+      if (!core.includes(token) && !token.includes(core)) banned.add(token);
+    });
+  });
+  return [...banned].filter(word => word && !core.includes(word) && !word.includes(core));
+}
+
+function unitFocusTopicList(topicList, topic) {
+  const list = Array.isArray(topicList) ? topicList : [];
+  const core = unitCoreTechniqueOf(topic);
+  if (!core) return list;
+  if (!list.some(entry => String(entry || '').includes(core))) return list;
+  const coreChar = core.replace(/(球|技术|练习|游戏)$/g, '').slice(0, 1);
+  const focused = list.filter(entry => {
+    const text = String(entry || '');
+    /* ⚠️ 只有当条目里出现了【别的】技术才剔除；
+       主题自身叫"双手胸前投篮"时，"投篮"属于核心技术，绝不能把自己过滤掉。 */
+    const others = text.match(UNIT_OTHER_TECHNIQUE_RE_G) || [];
+    if (others.some(token => !core.includes(token) && !token.includes(core))) return false;
+    if (coreChar && text.includes(coreChar)) return true;
+    return UNIT_NEUTRAL_TOPIC_RE.test(text);
+  });
+  /* 过滤后不足 2 条：宁可保持原样，也不要把 18 课时挤成一种内容 */
+  return focused.length >= 2 ? focused : list;
+}
+
+/**
+ * 单一技术 18 课时的精确进阶标题：结构图泳道节点与课时标题都优先用它。
+ * 逻辑是【纵向嚼碎一个技术】，不是横向再教别的项目 —— 用户指定的 6 段范式。
+ */
+const UNIT_FOCUS_TITLES = {
+  垫球: [
+    '垫球起源与规则', '垫球准备姿势', '徒手垫球模仿与球感游戏',
+    '垫固定球', '自抛自垫', '连续自垫',
+    '两人一抛一垫', '对垫启蒙', '对垫 10 次挑战',
+    '左右移动垫球', '前后移动垫球', '移动对垫',
+    '垫球积分赛', '垫球过网游戏', '垫球接力',
+    '自垫达标测试', '对垫挑战赛', '单元总结与展示',
+  ],
+};
+
+function unitFocusProgressionTitles(topic) {
+  const core = unitCoreTechniqueOf(topic);
+  if (!core) return [];
+  if (UNIT_FOCUS_TITLES[core]) return UNIT_FOCUS_TITLES[core].slice();
+  const short = core.replace(/(球|技术|练习)$/g, '');
+  return [
+    `${core}起源与规则`, `${core}准备姿势`, `徒手${core}模仿与球感游戏`,
+    `固定${core}练习`, `自练${core}`, `连续${core}`,
+    `两人一抛一${short}`, `双人${core}启蒙`, `对练${core}挑战`,
+    `左右移动${core}`, `前后移动${core}`, `移动${core}进阶`,
+    `${core}积分赛`, `${core}过网游戏`, `${core}接力`,
+    `${core}达标测试`, `${core}挑战赛`, '单元总结与展示',
+  ];
+}
+
+/**
  * 某细项 + 某水平下的「完整教学内容清单」（给 AI prompt 用）。
  * 生成大单元时必须让 AI 围绕这些具体项目构建 18 课时，而不是泛泛地写"田径""球类"。
  */
@@ -1161,6 +1272,10 @@ if (typeof window !== 'undefined') {
   window.unitTopicEntries = unitTopicEntries;
   window.unitTopicGroups = unitTopicGroups;
   window.unitTopicListWithDimension = unitTopicListWithDimension;
+  window.unitCoreTechniqueOf = unitCoreTechniqueOf;
+  window.unitFocusTopicList = unitFocusTopicList;
+  window.unitForbiddenTechniques = unitForbiddenTechniques;
+  window.unitFocusProgressionTitles = unitFocusProgressionTitles;
   window.unitDimensionLabel = unitDimensionLabel;
   window.unitCatalogBrief = unitCatalogBrief;
   window.isUnitTopicPending = isUnitTopicPending;
@@ -1171,5 +1286,6 @@ if (typeof module !== 'undefined' && module.exports) {
     UNIT_LEVELS, UNIT_CATALOG, UNIT_ITEM_ALIASES, UNIT_DIMENSIONS, unitLevelLabel,
     findUnitCatalogItem, listUnitTopics, unitTopicEntries, unitTopicGroups,
     unitTopicListWithDimension, unitDimensionLabel, unitCatalogBrief, isUnitTopicPending,
+    unitCoreTechniqueOf, unitFocusTopicList, unitForbiddenTechniques, unitFocusProgressionTitles,
   };
 }

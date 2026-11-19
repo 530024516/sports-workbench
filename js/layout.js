@@ -131,6 +131,15 @@ const Layout = {
         <div class="topbar-right">
           <span class="tag topbar-offline-badge" id="offlineBadge" hidden
                 title="网络不可用：所有数据仍完整保存在本机，联网后自动同步">🌐 离线模式（数据保存在本机）</span>
+          <span class="tag public-mode-badge" id="publicModeBadge" hidden
+                title="点击切换权限（重新输入密码）"
+                onclick="Auth.openLoginModal(true)"></span>
+          <button class="topbar-btn local-data-btn" type="button" id="clearLocalDataBtn"
+                  aria-label="清空本机所有数据" title="清空本机所有数据"
+                  onclick="Store.clearLocalData()">🗑️<span class="local-data-btn-label"> 清空</span></button>
+          <button class="topbar-btn local-data-btn" type="button" id="exportLocalDataBtn"
+                  aria-label="导出本机数据为JSON文件" title="导出本机数据为JSON文件"
+                  onclick="Store.exportLocalBackup()">📥<span class="local-data-btn-label"> 导出</span></button>
           <button class="topbar-btn" type="button" aria-label="工作台显示设置" title="工作台显示设置" onclick="Layout.openDisplaySettings()">⚙️</button>
           <button class="topbar-btn admin-topbar-btn" type="button" id="adminToggleBtn"
                   aria-label="管理员登录" title="登录后可新增 / 编辑 / 删除数据"

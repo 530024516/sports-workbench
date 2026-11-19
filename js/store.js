@@ -29,6 +29,84 @@
  */
 'use strict';
 
+/* ================= 公开离线版：localStorage 命名空间隔离 =================
+ * 进入纯本地 / 本地畅玩模式后，所有业务键自动写成 guest_<原键名>：
+ *   guest_pe_big_unit_design_v1 / guest_pe_offline_resources_v1 / guest_pe_lesson_plans ...
+ * 管理员（原 isAdmin 模式）仍读写未加前缀的原键，两边互不串号。
+ * 这里用一个同名的 local proxy 接管本文件内所有 localStorage.* 调用，
+ * 避免逐个改几十处读写点，也避免以后新增读写忘了加前缀。
+ */
+const RAW_LOCAL_STORAGE = (typeof globalThis !== 'undefined' && globalThis.localStorage)
+  ? globalThis.localStorage
+  : (typeof localStorage !== 'undefined' ? localStorage : null);
+const AUTH_SESSION_KEYS = new Set([
+  'isAdmin', 'pe_admin_password',
+  'isLocalMode', 'canUseAI', 'pe_public_mode', 'pe_public_ai_token',
+]);
+const GUEST_PREFIX = 'guest_';
+
+function guestNamespaceEnabled() {
+  return typeof window !== 'undefined'
+    && typeof window.Auth?.isLocalMode === 'function'
+    && window.Auth.isLocalMode() === true;
+}
+
+function namespacedKey(key) {
+  const raw = String(key ?? '');
+  if (!guestNamespaceEnabled() || !raw || AUTH_SESSION_KEYS.has(raw)) return raw;
+  return raw.startsWith(GUEST_PREFIX) ? raw : `${GUEST_PREFIX}${raw}`;
+}
+
+/** 对外只暴露「当前命名空间可见」的键：游客看不到管理员键，反之亦然 */
+function visibleStorageKeys() {
+  if (!RAW_LOCAL_STORAGE) return [];
+  const keys = [];
+  for (let i = 0; i < RAW_LOCAL_STORAGE.length; i += 1) {
+    const raw = RAW_LOCAL_STORAGE.key(i);
+    if (!raw) continue;
+    const guest = raw.startsWith(GUEST_PREFIX);
+    if (guestNamespaceEnabled()) {
+      if (guest) keys.push(raw.slice(GUEST_PREFIX.length));
+      else if (AUTH_SESSION_KEYS.has(raw)) keys.push(raw);
+    } else if (!guest || AUTH_SESSION_KEYS.has(raw)) {
+      keys.push(raw);
+    }
+  }
+  return keys;
+}
+
+const localStorage = {
+  get length() { return visibleStorageKeys().length; },
+  key(index) { return visibleStorageKeys()[Number(index)] ?? null; },
+  getItem(key) {
+    if (!RAW_LOCAL_STORAGE) return null;
+    return RAW_LOCAL_STORAGE.getItem(namespacedKey(key));
+  },
+  setItem(key, value) {
+    if (!RAW_LOCAL_STORAGE) return;
+    RAW_LOCAL_STORAGE.setItem(namespacedKey(key), value);
+  },
+  removeItem(key) {
+    if (!RAW_LOCAL_STORAGE) return;
+    RAW_LOCAL_STORAGE.removeItem(namespacedKey(key));
+  },
+  clear() {
+    /* 只清当前命名空间；管理员数据 / 游客数据互不影响。
+       控制台的 nukeAllStorage() 直接调 RAW_LOCAL_STORAGE.clear() 做全量清空。 */
+    visibleStorageKeys().forEach(key => {
+      RAW_LOCAL_STORAGE.removeItem(namespacedKey(key));
+    });
+  },
+};
+
+if (typeof window !== 'undefined') {
+  window.StoreStorageNS = {
+    enabled: guestNamespaceEnabled,
+    key: namespacedKey,
+    prefix: GUEST_PREFIX,
+  };
+}
+
 // 仅需知道键名；表结构与落库方式由服务端决定
 const STORE_KEYS = [
   // ⛔ pe_students 已彻底退役：学生信息模块已删除，名册由体测记录派生。
@@ -204,7 +282,10 @@ const VIEW_PIN_TTL_MS = 30 * 60 * 1000;
 /** 视图优先级锁生效期间挂上的后台推送暂停原因（online 事件 / 解除锁时释放） */
 const VIEW_PIN_PUSH_HOLD = '视图优先级锁：等待用户确认';
 /** 管理员登录凭据：hardResetAll() 默认保留，传 { includeAuth: true } 才一起清 */
-const HARD_RESET_AUTH_KEYS = ['isAdmin', 'pe_admin_password'];
+const HARD_RESET_AUTH_KEYS = [
+  'isAdmin', 'pe_admin_password',
+  'isLocalMode', 'canUseAI', 'pe_public_mode', 'pe_public_ai_token',
+];
 /** 兜底前缀（pe_ / sportsMeet*）覆盖不到的零散键 */
 const HARD_RESET_MISC_KEYS = ['meetPurgeNotice'];
 /**
@@ -556,6 +637,15 @@ const Store = {
     } catch (error) {
       return false;
     }
+  },
+
+  /* ---------------- 公开离线版（纯本地 / 本地畅玩） ---------------- */
+
+  /** 公开版本地模式：数据 100% 留在本机，任何 /api/data 请求都不发 */
+  isPublicLocalMode() {
+    return typeof window !== 'undefined'
+      && typeof window.Auth?.isLocalMode === 'function'
+      && window.Auth.isLocalMode() === true;
   },
 
   /* ---------------- 静默本地模式（纯本地操作的绝对隔离） ---------------- */
@@ -976,6 +1066,8 @@ const Store = {
 
   /** 后台静默同步（对外：手动刷新数据用）。失败会自动重试一次。 */
   async sync({ attempts = MAX_SYNC_ATTEMPTS } = {}) {
+    // 🏠 公开离线版：一个 /api/data GET 都不发，安静用 guest_ 命名空间的本地缓存
+    if (this.isPublicLocalMode()) return { ok: true, changed: [], reason: 'public-local' };
     // 🤫 静默本地模式：一个 GET 都不发，安静用本地缓存
     if (this.isQuietLocalMode()) return { ok: false, changed: [], reason: 'quiet' };
     if (this.isGenerating()) {
@@ -1041,8 +1133,23 @@ const Store = {
        ② 已登录 → 自动带上 X-Admin-Password 请求头。 */
     let guarded = options;
     const method = String(options?.method || 'GET').toUpperCase();
-    if (method !== 'GET' && method !== 'HEAD' && typeof window !== 'undefined' && window.Auth) {
-      if (!String(url).includes('/api/admin')) {
+    /* 🏠 公开离线版：/api/data 一次都不发，直接从内存返回"本地模式跳过" */
+    if (this.isPublicLocalMode() && String(url).includes('/api/data')) {
+      return Promise.resolve({ ok: true, mode: 'local', skipped: true, data: null, report: [] });
+    }
+    /* 🪪 AI 路由走公开体验票（纯本地模式没有票就直接拦下） */
+    let publicAI = false;
+    if (typeof window !== 'undefined' && window.Auth?.isAICall?.(url)) {
+      publicAI = true;
+      try {
+        const withTicket = window.Auth.withPublicAIHeader(guarded, url);
+        if (withTicket) guarded = withTicket;
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    }
+    if (!publicAI && method !== 'GET' && method !== 'HEAD' && typeof window !== 'undefined' && window.Auth) {
+      if (!String(url).includes('/api/admin') && !String(url).includes('/api/public-auth')) {
         if (!window.Auth.isAdmin() || !window.Auth.getPassword()) {
           // ⚠️ 只给 3 秒轻提示，绝不自动弹登录框（自动弹窗会打断浏览）
           if (typeof window.Auth.notifyGuest === 'function') window.Auth.notifyGuest();
@@ -1178,6 +1285,8 @@ const Store = {
 
   /** 单次同步：失败一律 throw，由 _syncWithRetry 负责重试与降级 */
   async _syncOnce({ timeout = REQUEST_TIMEOUT } = {}) {
+    // 🏠 公开离线版：绝不允许云端数据把本机 guest_ 数据冲掉
+    if (this.isPublicLocalMode()) return { ok: true, changed: [], reason: 'public-local' };
     // 🤫 静默本地模式：一个 GET 都不发，安静用本地缓存
     if (this.isQuietLocalMode()) return { ok: false, changed: [], reason: 'quiet' };
     // ⏸ 生成期间：连 GET 都不发 —— 云端旧数据一点机会都没有
@@ -2800,6 +2909,8 @@ const Store = {
    *    唯一例外 options.allowEmpty —— 用户在界面上亲手点的清空 / 删除（clearIntent / force）。
    */
   async _persist(key, value, options = {}) {
+    /* 🏠 公开离线版：数据已经由 write() 落在 guest_ 命名空间，绝不发 POST /api/data */
+    if (this.isPublicLocalMode()) return false;
     /* 🗑️ 已退役键的【最后一道铁闸】：哪怕有一条老锁被恢复成待补推，
        走到这里也绝不发出 POST /api/data，并顺手把本地残留再清一次。 */
     if (this.isRetiredKey(key)) {
@@ -2876,6 +2987,8 @@ const Store = {
    * 自动同步、补推、修复流程【一律】不许调用。
    */
   async _persistClear(key) {
+    /* 🏠 公开离线版：云端没有任何可清的行，本地清空即可 */
+    if (this.isPublicLocalMode()) return false;
     /* 🗑️ 已退役键云端根本没有对应入口，绝不能发 DELETE 请求 */
     if (this.isRetiredKey(key)) {
       this._purgeRetiredLocalKey(key);
@@ -3578,8 +3691,10 @@ const Store = {
     const pre = this.hardResetAll({ reload: false, includeAuth: true, reason: `${reason}（预清理）` });
     let cleared = 0;
     try {
-      cleared = localStorage.length;
-      localStorage.clear();
+      if (RAW_LOCAL_STORAGE) {
+        cleared = RAW_LOCAL_STORAGE.length;
+        RAW_LOCAL_STORAGE.clear();
+      }
     } catch (error) {
       console.warn('[Store] 💥 localStorage.clear() 失败（可能是隐私模式）', error);
     }
@@ -3596,6 +3711,61 @@ const Store = {
     console.warn(`[Store] 💥 nukeAllStorage：localStorage.clear() 已执行（约 ${cleared} 个键全部清空，`
       + '含登录凭据与所有历史备份），页面即将刷新');
     return { ok: true, clearedKeys: cleared, preCleared: pre.removedKeys.length, willReload: Boolean(canReload) };
+  },
+
+  /** 🗑️ 顶栏【清空本机数据】：只清当前命名空间（游客清 guest_，管理员清原键） */
+  clearLocalData(options = {}) {
+    const { reload = true, confirmFirst = true } = options || {};
+    const scope = this.isPublicLocalMode() ? '游客本机数据' : '本机数据';
+    if (confirmFirst && typeof window !== 'undefined'
+        && typeof window.confirm === 'function'
+        && !window.confirm(`确定要清空${scope}吗？此操作不可撤销（云端数据不受影响）。`)) {
+      return { ok: false, cancelled: true };
+    }
+    const keys = visibleStorageKeys().filter(key => !AUTH_SESSION_KEYS.has(key));
+    keys.forEach(key => {
+      try { localStorage.removeItem(key); } catch (error) { /* 忽略 */ }
+    });
+    this.cache.clear();
+    this._localWrites.clear();
+    this._pendingWrites.clear();
+    this._failedWrites.clear();
+    this._deferredWrites.clear();
+    this._pendingClearKeys.clear();
+    this._viewPins.clear();
+    console.warn(`[Store] 🗑️ 已清空${scope}：${keys.length} 个键；登录状态保留`);
+    if (reload && typeof window !== 'undefined' && typeof window.location?.reload === 'function') {
+      setTimeout(() => window.location.reload(), 0);
+    }
+    return { ok: true, removedKeys: keys, willReload: Boolean(reload) };
+  },
+
+  /** 📥 顶栏【导出本地数据（JSON）】：只导出当前命名空间，不含登录凭据与 AI 票 */
+  exportLocalBackup() {
+    const data = {};
+    visibleStorageKeys().forEach(key => {
+      if (AUTH_SESSION_KEYS.has(key)) return;
+      try {
+        const raw = localStorage.getItem(key);
+        if (raw === null) return;
+        try { data[key] = JSON.parse(raw); } catch (error) { data[key] = raw; }
+      } catch (error) { /* 忽略读取失败 */ }
+    });
+    const payload = {
+      app: '体育教师工作台',
+      scope: this.isPublicLocalMode() ? 'guest-local' : 'admin-local',
+      exportedAt: new Date().toISOString(),
+      keys: Object.keys(data).length,
+      data,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `工作台本地备份-${new Date().toISOString().slice(0, 10)}.json`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return { ok: true, keys: payload.keys, filename: link.download };
   },
 
   /** 洗掉所有与本项目相关的 localStorage 键（枚举 + 内置键兜底） */
