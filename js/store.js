@@ -336,8 +336,11 @@ const PURGE_SIGNAL_KEY = 'pe_meet_purge_epoch_v1';
 // 否则隔天别的页面导入新数据时，一次残留的世代号前进会被误判成清空指令，把新数据抹掉
 const PURGE_SIGNAL_TTL_MS = 10000;
 // 整体判定为"未连接"后的定时重连（有上限，不会无限重试）
+// ⚡ 线上（Vercel 冷启动慢）8 秒一发太密：拉长到 30 秒，并主要靠窗口 focus 事件驱动补一次。
 const MAX_RECONNECT = 3;
-const RECONNECT_DELAY = 8000;
+const RECONNECT_DELAY = 30000;
+/** focus 触发同步的最小间隔，防止反复点窗口造成请求风暴 */
+const FOCUS_SYNC_MIN_GAP_MS = 15000;
 
 let resolveReady;
 const readyPromise = new Promise(resolve => { resolveReady = resolve; });
@@ -408,6 +411,13 @@ const Store = {
    * 只保留本地数据与保护锁。生成大单元 / 从离线资源库载入时由调用方挂上。
    */
   _backgroundSyncHolds: new Set(),
+  /**
+   * ⛔ 401/403 熔断：服务端明确说"没权限"时，后台所有重试定时器立刻停掉。
+   * 密码错误重试一百次也不会变对 —— 线上游客模式疯狂发包就是这么来的。
+   * 重新登录成功后由 Auth → Store.clearAuthBlock() 解除。
+   */
+  _authBlocked: false,
+  _authBlockReason: '',
   /** 当前在飞的 GET 请求控制器：进入静默本地模式时逐个 abort，立刻掐断后台同步 */
   _inFlightReads: new Set(),
   /** 静默本地模式截止时间戳 / 原因 / 对应的暂停 hold 键 */
@@ -441,8 +451,8 @@ const Store = {
        会让 hasCache 误判为 true，还会被 _restoreUnconfirmed() 当成待补推数据 POST 上云。 */
     this._purgeRetiredLocalKeys();
     const hasCache = this._loadLocal();
-    /* 🧹 启动就清掉历史遗留 / 超期的 __local_backup 镜像，别让它们无限期堆积 */
-    this._clearStaleLocalBackups();
+    /* 🧹 清理超期的 __local_backup 镜像：纯收尾活，不挡首屏，挪到空闲期做 */
+    this.deferIdle(() => this._clearStaleLocalBackups(), 800);
     /* ① 启动第一原则：无条件检查备份。
        只要主键是空的，立刻【同步】从 pe_sports_meet_backup_v1 拉数据覆盖主键，
        不等云端、不看差异、不看有没有缓存 —— 这是备份存在的唯一意义。
@@ -465,8 +475,8 @@ const Store = {
       if (hasCache || restored) {
         // ① 有缓存：先让页面用本地数据立即渲染
         this._finishStart();
-        // ② 渲染之后再后台静默同步（不 await，避免阻塞首屏）
-        this._syncPromise = this.sync();
+        // ② 页面先用缓存画出来，后台同步挪到空闲期（Vercel 上不会被冷启动拖住交互）
+        this.deferIdle(() => { this._syncPromise = this.sync(); }, 500);
       } else {
         // ③ 冷启动：没有任何本地缓存，才等云端（只试 1 次，先让页面出来）
         this._showLoading();
@@ -480,7 +490,9 @@ const Store = {
         }
         this._hideLoading();
         this._finishStart();
-        if (this.cloudState !== 'on') this._syncPromise = this.sync();
+        if (this.cloudState !== 'on') {
+          this.deferIdle(() => { this._syncPromise = this.sync(); }, 500);
+        }
       }
     } catch (error) {
       console.error('[Store] 初始化失败，已回退到本地存储', error);
@@ -646,6 +658,46 @@ const Store = {
     return typeof window !== 'undefined'
       && typeof window.Auth?.isLocalMode === 'function'
       && window.Auth.isLocalMode() === true;
+  },
+
+  /**
+   * ⛔ 立刻停掉全部后台发包定时器（401/403 / 游客本地模式）。
+   *
+   * 线上卡顿的典型来源：服务端明确回了 401/403（没权限），但前端还在按
+   * 1.2s / 1.5s / 3s 的节奏疯狂重试、重连、补推 —— 密码错了重试一百次也不会变对。
+   * 这里把「重连 / 写入续传 / 清空补推」三条定时器链一次性全掐掉，
+   * 业务数据与保护锁原样保留，重新登录成功后由 clearAuthBlock() 恢复。
+   */
+  stopBackgroundSync(reason = 'HTTP 401/403', { quiet = false } = {}) {
+    this._authBlocked = true;
+    this._authBlockReason = reason;
+    const stoppedCritical = this._pauseCriticalTimers();
+    let stoppedClear = 0;
+    this._clearRetryTimers.forEach(timer => { clearTimeout(timer); stoppedClear += 1; });
+    this._clearRetryTimers.clear();
+    let stoppedReconnect = 0;
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+      stoppedReconnect = 1;
+    }
+    const aborted = this.abortInFlightReads(reason);
+    if (!quiet) {
+      console.warn(`[Store] 🛑 后台同步已熔断（${reason}）：停掉 ${stoppedCritical} 个续传、`
+        + `${stoppedClear} 个补清、${stoppedReconnect} 个重连定时器，取消 ${aborted} 个在飞 GET；`
+        + '数据完整留在本机，重新登录后恢复');
+    }
+    return { ok: true, stoppedCritical, stoppedClear, stoppedReconnect, aborted };
+  },
+
+  /** ✅ 重新登录成功后解除 401/403 熔断，把挂起的续传重新排队 */
+  clearAuthBlock(reason = '重新登录') {
+    if (!this._authBlocked) return { ok: false, reason: '未处于熔断状态' };
+    this._authBlocked = false;
+    this._authBlockReason = '';
+    const scheduled = this._resumeBackgroundPushes();
+    console.log(`[Store] ✅ 后台同步熔断已解除（${reason}），重新排了 ${scheduled} 个续传`);
+    return { ok: true, scheduled };
   },
 
   /* ---------------- 静默本地模式（纯本地操作的绝对隔离） ---------------- */
@@ -1062,10 +1114,25 @@ const Store = {
       try { this.handleOnline('online 事件'); }
       catch (error) { console.warn('[Store] 网络恢复自愈失败', error); }
     });
+    /* ⚡ 事件驱动补同步：没有 setInterval 心跳；断开后主要靠「用户回到这个窗口」补一次，
+       比盲目的 8 秒轮询省得多，也避免 Vercel 冷启动期间一直打后端。 */
+    window.addEventListener('focus', () => {
+      if (this._authBlocked || this.isPublicLocalMode() || this.isQuietLocalMode()) return;
+      if (this.cloudState !== 'off' || this.syncing) return;
+      const now = Date.now();
+      if (now - (this._lastFocusSyncAt || 0) < FOCUS_SYNC_MIN_GAP_MS) return;
+      this._lastFocusSyncAt = now;
+      if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
+      Promise.resolve(this.sync()).catch(error => {
+        console.warn('[Store] 窗口获焦补同步失败', error?.message || error);
+      });
+    });
   },
 
   /** 后台静默同步（对外：手动刷新数据用）。失败会自动重试一次。 */
   async sync({ attempts = MAX_SYNC_ATTEMPTS } = {}) {
+    /* ⛔ 401/403 熔断中：一个字节都不发，等重新登录（clearAuthBlock） */
+    if (this._authBlocked) return { ok: false, changed: [], reason: 'auth-blocked' };
     // 🏠 公开离线版：一个 /api/data GET 都不发，安静用 guest_ 命名空间的本地缓存
     if (this.isPublicLocalMode()) return { ok: true, changed: [], reason: 'public-local' };
     // 🤫 静默本地模式：一个 GET 都不发，安静用本地缓存
@@ -1119,6 +1186,19 @@ const Store = {
 
   _delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+  },
+
+  /**
+   * ⚡ 把不影响首屏的任务挪到浏览器空闲期（没有 requestIdleCallback 就退化成 500ms 定时）。
+   * 目的：Vercel 上大表格 + 大 localStorage 一起读时，先让页面框架画出来再干重活。
+   */
+  deferIdle(task, delay = 500) {
+    if (typeof task !== 'function') return;
+    if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
+      window.requestIdleCallback(() => task(), { timeout: delay });
+      return;
+    }
+    setTimeout(task, delay);
   },
 
   /**
@@ -1217,6 +1297,11 @@ const Store = {
         error.hint = detail?.hint || '';
         error.detail = detail;
         if (detail?.adminRequired === true) error.adminRequired = true;
+        /* ⛔ 401/403 是「没权限」不是「网不好」：立刻停掉全部后台重试 / 重连 / 补推定时器。
+           线上游客模式之所以疯狂发包，就是这类响应被当成普通失败一路重试。 */
+        if (response.status === 401 || response.status === 403) {
+          this.stopBackgroundSync(`HTTP ${response.status}${detail?.code ? ` ${detail.code}` : ''} ${url}`);
+        }
         throw error;
       }
       const payload = await response.json();
@@ -1285,6 +1370,7 @@ const Store = {
 
   /** 单次同步：失败一律 throw，由 _syncWithRetry 负责重试与降级 */
   async _syncOnce({ timeout = REQUEST_TIMEOUT } = {}) {
+    if (this._authBlocked) return { ok: false, changed: [], reason: 'auth-blocked' };
     // 🏠 公开离线版：绝不允许云端数据把本机 guest_ 数据冲掉
     if (this.isPublicLocalMode()) return { ok: true, changed: [], reason: 'public-local' };
     // 🤫 静默本地模式：一个 GET 都不发，安静用本地缓存
@@ -1442,6 +1528,12 @@ const Store = {
 
   /** 判定未连接后定时重连（最多 MAX_RECONNECT 次），网络恢复后自动用云端数据覆盖本地 */
   _scheduleReconnect() {
+    /* ⛔ 401/403 熔断中 / 游客本地模式：绝不排重连定时器（线上疯狂发包的主因） */
+    if (this._authBlocked) return;
+    if (this.isPublicLocalMode()) {
+      if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
+      return;
+    }
     if (this.isQuietLocalMode()) return;   // 🤫 静默期间别排重连，否则 8 秒后又来一次超时
     if (typeof window === 'undefined' || this._reconnectTimer) return;
     if (this._reconnectAttempts >= MAX_RECONNECT) return;
@@ -3835,6 +3927,8 @@ const Store = {
 
   /** 后台上传是否被暂停：返回原因字符串（空串 = 可以发 POST） */
   _backgroundPushBlocked() {
+    if (this._authBlocked) return `鉴权失败已熔断（${this._authBlockReason}），等待重新登录`;
+    if (this.isPublicLocalMode()) return '公开本地模式：数据只留本机，不上云';
     if (this._cloudPaused) return '云端同步已暂停';
     if (this.isGenerating()) return '大单元生成中';
     if (this._backgroundSyncHolds.size) return `后台上传已暂停（${[...this._backgroundSyncHolds].join('、')}）`;

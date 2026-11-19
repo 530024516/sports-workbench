@@ -1,32 +1,32 @@
-[E2E 11:17:20.956] ✅ .env.local 配了 PUBLIC_PASSWORD_LOCAL
-[E2E 11:17:20.957] ✅ .env.local 配了 PUBLIC_PASSWORD_AI
-[E2E 11:17:20.957] ✅ 两个公开密码不一样
-[E2E 11:17:20.958] 已临时摘掉 Supabase 配置：启动阶段不会去拉云端，专注本地权限链路
-[E2E 11:17:20.980] [server:err] ◇ injected env (0) from .env
-[E2E 11:17:20.980] [server:err] ◇ injected env (0) from .env
-[E2E 11:17:20.980] [server:err] ◇ injected env (6) from .env.local
-[E2E 11:17:21.006] [server] 体育教师工作台运行中: http://localhost:5255
-[E2E 11:17:21.006] [server] 数据存储: localStorage（未检测到 SUPABASE_URL / SUPABASE_ANON_KEY）
-[E2E 11:17:22.298] 打开登录框，输入密码（纯本地）
-[E2E 11:17:22.374] [server] [auth] ✅ 公开版登录成功：纯本地模式
-[E2E 11:17:22.401] ✅ 纯本地密码 → isLocalMode=true
-[E2E 11:17:22.401] ✅ 纯本地密码 → canUseAI=false
-[E2E 11:17:22.401] ✅ 顶栏徽章显示「纯本地版（无AI）」 — 💻 纯本地版（无AI）
-[E2E 11:17:22.401] ✅ 管理员登录入口已隐藏
-[E2E 11:17:22.401] ✅ AI 生成按钮全部置灰 — [{"disabled":true,"title":"当前为纯本地模式，请使用 AI 体验密码登录才能生成","id":""}]
-[E2E 11:17:22.401] ✅ 悬浮提示是指定文案
-[E2E 11:17:22.709] ✅ 写数据落在 guest_ 命名空间 — [{"id":"local-only","value":42}]
-[E2E 11:17:22.709] ✅ 管理员命名空间零污染
-[E2E 11:17:22.709] ✅ 纯本地模式下写数据零 POST /api/data — 0 次
-[E2E 11:17:22.726] 打开登录框，输入密码（AI 体验）
-[E2E 11:17:22.774] [server] [auth] ✅ 公开版登录成功：AI 体验（JWT 12h）模式
-[E2E 11:17:22.801] ✅ AI 密码 → canUseAI=true
-[E2E 11:17:22.801] ✅ AI 密码 → 服务端签发了票
-[E2E 11:17:22.801] ✅ 顶栏徽章显示「本地畅玩版」 — 💻 本地畅玩版
-[E2E 11:17:22.801] ✅ AI 按钮恢复可用 — [{"disabled":false,"id":""}]
-[E2E 11:17:23.285] 保存后诊断：{"saved":true,"originalPlans":null,"lessonKeys":["guest_pe_lesson_plans"],"toasts":["✅ AI 教案已保存"]}；AI 票：1 次
-[E2E 11:17:23.285] ✅ 生成结果成功保存在 guest_ 本地草稿
-[E2E 11:17:23.285] ✅ 生成结果不写进管理员命名空间
-[E2E 11:17:23.285] ✅ AI 请求带 X-Public-AI-Token — ["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYWlfZ3Vlc3QiLCJpYXQiOjE3OTUwODcwNDIsImV4cCI6MTc5NTEzMDI0Mn0.nwP_2_INjPPxyPNjb6S5TSSF_GYkp7HlQG9NmuEwksw"]
-[E2E 11:17:23.285] ✅ 整个流程零 POST /api/data — 0 次
-[E2E 11:17:23.285] 🎉 E2E 全部通过：纯本地密码禁 AI 且零云端 POST；AI 密码解锁后生成结果留在 guest_ 本机命名空间
+[E2E 11:58:28.304] ✅ .env.local 配了 PUBLIC_PASSWORD_LOCAL
+[E2E 11:58:28.305] ✅ .env.local 配了 PUBLIC_PASSWORD_AI
+[E2E 11:58:28.305] ✅ 两个公开密码不一样
+[E2E 11:58:28.305] 已临时摘掉 Supabase 配置：启动阶段不会去拉云端，专注本地权限链路
+[E2E 11:58:28.327] [server:err] ◇ injected env (0) from .env
+[E2E 11:58:28.327] [server:err] ◇ injected env (0) from .env
+[E2E 11:58:28.327] [server:err] ◇ injected env (6) from .env.local
+[E2E 11:58:28.352] [server] 体育教师工作台运行中: http://localhost:5255
+[E2E 11:58:28.352] [server] 数据存储: localStorage（未检测到 SUPABASE_URL / SUPABASE_ANON_KEY）
+[E2E 11:58:29.746] 打开登录框，输入密码（纯本地）
+[E2E 11:58:29.820] [server] [auth] ✅ 公开版登录成功：纯本地模式
+[E2E 11:58:29.857] ✅ 纯本地密码 → isLocalMode=true
+[E2E 11:58:29.857] ✅ 纯本地密码 → canUseAI=false
+[E2E 11:58:29.857] ✅ 顶栏徽章显示「纯本地版（无AI）」 — 💻 纯本地版（无AI）
+[E2E 11:58:29.857] ✅ 管理员登录入口已隐藏
+[E2E 11:58:29.858] ✅ AI 生成按钮全部置灰 — [{"disabled":true,"title":"当前为纯本地模式，请使用 AI 体验密码登录才能生成","id":""}]
+[E2E 11:58:29.858] ✅ 悬浮提示是指定文案
+[E2E 11:58:30.165] ✅ 写数据落在 guest_ 命名空间 — [{"id":"local-only","value":42}]
+[E2E 11:58:30.165] ✅ 管理员命名空间零污染
+[E2E 11:58:30.165] ✅ 纯本地模式下写数据零 POST /api/data — 0 次
+[E2E 11:58:30.182] 打开登录框，输入密码（AI 体验）
+[E2E 11:58:30.232] [server] [auth] ✅ 公开版登录成功：AI 体验（JWT 12h）模式
+[E2E 11:58:30.257] ✅ AI 密码 → canUseAI=true
+[E2E 11:58:30.258] ✅ AI 密码 → 服务端签发了票
+[E2E 11:58:30.258] ✅ 顶栏徽章显示「本地畅玩版」 — 💻 本地畅玩版
+[E2E 11:58:30.258] ✅ AI 按钮恢复可用 — [{"disabled":false,"id":""}]
+[E2E 11:58:30.741] 保存后诊断：{"saved":true,"originalPlans":null,"lessonKeys":["guest_pe_lesson_plans"],"toasts":["✅ AI 教案已保存"]}；AI 票：1 次
+[E2E 11:58:30.741] ✅ 生成结果成功保存在 guest_ 本地草稿
+[E2E 11:58:30.742] ✅ 生成结果不写进管理员命名空间
+[E2E 11:58:30.742] ✅ AI 请求带 X-Public-AI-Token — ["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYWlfZ3Vlc3QiLCJpYXQiOjE3OTUwODk1MTAsImV4cCI6MTc5NTEzMjcxMH0.UgsrWWXd7Bm1N9MBD75JTPy6Mg6Q4NWND8MSr34K0uA"]
+[E2E 11:58:30.742] ✅ 整个流程零 POST /api/data — 0 次
+[E2E 11:58:30.742] 🎉 E2E 全部通过：纯本地密码禁 AI 且零云端 POST；AI 密码解锁后生成结果留在 guest_ 本机命名空间

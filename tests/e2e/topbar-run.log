@@ -1,15 +1,15 @@
-[E2E 11:17:23.487] ✅ .env.local 配了 PUBLIC_PASSWORD_LOCAL
-[E2E 11:17:23.488] 已临时摘掉 Supabase 配置（避免测试污染云端），结束自动恢复
-[E2E 11:17:23.509] [server:err] ◇ injected env (0) from .env
-[E2E 11:17:23.509] [server:err] ◇ injected env (0) from .env
-[E2E 11:17:23.509] [server:err] ◇ injected env (6) from .env.local
-[E2E 11:17:23.535] [server] 体育教师工作台运行中: http://localhost:5277
-[E2E 11:17:23.535] [server] 数据存储: localStorage（未检测到 SUPABASE_URL / SUPABASE_ANON_KEY）
-[E2E 11:17:23.749] server.js 已启动：http://127.0.0.1:5277
-[E2E 11:17:24.016] 真实 Chrome 已启动：Chrome/157.0.8103.79
-[E2E 11:17:24.682] [server] [auth] ✅ 公开版登录成功：纯本地模式
-[E2E 11:17:25.108] 已用 PUBLIC_PASSWORD_LOCAL 真实登录，进入「纯本地版（无AI）」
-[E2E 11:17:25.112] 桌面顶栏：{
+[E2E 11:58:41.361] ✅ .env.local 配了 PUBLIC_PASSWORD_LOCAL
+[E2E 11:58:41.362] 已临时摘掉 Supabase 配置（避免测试污染云端），结束自动恢复
+[E2E 11:58:41.384] [server:err] ◇ injected env (0) from .env
+[E2E 11:58:41.384] [server:err] ◇ injected env (0) from .env
+[E2E 11:58:41.385] [server:err] ◇ injected env (6) from .env.local
+[E2E 11:58:41.415] [server] 体育教师工作台运行中: http://localhost:5277
+[E2E 11:58:41.415] [server] 数据存储: localStorage（未检测到 SUPABASE_URL / SUPABASE_ANON_KEY）
+[E2E 11:58:41.623] server.js 已启动：http://127.0.0.1:5277
+[E2E 11:58:41.910] 真实 Chrome 已启动：Chrome/157.0.8103.79
+[E2E 11:58:42.745] [server] [auth] ✅ 公开版登录成功：纯本地模式
+[E2E 11:58:43.179] 已用 PUBLIC_PASSWORD_LOCAL 真实登录，进入「纯本地版（无AI）」
+[E2E 11:58:43.183] 桌面顶栏：{
   "viewport": {
     "w": 1440,
     "h": 900
@@ -145,24 +145,24 @@
     }
   ]
 }
-[E2E 11:17:25.112] ✅ 桌面：徽章确实显示「纯本地版（无AI）」 — 💻 纯本地版（无AI）
-[E2E 11:17:25.112] ✅ 桌面：两个本机数据按钮可见
-[E2E 11:17:25.112] ✅ 桌面：按钮文案已精简为「清空」「导出」 — 🗑️ 清空 / 📥 导出
-[E2E 11:17:25.112] ✅ 桌面：清空按钮 title="清空本机所有数据" — 清空本机所有数据
-[E2E 11:17:25.112] ✅ 桌面：导出按钮 title="导出本机数据为JSON文件" — 导出本机数据为JSON文件
-[E2E 11:17:25.112] ✅ 桌面：两个按钮都有完整 aria-label
-[E2E 11:17:25.112] ✅ 桌面：按钮文案不换行（每个标签只有一个文本行盒） — ["clearLocalDataBtn:1","exportLocalDataBtn:1"]
-[E2E 11:17:25.112] ✅ 桌面：按钮没有横向溢出 — ["clearLocalDataBtn:66/66","exportLocalDataBtn:66/66"]
-[E2E 11:17:25.112] ✅ 桌面：按钮没有竖排（高度没有暴涨） — ["clearLocalDataBtn:32px","exportLocalDataBtn:32px"]
-[E2E 11:17:25.112] ✅ 桌面：右侧所有元素 white-space=nowrap — ["publicModeBadge:nowrap","clearLocalDataBtn:nowrap","exportLocalDataBtn:nowrap","topbar-btn:nowrap","topbar-date:nowrap"]
-[E2E 11:17:25.112] ✅ 桌面：右侧所有元素 flex-shrink=0 — ["publicModeBadge:0","clearLocalDataBtn:0","exportLocalDataBtn:0","topbar-btn:0","topbar-date:0"]
-[E2E 11:17:25.112] ✅ 桌面：右侧容器 align-items:center、gap:8px — {"alignItems":"center","gap":"8px","flexShrink":"0"}
-[E2E 11:17:25.112] ✅ 桌面：所有右侧元素都在视口内 — ["publicModeBadge:918.5~1050.5","clearLocalDataBtn:1058.5~1126.5","exportLocalDataBtn:1134.5~1202.5","topbar-btn:1210.5~1246.5","topbar-date:1254.5~1416"]
-[E2E 11:17:25.112] ✅ 桌面：右侧元素彼此不重叠
-[E2E 11:17:25.112] ✅ 桌面：左侧标题区域与右侧按钮不重叠 — 左侧右边界 918.5 / 右侧左边界 918.5
-[E2E 11:17:25.112] ✅ 桌面：顶栏没有横向滚动 — scrollWidth=1240 clientWidth=1240
-[E2E 11:17:25.162] 桌面截图已保存：/Users/dengyinhong/Desktop/Personal/01_进行中/体育教师工作台/tests/e2e/topbar-desktop-pass.png
-[E2E 11:17:25.675] 手机顶栏：{
+[E2E 11:58:43.183] ✅ 桌面：徽章确实显示「纯本地版（无AI）」 — 💻 纯本地版（无AI）
+[E2E 11:58:43.183] ✅ 桌面：两个本机数据按钮可见
+[E2E 11:58:43.183] ✅ 桌面：按钮文案已精简为「清空」「导出」 — 🗑️ 清空 / 📥 导出
+[E2E 11:58:43.183] ✅ 桌面：清空按钮 title="清空本机所有数据" — 清空本机所有数据
+[E2E 11:58:43.183] ✅ 桌面：导出按钮 title="导出本机数据为JSON文件" — 导出本机数据为JSON文件
+[E2E 11:58:43.183] ✅ 桌面：两个按钮都有完整 aria-label
+[E2E 11:58:43.183] ✅ 桌面：按钮文案不换行（每个标签只有一个文本行盒） — ["clearLocalDataBtn:1","exportLocalDataBtn:1"]
+[E2E 11:58:43.184] ✅ 桌面：按钮没有横向溢出 — ["clearLocalDataBtn:66/66","exportLocalDataBtn:66/66"]
+[E2E 11:58:43.184] ✅ 桌面：按钮没有竖排（高度没有暴涨） — ["clearLocalDataBtn:32px","exportLocalDataBtn:32px"]
+[E2E 11:58:43.184] ✅ 桌面：右侧所有元素 white-space=nowrap — ["publicModeBadge:nowrap","clearLocalDataBtn:nowrap","exportLocalDataBtn:nowrap","topbar-btn:nowrap","topbar-date:nowrap"]
+[E2E 11:58:43.184] ✅ 桌面：右侧所有元素 flex-shrink=0 — ["publicModeBadge:0","clearLocalDataBtn:0","exportLocalDataBtn:0","topbar-btn:0","topbar-date:0"]
+[E2E 11:58:43.184] ✅ 桌面：右侧容器 align-items:center、gap:8px — {"alignItems":"center","gap":"8px","flexShrink":"0"}
+[E2E 11:58:43.184] ✅ 桌面：所有右侧元素都在视口内 — ["publicModeBadge:918.5~1050.5","clearLocalDataBtn:1058.5~1126.5","exportLocalDataBtn:1134.5~1202.5","topbar-btn:1210.5~1246.5","topbar-date:1254.5~1416"]
+[E2E 11:58:43.184] ✅ 桌面：右侧元素彼此不重叠
+[E2E 11:58:43.184] ✅ 桌面：左侧标题区域与右侧按钮不重叠 — 左侧右边界 918.5 / 右侧左边界 918.5
+[E2E 11:58:43.184] ✅ 桌面：顶栏没有横向滚动 — scrollWidth=1240 clientWidth=1240
+[E2E 11:58:43.221] 桌面截图已保存：/Users/dengyinhong/Desktop/Personal/01_进行中/体育教师工作台/tests/e2e/topbar-desktop-pass.png
+[E2E 11:58:43.729] 手机顶栏：{
   "viewport": {
     "w": 375,
     "h": 812
@@ -287,19 +287,19 @@
     }
   ]
 }
-[E2E 11:17:25.675] ✅ 手机：两个按钮仍然可见
-[E2E 11:17:25.675] ✅ 手机：按钮自动折叠成纯图标（文字隐藏） — ["clearLocalDataBtn:none","exportLocalDataBtn:none"]
-[E2E 11:17:25.675] ✅ 手机：按钮为 40×40 圆形图标 — ["clearLocalDataBtn:40×40","exportLocalDataBtn:40×40"]
-[E2E 11:17:25.675] ✅ 手机：title 悬浮说明依然保留
-[E2E 11:17:25.675] ✅ 手机：徽章只留 emoji（font-size:0），但文案仍在 textContent 中 — 0px / 💻 纯本地版（无AI）
-[E2E 11:17:25.675] ✅ 手机：右侧所有元素 white-space=nowrap — ["publicModeBadge:nowrap","clearLocalDataBtn:nowrap","exportLocalDataBtn:nowrap","topbar-btn:nowrap"]
-[E2E 11:17:25.675] ✅ 手机：右侧所有元素 flex-shrink=0 — ["publicModeBadge:0","clearLocalDataBtn:0","exportLocalDataBtn:0","topbar-btn:0"]
-[E2E 11:17:25.675] ✅ 手机：右侧容器 align-items:center、gap:8px — {"alignItems":"center","gap":"8px","flexShrink":"0"}
-[E2E 11:17:25.675] ✅ 手机：所有右侧元素都在视口内 — ["publicModeBadge:186~223","clearLocalDataBtn:231~271","exportLocalDataBtn:279~319","topbar-btn:327~367"]
-[E2E 11:17:25.675] ✅ 手机：右侧元素彼此不重叠
-[E2E 11:17:25.675] ✅ 手机：左侧标题区域与右侧按钮不重叠 — 左侧右边界 178 / 右侧左边界 186
-[E2E 11:17:25.675] ✅ 手机：顶栏没有横向滚动 — scrollWidth=375 clientWidth=375
-[E2E 11:17:25.699] 手机截图已保存：/Users/dengyinhong/Desktop/Personal/01_进行中/体育教师工作台/tests/e2e/topbar-mobile-pass.png
-[E2E 11:17:25.699] 🎉 E2E 全部断言通过：纯本地版顶栏单行不溢出，手机端自动折叠成图标
-[E2E 11:17:25.772] server.js 已关闭
-[E2E 11:17:25.812] .env.local 已原样恢复
+[E2E 11:58:43.730] ✅ 手机：两个按钮仍然可见
+[E2E 11:58:43.730] ✅ 手机：按钮自动折叠成纯图标（文字隐藏） — ["clearLocalDataBtn:none","exportLocalDataBtn:none"]
+[E2E 11:58:43.730] ✅ 手机：按钮为 40×40 圆形图标 — ["clearLocalDataBtn:40×40","exportLocalDataBtn:40×40"]
+[E2E 11:58:43.730] ✅ 手机：title 悬浮说明依然保留
+[E2E 11:58:43.730] ✅ 手机：徽章只留 emoji（font-size:0），但文案仍在 textContent 中 — 0px / 💻 纯本地版（无AI）
+[E2E 11:58:43.730] ✅ 手机：右侧所有元素 white-space=nowrap — ["publicModeBadge:nowrap","clearLocalDataBtn:nowrap","exportLocalDataBtn:nowrap","topbar-btn:nowrap"]
+[E2E 11:58:43.730] ✅ 手机：右侧所有元素 flex-shrink=0 — ["publicModeBadge:0","clearLocalDataBtn:0","exportLocalDataBtn:0","topbar-btn:0"]
+[E2E 11:58:43.730] ✅ 手机：右侧容器 align-items:center、gap:8px — {"alignItems":"center","gap":"8px","flexShrink":"0"}
+[E2E 11:58:43.730] ✅ 手机：所有右侧元素都在视口内 — ["publicModeBadge:186~223","clearLocalDataBtn:231~271","exportLocalDataBtn:279~319","topbar-btn:327~367"]
+[E2E 11:58:43.730] ✅ 手机：右侧元素彼此不重叠
+[E2E 11:58:43.730] ✅ 手机：左侧标题区域与右侧按钮不重叠 — 左侧右边界 178 / 右侧左边界 186
+[E2E 11:58:43.730] ✅ 手机：顶栏没有横向滚动 — scrollWidth=375 clientWidth=375
+[E2E 11:58:43.756] 手机截图已保存：/Users/dengyinhong/Desktop/Personal/01_进行中/体育教师工作台/tests/e2e/topbar-mobile-pass.png
+[E2E 11:58:43.756] 🎉 E2E 全部断言通过：纯本地版顶栏单行不溢出，手机端自动折叠成图标
+[E2E 11:58:43.828] server.js 已关闭
+[E2E 11:58:43.864] .env.local 已原样恢复

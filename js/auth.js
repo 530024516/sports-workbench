@@ -59,6 +59,8 @@ const Auth = {
       if (token) localStorage.setItem(this.PUBLIC_TOKEN_KEY, String(token));
       else localStorage.removeItem(this.PUBLIC_TOKEN_KEY);
     } catch (error) { /* 无痕模式忽略 */ }
+    /* ✅ 重新登录成功：解除 Store 因 401/403 挂起的后台同步熔断 */
+    try { window.Store?.clearAuthBlock?.('公开版重新登录'); } catch (error) { /* 忽略 */ }
   },
 
   clearPublicSession() {
@@ -121,6 +123,8 @@ const Auth = {
       localStorage.setItem(this.PASSWORD_KEY, String(password || ''));
     } catch (error) { /* 无痕模式等写不进去，忽略 */ }
     this.clearPublicSession();
+    /* ✅ 重新登录成功：解除 Store 因 401/403 挂起的后台同步熔断 */
+    try { window.Store?.clearAuthBlock?.('管理员重新登录'); } catch (error) { /* 忽略 */ }
   },
 
   clearAdmin() {
@@ -392,7 +396,8 @@ const Auth = {
     const original = window.fetch.bind(window);
     window.fetch = (input, init = {}) => {
       const url = typeof input === 'string' ? input : String(input?.url || '');
-      const method = init?.method || (typeof input === 'object' ? input?.method : 'GET') || 'GET';
+      const method = String(init?.method
+        || (typeof input === 'object' ? input?.method : 'GET') || 'GET').toUpperCase();
 
       /* 🛑 公开离线版：/api/data 一个字节都不发，全走 localStorage */
       if (this.isLocalMode() && url.includes('/api/data')) {
@@ -431,16 +436,25 @@ const Auth = {
       }
       const response = original(input, init);
       if (!response || typeof response.then !== 'function') return response;
+
+      /* ⚡ 性能闸门（Vercel 线上卡顿主因之一）：
+         只有【/api/ 下的写请求 + 本地确实有 AI 票】才可能需要解析 TOKEN_EXPIRED。
+         其余（静态资源、GET、200 成功响应、根本没票的游客）直接返回原始 Promise，
+         连 .then() 都不挂、更不做 response.clone().json() —— 主线程零额外开销。 */
+      const isApi = url.includes('/api/');
+      const isReadOnly = method === 'GET' || method === 'HEAD';
+      const mightExpire = isApi && !isReadOnly && Boolean(this.getPublicToken());
+      if (!mightExpire) return response;
+
       /* ⏰ 无状态 JWT 过期 / 伪造：服务端回 401 TOKEN_EXPIRED。
          用 clone() 偷看错误体，绝不消费调用方要读的响应流（SSE / JSON 都不受影响）。 */
       return response.then(res => {
-        if (res?.status === 401 && typeof res.clone === 'function') {
-          res.clone().json().then(detail => {
-            if (detail?.code === 'TOKEN_EXPIRED' || detail?.tokenExpired === true) {
-              this.notifyPublicTokenExpired();
-            }
-          }).catch(() => { /* 错误体不是 JSON：忽略，不打断业务 */ });
-        }
+        if (res?.ok || res?.status !== 401 || typeof res.clone !== 'function') return res;
+        res.clone().json().then(detail => {
+          if (detail?.code === 'TOKEN_EXPIRED' || detail?.tokenExpired === true) {
+            this.notifyPublicTokenExpired();
+          }
+        }).catch(() => { /* 错误体不是 JSON：忽略，不打断业务 */ });
         return res;
       }, error => {
         /* Store 等路径自己解析错误体后抛上来的 error.code 也接住 */
