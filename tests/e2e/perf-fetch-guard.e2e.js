@@ -1,18 +1,15 @@
 /**
- * 真实 Puppeteer E2E：Vercel 卡顿优化验证
+ * 真实 Puppeteer E2E：纯净管理员模式下的性能与熔断回归
  *
  *   node tests/e2e/perf-fetch-guard.e2e.js
  *
- * 真 server.js + 真 Chrome + 真登录接口；只有 /api/ai 用请求拦截回 401。
- * 通过给 Response.prototype.clone 打桩，实证全局 fetch 拦截器不再无差别读流。
- *
+ * 真 server.js + 真 Chrome + 真管理员登录。
  * 断言：
- *   ① GET /api/config、200 的 POST /api/public-auth → clone() 调用数为 0
- *   ② 401 的 POST /api/ai → clone() 恰好 1 次，且能正常弹过期提示
- *   ③ 源码里没有 setInterval 心跳；RECONNECT_DELAY 已拉长；有 focus 事件驱动补同步
- *   ④ Store.stopBackgroundSync() 后 2 秒内 0 个 /api/data 请求；
- *      sync() 直接返回 auth-blocked；clearAuthBlock() 后恢复
- *   ⑤ deferIdle 存在且启动时的后台同步已挪到空闲期
+ *   ① auth.js 已无 installFetchGuard（没有任何全局 fetch 拦截 / clone().json()）
+ *   ② GET /api/config、200/403 的 POST 都不会触发 response.clone()
+ *   ③ 源码无 setInterval 心跳、重连间隔 30s、focus 事件补同步、deferIdle 延迟加载
+ *   ④ Store.stopBackgroundSync() 后 2 秒内 0 个 /api/data 请求，
+ *      sync() 返回 auth-blocked；clearAuthBlock() 后恢复
  *
  * 产物：tests/e2e/perf-fetch-guard-run.log
  */
@@ -26,7 +23,7 @@ const puppeteer = require('puppeteer');
 
 const ROOT = path.resolve(__dirname, '../..');
 const LOG = path.join(__dirname, 'perf-fetch-guard-run.log');
-const PORT = Number(process.env.E2E_PORT) || 5303;
+const PORT = Number(process.env.E2E_PORT) || 5307;
 const BASE = `http://127.0.0.1:${PORT}`;
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const ENV_LOCAL = path.join(ROOT, '.env.local');
@@ -90,23 +87,20 @@ function restoreEnv() {
 }
 
 async function main() {
-  const aiPassword = readEnvValue('PUBLIC_PASSWORD_AI');
-  check('.env.local 配了 PUBLIC_PASSWORD_AI', Boolean(aiPassword));
+  const adminPassword = readEnvValue('ADMIN_PASSWORD');
+  check('.env.local 配了 ADMIN_PASSWORD', Boolean(adminPassword));
 
-  /* ---------- 源码级静态断言 ---------- */
   const authSrc = fs.readFileSync(path.join(ROOT, 'js/auth.js'), 'utf8');
   const storeSrc = fs.readFileSync(path.join(ROOT, 'js/store.js'), 'utf8');
+  check('auth.js 已彻底删除 installFetchGuard', !/installFetchGuard/.test(authSrc));
+  check('auth.js 没有 clone().json() 全局读流', !/\.clone\(\)\.json\(\)/.test(authSrc));
   check('js/auth.js / js/store.js 没有 setInterval 心跳',
     !/\bsetInterval\s*\(/.test(authSrc) && !/\bsetInterval\s*\(/.test(storeSrc));
-  check('重连间隔已从 8 秒拉长到 30 秒', /const RECONNECT_DELAY = 30000;/.test(storeSrc));
+  check('重连间隔已拉长到 30 秒', /const RECONNECT_DELAY = 30000;/.test(storeSrc));
   check('已改为 focus 事件驱动补同步', /addEventListener\('focus'/.test(storeSrc));
   check('已提供 deferIdle（requestIdleCallback + 500ms 降级）',
     /deferIdle\(task, delay = 500\)/.test(storeSrc) && /requestIdleCallback/.test(storeSrc));
-  check('401/403 熔断方法存在且接进 _doFetch',
-    /stopBackgroundSync\(reason/.test(storeSrc)
-    && /response\.status === 401 \|\| response\.status === 403/.test(storeSrc));
-  check('fetch 拦截器有前置过滤（只读 + 无票直接放行）',
-    /const mightExpire = isApi && !isReadOnly && Boolean\(this\.getPublicToken\(\)\)/.test(authSrc));
+  check('401/403 熔断方法仍在', /stopBackgroundSync\(reason/.test(storeSrc));
 
   if (swapEnvWithoutSupabase()) {
     log('已临时摘掉 Supabase 配置，结束自动恢复');
@@ -133,7 +127,6 @@ async function main() {
     await page.setViewport({ width: 1440, height: 900 });
     page.on('pageerror', error => log(`[pageerror] ${error.message}`));
 
-    /* 在任何页面脚本之前给 Response.clone 打桩，统计全局拦截器读流的次数 */
     await page.evaluateOnNewDocument(() => {
       window.__cloneCalls = [];
       const original = Response.prototype.clone;
@@ -143,7 +136,7 @@ async function main() {
       };
       window.__dataRequests = [];
       const originalFetch = window.fetch;
-      window.fetch = function countedFetch(input, init) {
+      window.fetch = function countedFetch(input) {
         const url = typeof input === 'string' ? input : String(input?.url || '');
         if (url.includes('/api/data')) window.__dataRequests.push(url);
         return originalFetch.apply(this, arguments);
@@ -155,63 +148,34 @@ async function main() {
       && typeof window.Store === 'object'
       && !document.getElementById('store-loading'), { timeout: 60000 });
 
-    /* 真登录 → 本地有票，后续请求才会进入「可能需要检查过期」的分支 */
     await page.evaluate(() => Auth.openLoginModal(true));
     await page.waitForSelector('#adminPasswordInput', { visible: true, timeout: 10000 });
-    await page.type('#adminPasswordInput', aiPassword);
+    await page.type('#adminPasswordInput', adminPassword);
     await page.evaluate(() => Auth.submitLogin());
-    await page.waitForFunction(() => Auth.canUseAI() && Boolean(Auth.getPublicToken()),
-      { timeout: 15000 });
+    await page.waitForFunction(() => Auth.isAdmin() === true, { timeout: 15000 });
     await sleep(600);
-    check('已登录且本地有 AI 票（假设最坏情况：所有写请求都可能被检查）', true);
+    check('管理员登录成功', true);
 
-    /* ---------- ① GET + 200 POST 都不该 clone ---------- */
     await page.evaluate(() => { window.__cloneCalls = []; });
-    const plain = await page.evaluate(async () => {
+    const responses = await page.evaluate(async password => {
       const getRes = await fetch('/api/config', { headers: { Accept: 'application/json' } });
-      const postRes = await fetch('/api/public-auth', {
+      const okRes = await fetch('/api/admin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: 'definitely-wrong-password' }),
+        body: JSON.stringify({ password }),
       });
-      return { getStatus: getRes.status, postStatus: postRes.status };
-    });
-    log(`普通请求结果：${JSON.stringify(plain)}`);
-    const afterPlain = await page.evaluate(() => window.__cloneCalls.slice());
-    check('GET /api/config 与 200/403 的 POST 都没有触发 response.clone()',
-      afterPlain.length === 0, JSON.stringify(afterPlain));
+      const badRes = await fetch('/api/admin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: 'wrong-password' }),
+      });
+      return { get: getRes.status, ok: okRes.status, bad: badRes.status };
+    }, adminPassword);
+    log(`普通请求结果：${JSON.stringify(responses)}`);
+    const cloneCalls = await page.evaluate(() => window.__cloneCalls.slice());
+    check('GET 与 200/403 的 POST 都没有触发 response.clone()',
+      cloneCalls.length === 0, JSON.stringify(cloneCalls));
 
-    /* ---------- ② 401 的 POST /api/ai 只 clone 一次 ---------- */
-    await page.setRequestInterception(true);
-    page.on('request', request => {
-      if (request.url().includes('/api/ai')) {
-        request.respond({
-          status: 401,
-          contentType: 'application/json; charset=utf-8',
-          body: JSON.stringify({ code: 'TOKEN_EXPIRED', tokenExpired: true, error: 'AI 体验权限已过期，请重新输入体验密码登录' }),
-        });
-        return;
-      }
-      request.continue();
-    });
-    await page.evaluate(() => { window.__cloneCalls = []; });
-    await page.click('button[onclick="openAIGeneration()"]');
-    await page.waitForSelector('#aiLessonForm', { timeout: 10000 });
-    await sleep(400);
-    await page.click('#aiLessonForm input[name="topic"]');
-    await page.keyboard.type('篮球原地运球');
-    await page.click('#generateLessonButton');
-    await page.waitForFunction(() => [...document.querySelectorAll('.modal-overlay')]
-      .some(node => node.textContent.includes('AI 体验权限已过期')), { timeout: 15000 });
-    const afterExpired = await page.evaluate(() => window.__cloneCalls.slice());
-    log(`401 之后的 clone 调用：${JSON.stringify(afterExpired)}`);
-    check('401 的 POST /api/ai 恰好 clone 1 次', afterExpired.length === 1,
-      JSON.stringify(afterExpired));
-    check('clone 的确实是 /api/ai 的 401 响应',
-      afterExpired[0]?.url.includes('/api/ai') && afterExpired[0]?.status === 401,
-      JSON.stringify(afterExpired[0]));
-
-    /* ---------- ④ 401/403 熔断后不再发包 ---------- */
     const blocked = await page.evaluate(async () => {
       const result = Store.stopBackgroundSync('E2E 401');
       window.__dataRequests = [];
@@ -226,8 +190,8 @@ async function main() {
     });
     log(`熔断后状态：${JSON.stringify(blocked)}`);
     check('stopBackgroundSync 停掉了定时器并取消了在飞 GET', blocked.result.ok === true);
-    check('sync() 直接返回 auth-blocked，不发请求',
-      blocked.syncResult?.reason === 'auth-blocked', JSON.stringify(blocked.syncResult));
+    check('sync() 直接返回 auth-blocked', blocked.syncResult?.reason === 'auth-blocked',
+      JSON.stringify(blocked.syncResult));
     check('熔断后 2 秒内 0 个 /api/data 请求',
       blocked.dataRequests.length === 0, JSON.stringify(blocked.dataRequests));
     check('后台上传闸门明确处于熔断状态',
@@ -240,7 +204,7 @@ async function main() {
     check('clearAuthBlock() 能恢复后台同步',
       resumed.cleared.ok === true && resumed.blocked === false, JSON.stringify(resumed));
 
-    log('🎉 E2E 全部断言通过：fetch 拦截器零多余读流、401 熔断后零后台发包');
+    log('🎉 E2E 全部断言通过：无全局 fetch 拦截、熔断后零后台发包');
     return { ok: true };
   } finally {
     if (browser) { try { await browser.close(); } catch (error) { /* 忽略 */ } }

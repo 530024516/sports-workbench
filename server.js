@@ -15,7 +15,7 @@ const fs = require('fs');
 const path = require('path');
 const { handleAiRequest } = require('./lib/ai-core.js');
 const { handleDataRequest } = require('./lib/data-api.js');
-const { handleAdminRequest, handlePublicAuthRequest } = require('./lib/admin-core.js');
+const { handleAdminRequest } = require('./lib/admin-core.js');
 const { requireAdmin } = require('./lib/admin-auth.js');
 const supabase = require('./lib/supabase.js');
 
@@ -133,11 +133,6 @@ const server = http.createServer((req, res) => {
     guardAsync(() => handleAdminRequest(req, res), res, '/api/admin');
     return;
   }
-  /* 公开离线版双密码登录：本地密码只解本机功能；AI 密码才签发 /api/ai 票 */
-  if (pathname === '/api/public-auth') {
-    guardAsync(() => handlePublicAuthRequest(req, res), res, '/api/public-auth');
-    return;
-  }
   /* ⛔ 权限闸门（安全底线）：GET 放行，POST/PUT/DELETE 必须带 X-Admin-Password。
      lib/data-api.js 与 lib/ai-core.js 里也各有一道，这里是入口处的第三道（纵深防御）。 */
   if (pathname === '/api/data') {
@@ -146,12 +141,10 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (Object.prototype.hasOwnProperty.call(AI_ROUTES, pathname)) {
-    /* AI 体验票只放行 AI 路由；/api/data 在上一分支仍只认管理员密码 */
-    if (!requireAdmin(req, res, { allowPublicAI: true })) return;
+    if (!requireAdmin(req, res)) return;
     guardAsync(() => handleAiRequest(req, res, {
       type: AI_ROUTES[pathname] || undefined,
       timeoutMs: AI_TIMEOUT_MS,
-      allowPublicAI: true,
     }), res, pathname);
     return;
   }

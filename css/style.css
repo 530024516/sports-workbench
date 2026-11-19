@@ -548,39 +548,6 @@ body.sidebar-collapsed .sidebar .user-mini {
   background: rgba(6, 167, 125, 0.08);
 }
 
-/* ========== 纯本地版：顶栏【🗑️ 清空】/【📥 导出】==========
-   ⚠️ 文字只有两个字，但仍必须做成自适应宽度的胶囊按钮：
-   .topbar-btn 默认是 36px 正圆，长文案塞进去会竖排、重叠、溢出顶栏。 */
-.local-data-btn {
-  width: auto;
-  min-width: 36px;
-  height: 32px;
-  padding: 0 10px;
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  gap: 4px;
-  font-size: 13px;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
-.local-data-btn:hover {
-  border-color: var(--primary);
-  color: var(--primary);
-  background: var(--primary-100, #fff2e8);
-}
-
-#clearLocalDataBtn:hover {
-  border-color: var(--danger);
-  color: var(--danger);
-  background: var(--danger-light, #fff1f0);
-}
-
-.local-data-btn-label {
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
 .admin-login {
   font-size: 14px;
   line-height: 1.7;
@@ -885,23 +852,6 @@ table.data-table tbody tr:last-child td {
    [hidden] 必须显式声明，否则 .tag 的 display:inline-flex 会盖过浏览器默认隐藏。 */
 .topbar-offline-badge[hidden] { display: none; }
 .topbar-offline-badge { white-space: nowrap; flex-shrink: 0; cursor: default; }
-/* 公开离线版：模式徽章 + 本机数据工具 */
-.public-mode-badge[hidden],
-.local-data-btn[hidden] { display: none !important; }
-.public-mode-badge {
-  white-space: nowrap;
-  flex-shrink: 0;
-  cursor: pointer;
-  background: #e8f3ff;
-  color: #135fa8;
-  border: 1px solid #b9d8f5;
-}
-.ai-disabled {
-  opacity: .45 !important;
-  cursor: not-allowed !important;
-  filter: grayscale(.6);
-}
-
 /* 搜索框 */
 .search-box {
   display: flex;
@@ -2842,28 +2792,12 @@ select.form-control {
     height: 40px;
   }
 
-  /* 手机端：本机数据工具折叠成纯图标，完整说明留在 title 里 */
-  .local-data-btn {
-    width: 40px;
-    height: 40px;
-    min-width: 40px;
-    padding: 0;
-    border-radius: 50%;
-    font-size: 18px;
-  }
-
-  .local-data-btn-label {
-    display: none;
-  }
-
-  /* 徽章同样只留 emoji：textContent 保持原文案（悬浮 / 读屏可用），视觉上不占地方 */
-  .public-mode-badge,
+  /* 徽章只留 emoji：完整文案保持在 title 里，视觉上不占地方 */
   .topbar-offline-badge {
     font-size: 0;
     padding: 2px 8px;
   }
 
-  .public-mode-badge::before { content: '💻'; font-size: 15px; }
   .topbar-offline-badge::before { content: '🌐'; font-size: 15px; }
 
   .modal-close {

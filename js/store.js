@@ -29,84 +29,6 @@
  */
 'use strict';
 
-/* ================= 公开离线版：localStorage 命名空间隔离 =================
- * 进入纯本地 / 本地畅玩模式后，所有业务键自动写成 guest_<原键名>：
- *   guest_pe_big_unit_design_v1 / guest_pe_offline_resources_v1 / guest_pe_lesson_plans ...
- * 管理员（原 isAdmin 模式）仍读写未加前缀的原键，两边互不串号。
- * 这里用一个同名的 local proxy 接管本文件内所有 localStorage.* 调用，
- * 避免逐个改几十处读写点，也避免以后新增读写忘了加前缀。
- */
-const RAW_LOCAL_STORAGE = (typeof globalThis !== 'undefined' && globalThis.localStorage)
-  ? globalThis.localStorage
-  : (typeof localStorage !== 'undefined' ? localStorage : null);
-const AUTH_SESSION_KEYS = new Set([
-  'isAdmin', 'pe_admin_password',
-  'isLocalMode', 'canUseAI', 'pe_public_mode', 'pe_public_ai_token',
-]);
-const GUEST_PREFIX = 'guest_';
-
-function guestNamespaceEnabled() {
-  return typeof window !== 'undefined'
-    && typeof window.Auth?.isLocalMode === 'function'
-    && window.Auth.isLocalMode() === true;
-}
-
-function namespacedKey(key) {
-  const raw = String(key ?? '');
-  if (!guestNamespaceEnabled() || !raw || AUTH_SESSION_KEYS.has(raw)) return raw;
-  return raw.startsWith(GUEST_PREFIX) ? raw : `${GUEST_PREFIX}${raw}`;
-}
-
-/** 对外只暴露「当前命名空间可见」的键：游客看不到管理员键，反之亦然 */
-function visibleStorageKeys() {
-  if (!RAW_LOCAL_STORAGE) return [];
-  const keys = [];
-  for (let i = 0; i < RAW_LOCAL_STORAGE.length; i += 1) {
-    const raw = RAW_LOCAL_STORAGE.key(i);
-    if (!raw) continue;
-    const guest = raw.startsWith(GUEST_PREFIX);
-    if (guestNamespaceEnabled()) {
-      if (guest) keys.push(raw.slice(GUEST_PREFIX.length));
-      else if (AUTH_SESSION_KEYS.has(raw)) keys.push(raw);
-    } else if (!guest || AUTH_SESSION_KEYS.has(raw)) {
-      keys.push(raw);
-    }
-  }
-  return keys;
-}
-
-const localStorage = {
-  get length() { return visibleStorageKeys().length; },
-  key(index) { return visibleStorageKeys()[Number(index)] ?? null; },
-  getItem(key) {
-    if (!RAW_LOCAL_STORAGE) return null;
-    return RAW_LOCAL_STORAGE.getItem(namespacedKey(key));
-  },
-  setItem(key, value) {
-    if (!RAW_LOCAL_STORAGE) return;
-    RAW_LOCAL_STORAGE.setItem(namespacedKey(key), value);
-  },
-  removeItem(key) {
-    if (!RAW_LOCAL_STORAGE) return;
-    RAW_LOCAL_STORAGE.removeItem(namespacedKey(key));
-  },
-  clear() {
-    /* 只清当前命名空间；管理员数据 / 游客数据互不影响。
-       控制台的 nukeAllStorage() 直接调 RAW_LOCAL_STORAGE.clear() 做全量清空。 */
-    visibleStorageKeys().forEach(key => {
-      RAW_LOCAL_STORAGE.removeItem(namespacedKey(key));
-    });
-  },
-};
-
-if (typeof window !== 'undefined') {
-  window.StoreStorageNS = {
-    enabled: guestNamespaceEnabled,
-    key: namespacedKey,
-    prefix: GUEST_PREFIX,
-  };
-}
-
 // 仅需知道键名；表结构与落库方式由服务端决定
 const STORE_KEYS = [
   // ⛔ pe_students 已彻底退役：学生信息模块已删除，名册由体测记录派生。
@@ -282,10 +204,7 @@ const VIEW_PIN_TTL_MS = 30 * 60 * 1000;
 /** 视图优先级锁生效期间挂上的后台推送暂停原因（online 事件 / 解除锁时释放） */
 const VIEW_PIN_PUSH_HOLD = '视图优先级锁：等待用户确认';
 /** 管理员登录凭据：hardResetAll() 默认保留，传 { includeAuth: true } 才一起清 */
-const HARD_RESET_AUTH_KEYS = [
-  'isAdmin', 'pe_admin_password',
-  'isLocalMode', 'canUseAI', 'pe_public_mode', 'pe_public_ai_token',
-];
+const HARD_RESET_AUTH_KEYS = ['isAdmin', 'pe_admin_password'];
 /** 兜底前缀（pe_ / sportsMeet*）覆盖不到的零散键 */
 const HARD_RESET_MISC_KEYS = ['meetPurgeNotice'];
 /**
@@ -651,17 +570,8 @@ const Store = {
     }
   },
 
-  /* ---------------- 公开离线版（纯本地 / 本地畅玩） ---------------- */
-
-  /** 公开版本地模式：数据 100% 留在本机，任何 /api/data 请求都不发 */
-  isPublicLocalMode() {
-    return typeof window !== 'undefined'
-      && typeof window.Auth?.isLocalMode === 'function'
-      && window.Auth.isLocalMode() === true;
-  },
-
   /**
-   * ⛔ 立刻停掉全部后台发包定时器（401/403 / 游客本地模式）。
+   * ⛔ 立刻停掉全部后台发包定时器（401/403 鉴权失败）。
    *
    * 线上卡顿的典型来源：服务端明确回了 401/403（没权限），但前端还在按
    * 1.2s / 1.5s / 3s 的节奏疯狂重试、重连、补推 —— 密码错了重试一百次也不会变对。
@@ -1117,7 +1027,7 @@ const Store = {
     /* ⚡ 事件驱动补同步：没有 setInterval 心跳；断开后主要靠「用户回到这个窗口」补一次，
        比盲目的 8 秒轮询省得多，也避免 Vercel 冷启动期间一直打后端。 */
     window.addEventListener('focus', () => {
-      if (this._authBlocked || this.isPublicLocalMode() || this.isQuietLocalMode()) return;
+      if (this._authBlocked || this.isQuietLocalMode()) return;
       if (this.cloudState !== 'off' || this.syncing) return;
       const now = Date.now();
       if (now - (this._lastFocusSyncAt || 0) < FOCUS_SYNC_MIN_GAP_MS) return;
@@ -1133,8 +1043,6 @@ const Store = {
   async sync({ attempts = MAX_SYNC_ATTEMPTS } = {}) {
     /* ⛔ 401/403 熔断中：一个字节都不发，等重新登录（clearAuthBlock） */
     if (this._authBlocked) return { ok: false, changed: [], reason: 'auth-blocked' };
-    // 🏠 公开离线版：一个 /api/data GET 都不发，安静用 guest_ 命名空间的本地缓存
-    if (this.isPublicLocalMode()) return { ok: true, changed: [], reason: 'public-local' };
     // 🤫 静默本地模式：一个 GET 都不发，安静用本地缓存
     if (this.isQuietLocalMode()) return { ok: false, changed: [], reason: 'quiet' };
     if (this.isGenerating()) {
@@ -1213,23 +1121,8 @@ const Store = {
        ② 已登录 → 自动带上 X-Admin-Password 请求头。 */
     let guarded = options;
     const method = String(options?.method || 'GET').toUpperCase();
-    /* 🏠 公开离线版：/api/data 一次都不发，直接从内存返回"本地模式跳过" */
-    if (this.isPublicLocalMode() && String(url).includes('/api/data')) {
-      return Promise.resolve({ ok: true, mode: 'local', skipped: true, data: null, report: [] });
-    }
-    /* 🪪 AI 路由走公开体验票（纯本地模式没有票就直接拦下） */
-    let publicAI = false;
-    if (typeof window !== 'undefined' && window.Auth?.isAICall?.(url)) {
-      publicAI = true;
-      try {
-        const withTicket = window.Auth.withPublicAIHeader(guarded, url);
-        if (withTicket) guarded = withTicket;
-      } catch (error) {
-        return Promise.reject(error);
-      }
-    }
-    if (!publicAI && method !== 'GET' && method !== 'HEAD' && typeof window !== 'undefined' && window.Auth) {
-      if (!String(url).includes('/api/admin') && !String(url).includes('/api/public-auth')) {
+    if (method !== 'GET' && method !== 'HEAD' && typeof window !== 'undefined' && window.Auth) {
+      if (!String(url).includes('/api/admin')) {
         if (!window.Auth.isAdmin() || !window.Auth.getPassword()) {
           // ⚠️ 只给 3 秒轻提示，绝不自动弹登录框（自动弹窗会打断浏览）
           if (typeof window.Auth.notifyGuest === 'function') window.Auth.notifyGuest();
@@ -1371,8 +1264,6 @@ const Store = {
   /** 单次同步：失败一律 throw，由 _syncWithRetry 负责重试与降级 */
   async _syncOnce({ timeout = REQUEST_TIMEOUT } = {}) {
     if (this._authBlocked) return { ok: false, changed: [], reason: 'auth-blocked' };
-    // 🏠 公开离线版：绝不允许云端数据把本机 guest_ 数据冲掉
-    if (this.isPublicLocalMode()) return { ok: true, changed: [], reason: 'public-local' };
     // 🤫 静默本地模式：一个 GET 都不发，安静用本地缓存
     if (this.isQuietLocalMode()) return { ok: false, changed: [], reason: 'quiet' };
     // ⏸ 生成期间：连 GET 都不发 —— 云端旧数据一点机会都没有
@@ -1528,12 +1419,8 @@ const Store = {
 
   /** 判定未连接后定时重连（最多 MAX_RECONNECT 次），网络恢复后自动用云端数据覆盖本地 */
   _scheduleReconnect() {
-    /* ⛔ 401/403 熔断中 / 游客本地模式：绝不排重连定时器（线上疯狂发包的主因） */
+    /* ⛔ 401/403 熔断中：绝不排重连定时器（线上疯狂发包的主因） */
     if (this._authBlocked) return;
-    if (this.isPublicLocalMode()) {
-      if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
-      return;
-    }
     if (this.isQuietLocalMode()) return;   // 🤫 静默期间别排重连，否则 8 秒后又来一次超时
     if (typeof window === 'undefined' || this._reconnectTimer) return;
     if (this._reconnectAttempts >= MAX_RECONNECT) return;
@@ -3001,8 +2888,6 @@ const Store = {
    *    唯一例外 options.allowEmpty —— 用户在界面上亲手点的清空 / 删除（clearIntent / force）。
    */
   async _persist(key, value, options = {}) {
-    /* 🏠 公开离线版：数据已经由 write() 落在 guest_ 命名空间，绝不发 POST /api/data */
-    if (this.isPublicLocalMode()) return false;
     /* 🗑️ 已退役键的【最后一道铁闸】：哪怕有一条老锁被恢复成待补推，
        走到这里也绝不发出 POST /api/data，并顺手把本地残留再清一次。 */
     if (this.isRetiredKey(key)) {
@@ -3079,8 +2964,6 @@ const Store = {
    * 自动同步、补推、修复流程【一律】不许调用。
    */
   async _persistClear(key) {
-    /* 🏠 公开离线版：云端没有任何可清的行，本地清空即可 */
-    if (this.isPublicLocalMode()) return false;
     /* 🗑️ 已退役键云端根本没有对应入口，绝不能发 DELETE 请求 */
     if (this.isRetiredKey(key)) {
       this._purgeRetiredLocalKey(key);
@@ -3783,9 +3666,9 @@ const Store = {
     const pre = this.hardResetAll({ reload: false, includeAuth: true, reason: `${reason}（预清理）` });
     let cleared = 0;
     try {
-      if (RAW_LOCAL_STORAGE) {
-        cleared = RAW_LOCAL_STORAGE.length;
-        RAW_LOCAL_STORAGE.clear();
+      if (typeof localStorage !== 'undefined' && localStorage) {
+        cleared = localStorage.length;
+        localStorage.clear();
       }
     } catch (error) {
       console.warn('[Store] 💥 localStorage.clear() 失败（可能是隐私模式）', error);
@@ -3805,10 +3688,10 @@ const Store = {
     return { ok: true, clearedKeys: cleared, preCleared: pre.removedKeys.length, willReload: Boolean(canReload) };
   },
 
-  /** 🗑️ 顶栏【清空本机数据】：只清当前命名空间（游客清 guest_，管理员清原键） */
+  /** 🗑️ 清空本机业务数据（保留登录凭据） */
   clearLocalData(options = {}) {
     const { reload = true, confirmFirst = true } = options || {};
-    const scope = this.isPublicLocalMode() ? '游客本机数据' : '本机数据';
+    const scope = '本机数据';
     if (confirmFirst && typeof window !== 'undefined'
         && typeof window.confirm === 'function'
         && !window.confirm(`确定要清空${scope}吗？此操作不可撤销（云端数据不受影响）。`)) {
@@ -3845,7 +3728,7 @@ const Store = {
     });
     const payload = {
       app: '体育教师工作台',
-      scope: this.isPublicLocalMode() ? 'guest-local' : 'admin-local',
+      scope: 'admin-local',
       exportedAt: new Date().toISOString(),
       keys: Object.keys(data).length,
       data,
@@ -3928,7 +3811,6 @@ const Store = {
   /** 后台上传是否被暂停：返回原因字符串（空串 = 可以发 POST） */
   _backgroundPushBlocked() {
     if (this._authBlocked) return `鉴权失败已熔断（${this._authBlockReason}），等待重新登录`;
-    if (this.isPublicLocalMode()) return '公开本地模式：数据只留本机，不上云';
     if (this._cloudPaused) return '云端同步已暂停';
     if (this.isGenerating()) return '大单元生成中';
     if (this._backgroundSyncHolds.size) return `后台上传已暂停（${[...this._backgroundSyncHolds].join('、')}）`;

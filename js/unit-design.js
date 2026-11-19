@@ -1433,7 +1433,12 @@ async function requestUnitStage(stage, selection, context = null, extra = {}, op
   try {
     response = await fetch('/api/ai', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        /* 删掉全局 fetch 拦截器后，管理员密码必须在这里显式带上 */
+        ...(typeof Auth !== 'undefined' && Auth.getPassword()
+          ? { 'X-Admin-Password': Auth.getPassword() } : {}),
+      },
       body: JSON.stringify({
         type: 'unit',
         stage,
